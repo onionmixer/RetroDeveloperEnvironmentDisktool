@@ -25,7 +25,9 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 |--------|-----------|-------------|
 | DSK | .dsk | Raw sector dump (720KB/360KB) |
 | DMK | .dmk | DMK format with IDAM tables |
-| XSA | .xsa | XSA compressed format |
+| XSA | .xsa | XSA compressed format (read-only) |
+
+> **Note**: XSA format is read-only. To modify an XSA disk image, convert it to DSK format first using the `convert` command.
 
 ## Supported File Systems
 
@@ -173,6 +175,25 @@ rdedisktool add game.dsk ./patch.bin PATCH.BIN
 rdedisktool delete game.dsk OLD.COM
 ```
 
+### Working with XSA Compressed Disks
+
+```bash
+# View XSA disk information
+rdedisktool info game.xsa
+
+# List files in XSA disk
+rdedisktool list game.xsa
+
+# Extract a file from XSA disk
+rdedisktool extract game.xsa GAME.COM ./game.com
+
+# Convert XSA to DSK for editing
+rdedisktool convert game.xsa game.dsk
+
+# Convert XSA to DMK format
+rdedisktool convert game.xsa game.dmk
+```
+
 ### Working with Apple II Disks
 
 ```bash
@@ -213,6 +234,27 @@ rdedisktool add appleii.do ./newprog.bin NEWPROG
   - **Seedling**: Files ≤ 512 bytes (1 data block)
   - **Sapling**: Files ≤ 128KB (1 index block + up to 256 data blocks)
   - **Tree**: Files ≤ 16MB (1 master index + 256 index blocks)
+
+### XSA Compressed Format
+XSA (eXtendable Storage Archive) is a compressed disk image format developed by XelaSoft for MSX computers in 1994.
+
+**File Structure:**
+- Magic number: `PCK\x08` (4 bytes)
+- Original data length (4 bytes, little-endian)
+- Compressed data length (4 bytes, skipped)
+- Original filename (null-terminated string)
+- Compressed data stream
+
+**Compression Algorithm:**
+- LZ77-based compression with adaptive Huffman coding
+- Maximum match length: 254 bytes
+- Maximum back-reference distance: 16,384 bytes
+- Huffman table rebuilt every 127 distance codes
+
+**Supported Operations:**
+- Read: Full support (decompression on load)
+- Write: Not supported (use DSK/DMK for editing)
+- Convert: Can convert to DSK or DMK format
 
 ## License
 

@@ -50,6 +50,8 @@ set(MSX_SOURCES
     src/msx/MSXDiskImage.cpp
     src/msx/MSXDSKImage.cpp
     src/msx/MSXDMKImage.cpp
+    src/msx/MSXXSAImage.cpp
+    src/msx/XSAExtractor.cpp
     src/msx/MFMEncoder.cpp
 )
 

@@ -66,6 +66,12 @@ DiskFormat DiskImageFactory::detectFormat(const std::vector<uint8_t>& data,
         return dmkFormat;
     }
 
+    // Try XSA format (has magic number "PCK\x08")
+    DiskFormat xsaFormat = detectXSAFormat(data);
+    if (xsaFormat != DiskFormat::Unknown) {
+        return xsaFormat;
+    }
+
     // Detect based on extension and size
     std::string ext = extension;
     std::transform(ext.begin(), ext.end(), ext.begin(),
@@ -211,6 +217,20 @@ DiskFormat DiskImageFactory::detectDMKFormat(const std::vector<uint8_t>& data) {
     size_t expectedSize = 16 + (numTracks * trackLength);
     if (data.size() >= expectedSize) {
         return DiskFormat::MSXDMK;
+    }
+
+    return DiskFormat::Unknown;
+}
+
+DiskFormat DiskImageFactory::detectXSAFormat(const std::vector<uint8_t>& data) {
+    // XSA magic number: "PCK\x08"
+    if (data.size() < 4) {
+        return DiskFormat::Unknown;
+    }
+
+    if (data[0] == 'P' && data[1] == 'C' &&
+        data[2] == 'K' && data[3] == 0x08) {
+        return DiskFormat::MSXXSA;
     }
 
     return DiskFormat::Unknown;

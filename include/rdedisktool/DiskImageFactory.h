@@ -142,6 +142,7 @@ private:
                                       const std::string& extension);
     static DiskFormat detectWOZFormat(const std::vector<uint8_t>& data);
     static DiskFormat detectDMKFormat(const std::vector<uint8_t>& data);
+    static DiskFormat detectXSAFormat(const std::vector<uint8_t>& data);
 
     // Registered format creators
     static std::map<DiskFormat, CreatorFunc>& getCreators();
