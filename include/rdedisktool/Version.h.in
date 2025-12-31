@@ -1,0 +1,31 @@
+#ifndef RDEDISKTOOL_VERSION_H
+#define RDEDISKTOOL_VERSION_H
+
+#define RDEDISKTOOL_NAME        "rdedisktool"
+#define RDEDISKTOOL_FULL_NAME   "Retro Developer Environment Disk Tool"
+#define RDEDISKTOOL_VERSION     "@PROJECT_VERSION@"
+#define RDEDISKTOOL_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define RDEDISKTOOL_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define RDEDISKTOOL_VERSION_PATCH @PROJECT_VERSION_PATCH@
+
+namespace rde {
+
+constexpr const char* getVersionString() {
+    return RDEDISKTOOL_VERSION;
+}
+
+constexpr int getVersionMajor() {
+    return RDEDISKTOOL_VERSION_MAJOR;
+}
+
+constexpr int getVersionMinor() {
+    return RDEDISKTOOL_VERSION_MINOR;
+}
+
+constexpr int getVersionPatch() {
+    return RDEDISKTOOL_VERSION_PATCH;
+}
+
+} // namespace rde
+
+#endif // RDEDISKTOOL_VERSION_H
