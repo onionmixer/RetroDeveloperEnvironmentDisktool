@@ -7,7 +7,7 @@
 #include "rdedisktool/FileSystemHandler.h"
 #include "rdedisktool/filesystem/MSXDOSHandler.h"
 #include "rdedisktool/filesystem/AppleDOS33Handler.h"
-// #include "rdedisktool/filesystem/AppleProDOSHandler.h"
+#include "rdedisktool/filesystem/AppleProDOSHandler.h"
 #include "rdedisktool/DiskImage.h"
 
 namespace rde {
@@ -33,7 +33,17 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::create(DiskImage* disk) {
     if (format == DiskFormat::AppleDO || format == DiskFormat::ApplePO ||
         format == DiskFormat::AppleNIB || format == DiskFormat::AppleWOZ1 ||
         format == DiskFormat::AppleWOZ2) {
-        // Try DOS 3.3 for now (ProDOS not yet implemented)
+        // Detect file system type from disk content
+        FileSystemType fsType = disk->getFileSystemType();
+
+        if (fsType == FileSystemType::ProDOS) {
+            auto prodos = std::make_unique<AppleProDOSHandler>();
+            if (prodos->initialize(disk)) {
+                return prodos;
+            }
+        }
+
+        // Try DOS 3.3 as fallback
         auto dos33 = std::make_unique<AppleDOS33Handler>();
         if (dos33->initialize(disk)) {
             return dos33;
@@ -53,8 +63,8 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::createForType(FileSystemTy
         case FileSystemType::DOS33:
             return std::make_unique<AppleDOS33Handler>();
 
-        // case FileSystemType::ProDOS:
-        //     return std::make_unique<AppleProDOSHandler>();
+        case FileSystemType::ProDOS:
+            return std::make_unique<AppleProDOSHandler>();
 
         default:
             return nullptr;
