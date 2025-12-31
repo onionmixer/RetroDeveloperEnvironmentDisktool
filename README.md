@@ -30,6 +30,7 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 ## Supported File Systems
 
 - **DOS 3.3**: Apple II DOS 3.3 with VTOC-based allocation
+- **ProDOS**: Apple II ProDOS with block-based allocation and subdirectories
 - **MSX-DOS**: FAT12 file system (MSX-DOS 1/2 compatible)
 
 ## Usage
@@ -201,6 +202,17 @@ rdedisktool add appleii.do ./newprog.bin NEWPROG
 - Track 17, Sector 0: VTOC (Volume Table of Contents)
 - Track 17, Sectors 15-1: Catalog (directory)
 - Each file has a Track/Sector list
+
+### Apple ProDOS Structure
+- Block-based (512 bytes per block, 280 blocks on 140KB disk)
+- Blocks 0-1: Boot blocks
+- Block 2+: Volume directory (key block)
+- Block 6: Volume bitmap (block allocation)
+- Subdirectory support with linked directory blocks
+- Three storage types for files:
+  - **Seedling**: Files ≤ 512 bytes (1 data block)
+  - **Sapling**: Files ≤ 128KB (1 index block + up to 256 data blocks)
+  - **Tree**: Files ≤ 16MB (1 master index + 256 index blocks)
 
 ## License
 
