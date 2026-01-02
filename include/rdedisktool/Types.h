@@ -134,6 +134,47 @@ using SectorBuffer = std::vector<uint8_t>;
 // Track buffer type
 using TrackBuffer = std::vector<uint8_t>;
 
+// Validation severity level
+enum class ValidationSeverity {
+    Info,       // Informational
+    Warning,    // Non-critical issue
+    Error       // Critical issue
+};
+
+// Validation issue
+struct ValidationIssue {
+    ValidationSeverity severity = ValidationSeverity::Error;
+    std::string message;
+    std::string location;  // Optional: e.g., "Block 2", "Sector 0/0/1"
+
+    ValidationIssue(ValidationSeverity sev, const std::string& msg,
+                   const std::string& loc = "")
+        : severity(sev), message(msg), location(loc) {}
+};
+
+// Validation result
+struct ValidationResult {
+    bool isValid = true;                       // Overall validity
+    std::vector<ValidationIssue> issues;       // List of issues found
+    size_t errorCount = 0;                     // Number of errors
+    size_t warningCount = 0;                   // Number of warnings
+
+    void addError(const std::string& message, const std::string& location = "") {
+        issues.emplace_back(ValidationSeverity::Error, message, location);
+        ++errorCount;
+        isValid = false;
+    }
+
+    void addWarning(const std::string& message, const std::string& location = "") {
+        issues.emplace_back(ValidationSeverity::Warning, message, location);
+        ++warningCount;
+    }
+
+    void addInfo(const std::string& message, const std::string& location = "") {
+        issues.emplace_back(ValidationSeverity::Info, message, location);
+    }
+};
+
 // Helper functions
 inline const char* platformToString(Platform p) {
     switch (p) {
@@ -170,6 +211,33 @@ inline const char* formatToExtension(DiskFormat f) {
         case DiskFormat::MSXDMK: return ".dmk";
         case DiskFormat::MSXXSA: return ".xsa";
         default: return "";
+    }
+}
+
+inline DiskFormat stringToFormat(const std::string& s) {
+    // Apple II formats
+    if (s == "do" || s == "dos" || s == "appledo") return DiskFormat::AppleDO;
+    if (s == "po" || s == "prodos" || s == "applepo") return DiskFormat::ApplePO;
+    if (s == "nib" || s == "nibble") return DiskFormat::AppleNIB;
+    if (s == "nb2" || s == "nibble2") return DiskFormat::AppleNIB2;
+    if (s == "woz" || s == "woz1") return DiskFormat::AppleWOZ1;
+    if (s == "woz2") return DiskFormat::AppleWOZ2;
+    // MSX formats
+    if (s == "dsk" || s == "msxdsk" || s == "msx") return DiskFormat::MSXDSK;
+    if (s == "dmk" || s == "msxdmk") return DiskFormat::MSXDMK;
+    if (s == "xsa" || s == "msxxsa") return DiskFormat::MSXXSA;
+    return DiskFormat::Unknown;
+}
+
+inline const char* fileSystemTypeToString(FileSystemType f) {
+    switch (f) {
+        case FileSystemType::DOS33: return "DOS 3.3";
+        case FileSystemType::ProDOS: return "ProDOS";
+        case FileSystemType::MSXDOS1: return "MSX-DOS 1";
+        case FileSystemType::MSXDOS2: return "MSX-DOS 2";
+        case FileSystemType::FAT12: return "FAT12";
+        case FileSystemType::FAT16: return "FAT16";
+        default: return "Unknown";
     }
 }
 

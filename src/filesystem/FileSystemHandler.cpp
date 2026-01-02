@@ -21,7 +21,8 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::create(DiskImage* disk) {
     DiskFormat format = disk->getFormat();
 
     // MSX disk formats
-    if (format == DiskFormat::MSXDSK || format == DiskFormat::MSXDMK) {
+    if (format == DiskFormat::MSXDSK || format == DiskFormat::MSXDMK ||
+        format == DiskFormat::MSXXSA) {
         auto handler = std::make_unique<MSXDOSHandler>();
         if (handler->initialize(disk)) {
             return handler;
@@ -51,6 +52,12 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::create(DiskImage* disk) {
     }
 
     return nullptr;
+}
+
+ValidationResult FileSystemHandler::validateExtended() const {
+    ValidationResult result;
+    result.addInfo("Basic validation passed (no extended validation available for this filesystem)");
+    return result;
 }
 
 std::unique_ptr<FileSystemHandler> FileSystemHandler::createForType(FileSystemType type) {

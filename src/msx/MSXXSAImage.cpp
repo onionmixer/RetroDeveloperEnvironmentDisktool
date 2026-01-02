@@ -2,6 +2,7 @@
 #include "rdedisktool/msx/MSXDSKImage.h"
 #include "rdedisktool/msx/MSXDMKImage.h"
 #include "rdedisktool/msx/XSAExtractor.h"
+#include "rdedisktool/msx/XSACompressor.h"
 #include "rdedisktool/DiskImageFactory.h"
 #include <fstream>
 #include <sstream>
@@ -22,7 +23,7 @@ namespace {
 }
 
 MSXXSAImage::MSXXSAImage() : MSXDiskImage() {
-    m_writeProtected = true;  // XSA is always read-only
+    m_writeProtected = true;  // XSA is read-only format
 }
 
 void MSXXSAImage::load(const std::filesystem::path& path) {
@@ -81,12 +82,41 @@ void MSXXSAImage::load(const std::filesystem::path& path) {
 
     m_modified = false;
     m_fileSystemDetected = false;
-    m_writeProtected = true;  // Always read-only
 }
 
-void MSXXSAImage::save(const std::filesystem::path& /*path*/) {
-    // XSA format is read-only. Use convertTo(DiskFormat::MSXDSK) to save.
-    throw WriteProtectedException();
+void MSXXSAImage::save(const std::filesystem::path& path) {
+    std::filesystem::path savePath = path.empty() ? m_filePath : path;
+
+    if (savePath.empty()) {
+        throw WriteException("No path specified for save");
+    }
+
+    // Determine the original filename for XSA header
+    std::string origFilename = m_originalFilename;
+    if (origFilename.empty()) {
+        origFilename = savePath.stem().string() + ".dsk";
+    }
+
+    // Compress the data
+    XSACompressor compressor(origFilename);
+    std::vector<uint8_t> compressedData = compressor.compress(m_data);
+
+    // Write to file
+    std::ofstream file(savePath, std::ios::binary);
+    if (!file) {
+        throw WriteException("Cannot open file for writing: " + savePath.string());
+    }
+
+    file.write(reinterpret_cast<const char*>(compressedData.data()),
+               compressedData.size());
+
+    if (!file) {
+        throw WriteException("Failed to write file: " + savePath.string());
+    }
+
+    m_filePath = savePath;
+    m_compressedSize = compressedData.size();
+    m_modified = false;
 }
 
 void MSXXSAImage::create(const DiskGeometry& /*geometry*/) {
@@ -95,7 +125,7 @@ void MSXXSAImage::create(const DiskGeometry& /*geometry*/) {
 }
 
 void MSXXSAImage::setWriteProtected(bool /*protect*/) {
-    // XSA is always write-protected, ignore the setting
+    // XSA is always read-only, ignore attempts to change
     m_writeProtected = true;
 }
 
@@ -121,6 +151,7 @@ SectorBuffer MSXXSAImage::readSector(size_t track, size_t side, size_t sector) {
 
 void MSXXSAImage::writeSector(size_t /*track*/, size_t /*side*/, size_t /*sector*/,
                               const SectorBuffer& /*data*/) {
+    // XSA is always read-only
     throw WriteProtectedException();
 }
 
@@ -142,6 +173,7 @@ TrackBuffer MSXXSAImage::readTrack(size_t track, size_t side) {
 
 void MSXXSAImage::writeTrack(size_t /*track*/, size_t /*side*/,
                              const TrackBuffer& /*data*/) {
+    // XSA is always read-only
     throw WriteProtectedException();
 }
 
@@ -274,6 +306,37 @@ std::string MSXXSAImage::getDiagnostics() const {
 
 bool MSXXSAImage::isXSAFormat(const std::vector<uint8_t>& data) {
     return XSAExtractor::isXSAFormat(data);
+}
+
+std::unique_ptr<MSXXSAImage> MSXXSAImage::createFromRawData(
+    const std::vector<uint8_t>& rawData,
+    const std::string& originalFilename) {
+
+    auto image = std::make_unique<MSXXSAImage>();
+
+    // Copy raw data
+    image->m_data = rawData;
+    image->m_originalFilename = originalFilename;
+
+    // Detect geometry from raw data
+    image->detectGeometry();
+
+    image->m_modified = false;
+    image->m_compressedSize = 0;  // Will be set on save
+
+    return image;
+}
+
+std::vector<uint8_t> MSXXSAImage::getCompressedData() const {
+    // Determine the original filename for XSA header
+    std::string origFilename = m_originalFilename;
+    if (origFilename.empty()) {
+        origFilename = "disk.dsk";
+    }
+
+    // Compress the data
+    XSACompressor compressor(origFilename);
+    return compressor.compress(m_data);
 }
 
 } // namespace rde

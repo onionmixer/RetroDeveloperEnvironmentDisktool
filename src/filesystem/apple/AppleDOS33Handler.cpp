@@ -106,15 +106,16 @@ std::vector<uint8_t> AppleDOS33Handler::readSector(size_t track, size_t sector) 
     if (!m_disk) {
         return {};
     }
-    // DOS 3.3 uses 0-based sector numbers
-    return m_disk->readSector(track, 0, sector + 1);
+    // DOS 3.3 and Apple II disk images use 0-based sector numbers
+    return m_disk->readSector(track, 0, sector);
 }
 
 void AppleDOS33Handler::writeSector(size_t track, size_t sector, const std::vector<uint8_t>& data) {
     if (!m_disk) {
         return;
     }
-    m_disk->writeSector(track, 0, sector + 1, data);
+    // DOS 3.3 and Apple II disk images use 0-based sector numbers
+    m_disk->writeSector(track, 0, sector, data);
 }
 
 std::vector<AppleDOS33Handler::CatalogEntry> AppleDOS33Handler::readCatalog() const {
@@ -189,8 +190,8 @@ int AppleDOS33Handler::findCatalogEntry(const std::string& filename) const {
 
     auto entries = readCatalog();
     for (size_t i = 0; i < entries.size(); ++i) {
-        // Skip deleted entries
-        if (static_cast<uint8_t>(entries[i].filename[0]) == FLAG_DELETED) {
+        // Skip deleted entries (DOS 3.3: trackSectorListTrack is set to 0xFF)
+        if (entries[i].trackSectorListTrack == FLAG_DELETED) {
             continue;
         }
 
@@ -421,7 +422,8 @@ FileEntry AppleDOS33Handler::catalogEntryToFileEntry(const CatalogEntry& entry) 
     fe.size = entry.sectorCount * SECTOR_SIZE;
     fe.fileType = entry.fileType & 0x7F;
     fe.isDirectory = false;
-    fe.isDeleted = (static_cast<uint8_t>(entry.filename[0]) == FLAG_DELETED);
+    // DOS 3.3: Entry is deleted when trackSectorListTrack is 0xFF
+    fe.isDeleted = (entry.trackSectorListTrack == FLAG_DELETED);
     fe.attributes = entry.fileType;
 
     return fe;
@@ -432,8 +434,8 @@ std::vector<FileEntry> AppleDOS33Handler::listFiles(const std::string& /*path*/)
     auto entries = readCatalog();
 
     for (const auto& entry : entries) {
-        // Skip deleted entries
-        if (static_cast<uint8_t>(entry.filename[0]) == FLAG_DELETED) {
+        // Skip deleted entries (DOS 3.3: trackSectorListTrack is set to 0xFF)
+        if (entry.trackSectorListTrack == FLAG_DELETED) {
             continue;
         }
         // Skip empty entries
@@ -468,12 +470,54 @@ std::vector<uint8_t> AppleDOS33Handler::readFile(const std::string& filename) {
         data.insert(data.end(), sectorData.begin(), sectorData.end());
     }
 
-    // For binary files, first 2 bytes are address, next 2 are length
-    if ((entry.fileType & 0x7F) == FILETYPE_BINARY && data.size() >= 4) {
-        uint16_t length = data[2] | (static_cast<uint16_t>(data[3]) << 8);
-        if (length + 4 <= data.size()) {
-            data.resize(length + 4);
-        }
+    // Calculate actual file size based on file type
+    uint8_t fileType = entry.fileType & 0x7F;
+
+    switch (fileType) {
+        case FILETYPE_BINARY:
+            // Binary files: first 2 bytes are address, next 2 are length
+            if (data.size() >= 4) {
+                uint16_t length = data[2] | (static_cast<uint16_t>(data[3]) << 8);
+                // Validate that the length is reasonable (not larger than data minus header)
+                if (length > 0 && static_cast<size_t>(length) + 4 <= data.size()) {
+                    data.resize(static_cast<size_t>(length) + 4);
+                } else {
+                    // Invalid binary header - fall back to trimming nulls
+                    size_t actualEnd = data.size();
+                    while (actualEnd > 0 && data[actualEnd - 1] == 0x00) {
+                        actualEnd--;
+                    }
+                    if (actualEnd < data.size()) {
+                        data.resize(actualEnd);
+                    }
+                }
+            }
+            break;
+
+        case FILETYPE_APPLESOFT:
+        case FILETYPE_INTEGER:
+            // BASIC files: first 2 bytes are length
+            if (data.size() >= 2) {
+                uint16_t length = data[0] | (static_cast<uint16_t>(data[1]) << 8);
+                if (static_cast<size_t>(length) + 2 <= data.size()) {
+                    data.resize(static_cast<size_t>(length) + 2);
+                }
+            }
+            break;
+
+        case FILETYPE_TEXT:
+        default:
+            // Text and other files: trim trailing nulls
+            {
+                size_t actualEnd = data.size();
+                while (actualEnd > 0 && data[actualEnd - 1] == 0x00) {
+                    actualEnd--;
+                }
+                if (actualEnd < data.size()) {
+                    data.resize(actualEnd);
+                }
+            }
+            break;
     }
 
     return data;
@@ -548,16 +592,17 @@ bool AppleDOS33Handler::writeFile(const std::string& filename,
         for (size_t i = 0; i < ENTRIES_PER_SECTOR; ++i) {
             size_t entryOffset = 0x0B + (i * DIR_ENTRY_SIZE);
             uint8_t tsTrack = sectorData[entryOffset];
-            uint8_t firstChar = sectorData[entryOffset + 3];
 
-            // Check for free or deleted entry
-            if (tsTrack == 0 || firstChar == FLAG_DELETED) {
+            // Check for free (tsTrack == 0) or deleted (tsTrack == 0xFF) entry
+            if (tsTrack == 0 || tsTrack == FLAG_DELETED) {
                 CatalogEntry newEntry;
                 newEntry.trackSectorListTrack = tsListSector.track;
                 newEntry.trackSectorListSector = tsListSector.sector;
                 newEntry.fileType = metadata.fileType != 0 ? metadata.fileType : FILETYPE_BINARY;
                 parseFilename(filename, newEntry.filename);
-                newEntry.sectorCount = static_cast<uint16_t>(sectorsNeeded + 1); // +1 for T/S list
+                // Calculate T/S list sectors: each can hold 122 data sector pairs
+                size_t tsListSectors = (sectorsNeeded + 121) / 122;
+                newEntry.sectorCount = static_cast<uint16_t>(sectorsNeeded + tsListSectors);
 
                 writeCatalogEntry(catTrack, catSector, i, newEntry);
                 entryWritten = true;
@@ -641,10 +686,13 @@ bool AppleDOS33Handler::deleteFile(const std::string& filename) {
         for (size_t i = 0; i < ENTRIES_PER_SECTOR; ++i) {
             if (entryCount == index) {
                 // Found the entry - mark as deleted
+                // DOS 3.3 standard deletion:
+                // - offset+0 (T/S list track): Set to 0xFF to mark as deleted
+                // - offset+3 (first char of filename): Store original T/S track for recovery
                 size_t offset = 0x0B + (i * DIR_ENTRY_SIZE);
-                sectorData[offset + 3] = FLAG_DELETED;  // First char of filename
-                // Store original first track in track byte
-                sectorData[offset] = entry.trackSectorListTrack;
+                sectorData[offset + 3] = entry.trackSectorListTrack;  // Save T/S track for recovery
+                sectorData[offset] = FLAG_DELETED;  // Mark entry as deleted (0xFF)
+                sectorData[offset + 1] = 0;  // Clear T/S list sector
                 writeSector(catTrack, catSector, sectorData);
 
                 // Write updated VTOC
@@ -786,6 +834,211 @@ std::string AppleDOS33Handler::getVolumeName() const {
     // DOS 3.3 doesn't have a volume name in the traditional sense
     // Return the volume number as a string
     return "DISK VOLUME " + std::to_string(m_vtoc.volumeNumber);
+}
+
+ValidationResult AppleDOS33Handler::validateExtended() const {
+    ValidationResult result;
+
+    if (!m_disk) {
+        result.addError("Disk image not loaded");
+        return result;
+    }
+
+    // 1. Validate VTOC structure
+    if (m_vtoc.tracksPerDisk == 0 || m_vtoc.tracksPerDisk > MAX_TRACKS) {
+        result.addError("Invalid tracks per disk: " + std::to_string(m_vtoc.tracksPerDisk), "VTOC");
+    }
+
+    if (m_vtoc.sectorsPerTrack == 0 || m_vtoc.sectorsPerTrack > SECTORS_PER_TRACK) {
+        result.addError("Invalid sectors per track: " + std::to_string(m_vtoc.sectorsPerTrack), "VTOC");
+    }
+
+    if (m_vtoc.bytesPerSector != SECTOR_SIZE) {
+        result.addWarning("Non-standard bytes per sector: " + std::to_string(m_vtoc.bytesPerSector), "VTOC");
+    }
+
+    if (m_vtoc.firstCatalogTrack >= m_vtoc.tracksPerDisk) {
+        result.addError("First catalog track out of range: " + std::to_string(m_vtoc.firstCatalogTrack), "VTOC");
+    }
+
+    if (m_vtoc.firstCatalogSector >= m_vtoc.sectorsPerTrack) {
+        result.addError("First catalog sector out of range: " + std::to_string(m_vtoc.firstCatalogSector), "VTOC");
+    }
+
+    // 2. Validate catalog chain and track used sectors
+    std::vector<std::vector<bool>> usedSectors(m_vtoc.tracksPerDisk,
+                                                std::vector<bool>(m_vtoc.sectorsPerTrack, false));
+
+    // Mark Track 0 as used (boot sectors)
+    for (size_t s = 0; s < m_vtoc.sectorsPerTrack; ++s) {
+        usedSectors[0][s] = true;
+    }
+
+    // Mark VTOC sector as used
+    usedSectors[VTOC_TRACK][VTOC_SECTOR] = true;
+
+    // Validate catalog chain
+    uint8_t catTrack = m_vtoc.firstCatalogTrack;
+    uint8_t catSector = m_vtoc.firstCatalogSector;
+    size_t catalogSectorCount = 0;
+    const size_t maxCatalogSectors = 15;  // DOS 3.3 uses sectors 15 down to 1
+
+    while ((catTrack != 0 || catSector != 0) && catalogSectorCount < maxCatalogSectors + 1) {
+        if (catTrack >= m_vtoc.tracksPerDisk || catSector >= m_vtoc.sectorsPerTrack) {
+            result.addError("Catalog chain points to invalid sector: T" +
+                           std::to_string(catTrack) + "/S" + std::to_string(catSector), "Catalog");
+            break;
+        }
+
+        if (usedSectors[catTrack][catSector] && catTrack != VTOC_TRACK) {
+            result.addWarning("Catalog sector already marked as used: T" +
+                             std::to_string(catTrack) + "/S" + std::to_string(catSector), "Catalog");
+        }
+        usedSectors[catTrack][catSector] = true;
+        ++catalogSectorCount;
+
+        auto sectorData = readSector(catTrack, catSector);
+        if (sectorData.size() < SECTOR_SIZE) {
+            result.addError("Failed to read catalog sector: T" +
+                           std::to_string(catTrack) + "/S" + std::to_string(catSector), "Catalog");
+            break;
+        }
+
+        catTrack = sectorData[0x01];
+        catSector = sectorData[0x02];
+    }
+
+    if (catalogSectorCount > maxCatalogSectors) {
+        result.addError("Catalog chain too long (possible loop): " +
+                       std::to_string(catalogSectorCount) + " sectors", "Catalog");
+    }
+
+    // 3. Validate each file's T/S list and track sectors
+    auto catalog = readCatalog();
+    size_t fileCount = 0;
+
+    for (const auto& entry : catalog) {
+        // Skip deleted or empty entries
+        if (entry.trackSectorListTrack == 0 && entry.trackSectorListSector == 0) {
+            continue;
+        }
+        if (entry.trackSectorListTrack == FLAG_DELETED) {
+            continue;
+        }
+
+        std::string filename = formatFilename(entry.filename);
+        ++fileCount;
+
+        // Validate T/S list track/sector
+        if (entry.trackSectorListTrack >= m_vtoc.tracksPerDisk ||
+            entry.trackSectorListSector >= m_vtoc.sectorsPerTrack) {
+            result.addError("File has invalid T/S list pointer: T" +
+                           std::to_string(entry.trackSectorListTrack) + "/S" +
+                           std::to_string(entry.trackSectorListSector), filename);
+            continue;
+        }
+
+        // Read and validate T/S list
+        auto tsList = readTSList(entry.trackSectorListTrack, entry.trackSectorListSector);
+        size_t actualSectorCount = 0;
+
+        // Mark T/S list sector as used
+        uint8_t tsTrack = entry.trackSectorListTrack;
+        uint8_t tsSector = entry.trackSectorListSector;
+        size_t tsListCount = 0;
+        const size_t maxTSLists = 128;  // Reasonable limit to detect loops
+
+        while (tsTrack != 0 || tsSector != 0) {
+            if (tsListCount >= maxTSLists) {
+                result.addError("T/S list chain too long (possible loop)", filename);
+                break;
+            }
+
+            if (tsTrack >= m_vtoc.tracksPerDisk || tsSector >= m_vtoc.sectorsPerTrack) {
+                result.addError("T/S list chain points to invalid sector: T" +
+                               std::to_string(tsTrack) + "/S" + std::to_string(tsSector), filename);
+                break;
+            }
+
+            if (usedSectors[tsTrack][tsSector]) {
+                result.addWarning("Sector referenced multiple times: T" +
+                                 std::to_string(tsTrack) + "/S" + std::to_string(tsSector), filename);
+            }
+            usedSectors[tsTrack][tsSector] = true;
+            ++tsListCount;
+
+            auto tsData = readSector(tsTrack, tsSector);
+            if (tsData.size() < SECTOR_SIZE) {
+                result.addError("Failed to read T/S list sector", filename);
+                break;
+            }
+
+            // Next T/S list sector
+            tsTrack = tsData[0x01];
+            tsSector = tsData[0x02];
+        }
+
+        // Validate each data sector in T/S list
+        for (const auto& ts : tsList) {
+            if (ts.track == 0 && ts.sector == 0) {
+                continue;  // Empty slot
+            }
+
+            if (ts.track >= m_vtoc.tracksPerDisk || ts.sector >= m_vtoc.sectorsPerTrack) {
+                result.addError("File references invalid sector: T" +
+                               std::to_string(ts.track) + "/S" + std::to_string(ts.sector), filename);
+                continue;
+            }
+
+            if (usedSectors[ts.track][ts.sector]) {
+                result.addWarning("Data sector referenced multiple times: T" +
+                                 std::to_string(ts.track) + "/S" + std::to_string(ts.sector), filename);
+            }
+            usedSectors[ts.track][ts.sector] = true;
+            ++actualSectorCount;
+        }
+
+        // Compare sector count (DOS 3.3 includes T/S list sectors in count)
+        size_t totalSectorCount = actualSectorCount + tsListCount;
+        if (totalSectorCount != entry.sectorCount) {
+            result.addWarning("Sector count mismatch: catalog says " +
+                             std::to_string(entry.sectorCount) + ", found " +
+                             std::to_string(totalSectorCount) + " (data: " +
+                             std::to_string(actualSectorCount) + ", T/S list: " +
+                             std::to_string(tsListCount) + ")", filename);
+        }
+    }
+
+    // 4. Verify bitmap consistency
+    for (size_t t = 0; t < m_vtoc.tracksPerDisk; ++t) {
+        for (size_t s = 0; s < m_vtoc.sectorsPerTrack; ++s) {
+            bool bitmapSaysFree = isSectorFree(t, s);
+            bool shouldBeFree = !usedSectors[t][s];
+
+            if (bitmapSaysFree && !shouldBeFree) {
+                result.addError("Sector T" + std::to_string(t) + "/S" + std::to_string(s) +
+                               " is used but marked free in bitmap");
+            }
+            // Note: sectors marked used but not found may be orphaned, not necessarily errors
+        }
+    }
+
+    // 5. Verify Track 17 protection (VTOC/Catalog area)
+    for (size_t s = 1; s <= FIRST_CATALOG_SECTOR; ++s) {
+        if (isSectorFree(VTOC_TRACK, s)) {
+            // Catalog sectors should be marked as used
+            result.addWarning("Catalog sector T17/S" + std::to_string(s) +
+                             " is marked free (should be reserved)", "VTOC");
+        }
+    }
+
+    if (result.errorCount == 0 && result.warningCount == 0) {
+        result.addInfo("All validation checks passed");
+    } else {
+        result.addInfo("Found " + std::to_string(fileCount) + " file(s)");
+    }
+
+    return result;
 }
 
 } // namespace rde

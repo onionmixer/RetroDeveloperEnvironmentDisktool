@@ -43,6 +43,7 @@ public:
     bool fileExists(const std::string& filename) const override;
     bool format(const std::string& volumeName = "") override;
     std::string getVolumeName() const override;
+    ValidationResult validateExtended() const override;
 
 private:
     // Constants

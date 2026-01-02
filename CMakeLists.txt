@@ -52,6 +52,7 @@ set(MSX_SOURCES
     src/msx/MSXDMKImage.cpp
     src/msx/MSXXSAImage.cpp
     src/msx/XSAExtractor.cpp
+    src/msx/XSACompressor.cpp
     src/msx/MFMEncoder.cpp
 )
 
@@ -92,7 +93,14 @@ target_include_directories(rdedisktool_lib PUBLIC
 
 # Executable target
 add_executable(rdedisktool ${CLI_SOURCES})
-target_link_libraries(rdedisktool PRIVATE rdedisktool_lib)
+
+# Link with whole-archive to preserve static initializers
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_link_libraries(rdedisktool PRIVATE
+        -Wl,--whole-archive rdedisktool_lib -Wl,--no-whole-archive)
+else()
+    target_link_libraries(rdedisktool PRIVATE rdedisktool_lib)
+endif()
 
 # Installation
 install(TARGETS rdedisktool DESTINATION bin)

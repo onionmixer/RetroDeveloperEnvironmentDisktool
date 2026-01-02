@@ -77,20 +77,22 @@ DiskFormat DiskImageFactory::detectFormat(const std::vector<uint8_t>& data,
     std::transform(ext.begin(), ext.end(), ext.begin(),
                    [](unsigned char c) { return std::tolower(c); });
 
-    // Apple II formats by extension
-    if (ext == ".do" || ext == ".dsk") {
-        return detectAppleFormat(data, ext);
+    size_t fileSize = data.size();
+
+    // Apple II specific extensions (unambiguous)
+    if (ext == ".do") {
+        return DiskFormat::AppleDO;
     }
     if (ext == ".po") {
         return DiskFormat::ApplePO;
     }
     if (ext == ".nib") {
         // NIB files are 232960 bytes (6656 * 35 tracks)
-        if (data.size() == 232960) {
+        if (fileSize == 232960) {
             return DiskFormat::AppleNIB;
         }
         // NB2 variant is 6384 bytes per track
-        if (data.size() == 223440) {
+        if (fileSize == 223440) {
             return DiskFormat::AppleNIB2;
         }
     }
@@ -101,7 +103,7 @@ DiskFormat DiskImageFactory::detectFormat(const std::vector<uint8_t>& data,
         return detectWOZFormat(data);
     }
 
-    // MSX formats by extension
+    // MSX specific extensions (unambiguous)
     if (ext == ".dmk") {
         return DiskFormat::MSXDMK;
     }
@@ -111,8 +113,14 @@ DiskFormat DiskImageFactory::detectFormat(const std::vector<uint8_t>& data,
 
     // For .dsk extension, need to determine if it's Apple II or MSX
     if (ext == ".dsk" || ext.empty()) {
-        // Check size to distinguish
-        size_t fileSize = data.size();
+        // First check MSX standard sizes (more varied than Apple II)
+        if (fileSize == 163840 ||   // 1S 40T 8S (320KB single-sided)
+            fileSize == 184320 ||   // 1S 40T 9S (360KB)
+            fileSize == 327680 ||   // 2S 40T 8S (640KB double-sided)
+            fileSize == 368640 ||   // 2S 40T 9S (720KB)
+            fileSize == 737280) {   // 2S 80T 9S (720KB DS/DD)
+            return detectMSXFormat(data, ext);
+        }
 
         // Apple II standard sizes
         if (fileSize == 143360) {  // 35 tracks * 16 sectors * 256 bytes
@@ -122,14 +130,8 @@ DiskFormat DiskImageFactory::detectFormat(const std::vector<uint8_t>& data,
             return DiskFormat::AppleDO;
         }
 
-        // MSX standard sizes
-        if (fileSize == 163840 ||   // 1S 40T 8S (320KB single-sided)
-            fileSize == 184320 ||   // 1S 40T 9S (360KB)
-            fileSize == 327680 ||   // 2S 40T 8S (640KB double-sided)
-            fileSize == 368640 ||   // 2S 40T 9S (720KB)
-            fileSize == 737280) {   // 2S 80T 9S (1.44MB - actually 720KB DS/DD)
-            return detectMSXFormat(data, ext);
-        }
+        // For non-standard sizes, try content-based detection
+        return detectDSKByContent(data);
     }
 
     return DiskFormat::Unknown;
@@ -231,6 +233,72 @@ DiskFormat DiskImageFactory::detectXSAFormat(const std::vector<uint8_t>& data) {
     if (data[0] == 'P' && data[1] == 'C' &&
         data[2] == 'K' && data[3] == 0x08) {
         return DiskFormat::MSXXSA;
+    }
+
+    return DiskFormat::Unknown;
+}
+
+DiskFormat DiskImageFactory::detectDSKByContent(const std::vector<uint8_t>& data) {
+    // Analyze boot sector content to determine if it's MSX or Apple II
+    if (data.size() < 512) {
+        return DiskFormat::Unknown;
+    }
+
+    // Check for MSX-DOS boot sector signatures
+    // MSX boot sectors typically start with JMP instruction (0xEB xx 0x90 or 0xE9 xx xx)
+    bool hasMSXJump = (data[0] == 0xEB && data[2] == 0x90) ||
+                      (data[0] == 0xE9);
+
+    if (hasMSXJump) {
+        // Check for valid FAT12 BPB (BIOS Parameter Block)
+        uint16_t bytesPerSector = data[0x0B] | (data[0x0C] << 8);
+        uint8_t sectorsPerCluster = data[0x0D];
+        uint8_t numberOfFATs = data[0x10];
+        uint16_t rootEntries = data[0x11] | (data[0x12] << 8);
+
+        // Validate BPB fields for FAT12
+        if (bytesPerSector == 512 &&
+            sectorsPerCluster > 0 && sectorsPerCluster <= 8 &&
+            numberOfFATs >= 1 && numberOfFATs <= 2 &&
+            rootEntries > 0 && rootEntries <= 512) {
+            return DiskFormat::MSXDSK;
+        }
+    }
+
+    // Check for Apple II DOS 3.3 signature
+    // DOS 3.3 VTOC is at track 17, sector 0 (offset 17 * 16 * 256 = 69632)
+    if (data.size() >= 143360) {
+        size_t vtocOffset = 17 * 16 * 256;  // Track 17, Sector 0
+        if (data.size() > vtocOffset + 256) {
+            // VTOC signature: byte 1 = catalog track (usually 17)
+            // byte 2 = catalog sector (usually 15)
+            // byte 3 = DOS version (usually 3)
+            uint8_t catalogTrack = data[vtocOffset + 1];
+            uint8_t catalogSector = data[vtocOffset + 2];
+            uint8_t dosVersion = data[vtocOffset + 3];
+
+            if (catalogTrack == 17 && catalogSector <= 15 && dosVersion == 3) {
+                return DiskFormat::AppleDO;
+            }
+        }
+    }
+
+    // Check for ProDOS signature at block 2 (volume directory)
+    if (data.size() >= 143360) {
+        // In ProDOS order, block 2 is at offset 2 * 512 = 1024
+        // Volume directory header has storage type 0xF0 in first byte
+        size_t blockOffset = 2 * 512;
+        if (data.size() > blockOffset + 4) {
+            uint8_t storageType = (data[blockOffset + 4] >> 4) & 0x0F;
+            if (storageType == 0x0F) {  // Volume header
+                return DiskFormat::ApplePO;
+            }
+        }
+    }
+
+    // Default: if file size matches Apple II size, assume Apple format
+    if (data.size() == 143360) {
+        return DiskFormat::AppleDO;
     }
 
     return DiskFormat::Unknown;

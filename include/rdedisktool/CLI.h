@@ -73,6 +73,16 @@ public:
      */
     bool isVerbose() const { return m_verbose; }
 
+    /**
+     * Set quiet output mode
+     */
+    void setQuiet(bool quiet) { m_quiet = quiet; }
+
+    /**
+     * Check if quiet mode is enabled
+     */
+    bool isQuiet() const { return m_quiet; }
+
 private:
     // Command information structure
     struct CommandInfo {
@@ -86,6 +96,7 @@ private:
 
     // Global options
     bool m_verbose = false;
+    bool m_quiet = false;
 
     // Built-in command handlers
     int cmdInfo(const std::vector<std::string>& args);
@@ -93,6 +104,8 @@ private:
     int cmdExtract(const std::vector<std::string>& args);
     int cmdAdd(const std::vector<std::string>& args);
     int cmdDelete(const std::vector<std::string>& args);
+    int cmdMkdir(const std::vector<std::string>& args);
+    int cmdRmdir(const std::vector<std::string>& args);
     int cmdCreate(const std::vector<std::string>& args);
     int cmdConvert(const std::vector<std::string>& args);
     int cmdDump(const std::vector<std::string>& args);

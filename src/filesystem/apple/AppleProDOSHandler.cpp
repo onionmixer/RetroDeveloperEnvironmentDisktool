@@ -21,6 +21,8 @@
 #include <cstring>
 #include <cctype>
 #include <ctime>
+#include <functional>
+#include <optional>
 
 namespace rde {
 
@@ -391,21 +393,121 @@ bool AppleProDOSHandler::writeDirectoryEntry(uint16_t dirKeyBlock, size_t entryI
 }
 
 int AppleProDOSHandler::findDirectoryEntry(uint16_t dirKeyBlock, const std::string& filename) const {
-    auto entries = readDirectory(dirKeyBlock);
+    // Returns PHYSICAL entry index (counting all slots including deleted ones)
+    // This is critical for writeDirectoryEntry() to work correctly
 
     std::string upperFilename = filename;
     std::transform(upperFilename.begin(), upperFilename.end(), upperFilename.begin(), ::toupper);
 
-    for (size_t i = 0; i < entries.size(); ++i) {
-        std::string entryName = formatFilename(entries[i].filename, entries[i].nameLength);
-        std::transform(entryName.begin(), entryName.end(), entryName.begin(), ::toupper);
+    uint16_t currentBlock = dirKeyBlock;
+    int physicalIndex = 0;
+    bool firstBlock = true;
 
-        if (entryName == upperFilename) {
-            return static_cast<int>(i);
+    while (currentBlock != 0) {
+        auto block = readBlock(currentBlock);
+        if (block.size() < BLOCK_SIZE) {
+            break;
         }
+
+        uint16_t nextBlock = block[2] | (block[3] << 8);
+
+        // First entry in first block is the directory/volume header, skip it
+        size_t startEntry = firstBlock ? 1 : 0;
+
+        for (size_t i = startEntry; i < ENTRIES_PER_BLOCK; ++i) {
+            size_t offset = 4 + (i * DIR_ENTRY_SIZE);
+
+            uint8_t storageAndLength = block[offset];
+            uint8_t storageType = (storageAndLength >> 4) & 0x0F;
+            uint8_t nameLength = storageAndLength & 0x0F;
+
+            // Check if this is a valid (non-deleted) entry with matching name
+            if (storageType != STORAGE_DELETED && nameLength > 0) {
+                if (nameLength > MAX_FILENAME_LENGTH) {
+                    nameLength = MAX_FILENAME_LENGTH;
+                }
+
+                char entryFilename[MAX_FILENAME_LENGTH + 1];
+                std::memcpy(entryFilename, &block[offset + 1], nameLength);
+                entryFilename[nameLength] = '\0';
+
+                std::string entryName(entryFilename, nameLength);
+                std::transform(entryName.begin(), entryName.end(), entryName.begin(), ::toupper);
+
+                if (entryName == upperFilename) {
+                    return physicalIndex;
+                }
+            }
+
+            ++physicalIndex;
+        }
+
+        firstBlock = false;
+        currentBlock = nextBlock;
     }
 
     return -1;
+}
+
+std::optional<AppleProDOSHandler::DirectoryEntry> AppleProDOSHandler::readDirectoryEntryAt(
+    uint16_t dirKeyBlock, size_t physicalIndex) const {
+    // Read a single directory entry at the given physical index
+
+    uint16_t currentBlock = dirKeyBlock;
+    size_t entriesSeen = 0;
+    bool firstBlock = true;
+
+    while (currentBlock != 0) {
+        auto block = readBlock(currentBlock);
+        if (block.size() < BLOCK_SIZE) {
+            return std::nullopt;
+        }
+
+        uint16_t nextBlock = block[2] | (block[3] << 8);
+        size_t startEntry = firstBlock ? 1 : 0;
+
+        for (size_t i = startEntry; i < ENTRIES_PER_BLOCK; ++i) {
+            if (entriesSeen == physicalIndex) {
+                size_t offset = 4 + (i * DIR_ENTRY_SIZE);
+
+                DirectoryEntry entry;
+                std::memset(&entry, 0, sizeof(entry));
+
+                uint8_t storageAndLength = block[offset];
+                entry.storageType = (storageAndLength >> 4) & 0x0F;
+                entry.nameLength = storageAndLength & 0x0F;
+
+                if (entry.nameLength > MAX_FILENAME_LENGTH) {
+                    entry.nameLength = MAX_FILENAME_LENGTH;
+                }
+                std::memcpy(entry.filename, &block[offset + 1], entry.nameLength);
+                entry.filename[entry.nameLength] = '\0';
+
+                entry.fileType = block[offset + 0x10];
+                entry.keyPointer = block[offset + 0x11] | (block[offset + 0x12] << 8);
+                entry.blocksUsed = block[offset + 0x13] | (block[offset + 0x14] << 8);
+                entry.eof = block[offset + 0x15] | (block[offset + 0x16] << 8) |
+                           (block[offset + 0x17] << 16);
+                entry.creationDateTime = block[offset + 0x18] | (block[offset + 0x19] << 8) |
+                                        (block[offset + 0x1A] << 16) | (block[offset + 0x1B] << 24);
+                entry.version = block[offset + 0x1C];
+                entry.minVersion = block[offset + 0x1D];
+                entry.access = block[offset + 0x1E];
+                entry.auxType = block[offset + 0x1F] | (block[offset + 0x20] << 8);
+                entry.lastModDateTime = block[offset + 0x21] | (block[offset + 0x22] << 8) |
+                                       (block[offset + 0x23] << 16) | (block[offset + 0x24] << 24);
+                entry.headerPointer = block[offset + 0x25] | (block[offset + 0x26] << 8);
+
+                return entry;
+            }
+            ++entriesSeen;
+        }
+
+        firstBlock = false;
+        currentBlock = nextBlock;
+    }
+
+    return std::nullopt;
 }
 
 int AppleProDOSHandler::findFreeDirectoryEntry(uint16_t dirKeyBlock) const {
@@ -437,6 +539,42 @@ int AppleProDOSHandler::findFreeDirectoryEntry(uint16_t dirKeyBlock) const {
     }
 
     return -1;  // No free entries
+}
+
+bool AppleProDOSHandler::updateDirectoryFileCount(uint16_t dirKeyBlock, int delta) {
+    if (dirKeyBlock == VOLUME_DIR_BLOCK) {
+        // Update volume header file count
+        if (delta > 0) {
+            m_volumeHeader.fileCount += delta;
+        } else if (delta < 0 && m_volumeHeader.fileCount >= static_cast<uint16_t>(-delta)) {
+            m_volumeHeader.fileCount += delta;
+        }
+        writeVolumeHeader();
+        return true;
+    }
+
+    // Update subdirectory header file count
+    auto block = readBlock(dirKeyBlock);
+    if (block.size() < BLOCK_SIZE) {
+        return false;
+    }
+
+    // Read current file count from subdirectory header (offset 0x25-0x26)
+    uint16_t fileCount = block[0x25] | (block[0x26] << 8);
+
+    // Update file count
+    if (delta > 0) {
+        fileCount += delta;
+    } else if (delta < 0 && fileCount >= static_cast<uint16_t>(-delta)) {
+        fileCount += delta;
+    }
+
+    // Write updated file count
+    block[0x25] = fileCount & 0xFF;
+    block[0x26] = (fileCount >> 8) & 0xFF;
+
+    writeBlock(dirKeyBlock, block);
+    return true;
 }
 
 //=============================================================================
@@ -727,12 +865,13 @@ std::pair<uint16_t, std::string> AppleProDOSHandler::resolvePath(const std::stri
             return {0, ""};  // Directory not found
         }
 
-        auto entries = readDirectory(currentDir);
-        if (entryIndex >= static_cast<int>(entries.size())) {
+        // Read entry at physical index (not from filtered list)
+        auto entryOpt = readDirectoryEntryAt(currentDir, static_cast<size_t>(entryIndex));
+        if (!entryOpt) {
             return {0, ""};
         }
 
-        const auto& entry = entries[entryIndex];
+        const auto& entry = *entryOpt;
         if (!entry.isDirectory()) {
             return {0, ""};  // Not a directory
         }
@@ -889,10 +1028,10 @@ std::vector<FileEntry> AppleProDOSHandler::listFiles(const std::string& path) {
             // Try as a subdirectory
             int entryIndex = findDirectoryEntry(VOLUME_DIR_BLOCK, path);
             if (entryIndex >= 0) {
-                auto entries = readDirectory(VOLUME_DIR_BLOCK);
-                if (entryIndex < static_cast<int>(entries.size()) &&
-                    entries[entryIndex].isDirectory()) {
-                    dirBlock = entries[entryIndex].keyPointer;
+                // Read entry at physical index
+                auto entryOpt = readDirectoryEntryAt(VOLUME_DIR_BLOCK, static_cast<size_t>(entryIndex));
+                if (entryOpt && entryOpt->isDirectory()) {
+                    dirBlock = entryOpt->keyPointer;
                 }
             }
         } else {
@@ -923,12 +1062,13 @@ std::vector<uint8_t> AppleProDOSHandler::readFile(const std::string& filename) {
         throw FileNotFoundException(filename);
     }
 
-    auto entries = readDirectory(dirBlock);
-    if (entryIndex >= static_cast<int>(entries.size())) {
+    // Read entry at physical index (not from filtered list)
+    auto entryOpt = readDirectoryEntryAt(dirBlock, static_cast<size_t>(entryIndex));
+    if (!entryOpt) {
         throw FileNotFoundException(filename);
     }
 
-    const auto& entry = entries[entryIndex];
+    const DirectoryEntry& entry = *entryOpt;
     if (entry.isDirectory()) {
         throw InvalidFormatException("Cannot read directory as file");
     }
@@ -939,14 +1079,16 @@ std::vector<uint8_t> AppleProDOSHandler::readFile(const std::string& filename) {
 bool AppleProDOSHandler::writeFile(const std::string& filename,
                                     const std::vector<uint8_t>& data,
                                     const FileMetadata& metadata) {
-    if (!isValidFilename(filename)) {
-        throw InvalidFilenameException(filename);
-    }
-
+    // First resolve path to get directory and base filename
     auto [dirBlock, name] = resolvePath(filename);
     if (dirBlock == 0 && name.empty()) {
         dirBlock = VOLUME_DIR_BLOCK;
         name = filename;
+    }
+
+    // Validate only the base filename (not the full path)
+    if (!isValidFilename(name)) {
+        throw InvalidFilenameException(name);
     }
 
     // Check if file already exists
@@ -1015,9 +1157,8 @@ bool AppleProDOSHandler::writeFile(const std::string& filename,
         throw WriteException("Failed to write directory entry");
     }
 
-    // Update file count
-    m_volumeHeader.fileCount++;
-    writeVolumeHeader();
+    // Update file count in the parent directory (volume or subdirectory)
+    updateDirectoryFileCount(dirBlock, +1);
 
     // Write bitmap
     writeVolumeBitmap();
@@ -1037,16 +1178,17 @@ bool AppleProDOSHandler::deleteFile(const std::string& filename) {
         return false;
     }
 
-    auto entries = readDirectory(dirBlock);
-    if (entryIndex >= static_cast<int>(entries.size())) {
+    // Read entry at physical index (not from filtered list)
+    auto entryOpt = readDirectoryEntryAt(dirBlock, static_cast<size_t>(entryIndex));
+    if (!entryOpt) {
         return false;
     }
 
-    const auto& entry = entries[entryIndex];
+    const DirectoryEntry& entry = *entryOpt;
 
-    // Don't delete directories (would need recursive delete)
+    // Handle directories via deleteDirectory
     if (entry.isDirectory()) {
-        return false;
+        return deleteDirectory(filename);
     }
 
     // Free file blocks
@@ -1060,11 +1202,8 @@ bool AppleProDOSHandler::deleteFile(const std::string& filename) {
         return false;
     }
 
-    // Update file count
-    if (m_volumeHeader.fileCount > 0) {
-        m_volumeHeader.fileCount--;
-    }
-    writeVolumeHeader();
+    // Update file count in the parent directory (volume or subdirectory)
+    updateDirectoryFileCount(dirBlock, -1);
 
     // Write bitmap
     writeVolumeBitmap();
@@ -1073,7 +1212,15 @@ bool AppleProDOSHandler::deleteFile(const std::string& filename) {
 }
 
 bool AppleProDOSHandler::renameFile(const std::string& oldName, const std::string& newName) {
-    if (!isValidFilename(newName)) {
+    // Resolve new name path first to get base filename
+    auto [newDirBlock, newFileName] = resolvePath(newName);
+    if (newDirBlock == 0 && newFileName.empty()) {
+        newDirBlock = VOLUME_DIR_BLOCK;
+        newFileName = newName;
+    }
+
+    // Validate only the base filename (not the full path)
+    if (!isValidFilename(newFileName)) {
         return false;
     }
 
@@ -1083,13 +1230,7 @@ bool AppleProDOSHandler::renameFile(const std::string& oldName, const std::strin
         name = oldName;
     }
 
-    // Check if new name already exists
-    auto [newDirBlock, newFileName] = resolvePath(newName);
-    if (newDirBlock == 0 && newFileName.empty()) {
-        newDirBlock = VOLUME_DIR_BLOCK;
-        newFileName = newName;
-    }
-
+    // Check if new name already exists (newDirBlock and newFileName already resolved above)
     if (findDirectoryEntry(newDirBlock, newFileName) >= 0) {
         return false;  // New name already exists
     }
@@ -1099,12 +1240,13 @@ bool AppleProDOSHandler::renameFile(const std::string& oldName, const std::strin
         return false;
     }
 
-    auto entries = readDirectory(dirBlock);
-    if (entryIndex >= static_cast<int>(entries.size())) {
+    // Read entry at physical index (not from filtered list)
+    auto entryOpt = readDirectoryEntryAt(dirBlock, static_cast<size_t>(entryIndex));
+    if (!entryOpt) {
         return false;
     }
 
-    DirectoryEntry entry = entries[entryIndex];
+    DirectoryEntry entry = *entryOpt;
     parseFilename(newFileName, entry.filename, entry.nameLength);
     entry.lastModDateTime = packDateTime(std::time(nullptr));
 
@@ -1236,6 +1378,348 @@ bool AppleProDOSHandler::format(const std::string& volumeName) {
 
 std::string AppleProDOSHandler::getVolumeName() const {
     return "/" + formatFilename(m_volumeHeader.name, m_volumeHeader.nameLength);
+}
+
+//=============================================================================
+// Subdirectory Support
+//=============================================================================
+
+bool AppleProDOSHandler::createDirectory(const std::string& path) {
+    // First resolve path to get parent directory and directory name
+    auto [parentBlock, dirName] = resolvePath(path);
+    if (parentBlock == 0 && dirName.empty()) {
+        parentBlock = VOLUME_DIR_BLOCK;
+        dirName = path;
+    }
+
+    // Validate only the directory name (not the full path)
+    if (dirName.empty() || !isValidFilename(dirName)) {
+        return false;
+    }
+
+    // Check if already exists
+    if (findDirectoryEntry(parentBlock, dirName) >= 0) {
+        return false;  // Already exists
+    }
+
+    // Allocate a block for the new subdirectory
+    size_t newDirBlock = allocateBlock();
+    if (newDirBlock == 0) {
+        return false;  // No free blocks
+    }
+
+    // Initialize the subdirectory block
+    std::vector<uint8_t> dirBlock(BLOCK_SIZE, 0);
+
+    // Prev/Next pointers (no linked blocks for now)
+    dirBlock[0] = 0;
+    dirBlock[1] = 0;
+    dirBlock[2] = 0;
+    dirBlock[3] = 0;
+
+    // Subdirectory header entry at offset 4
+    size_t offset = 4;
+    uint8_t nameLen = static_cast<uint8_t>(std::min(dirName.length(), MAX_FILENAME_LENGTH));
+    dirBlock[offset] = (STORAGE_SUBDIR_HEADER << 4) | nameLen;
+
+    // Copy uppercase name
+    for (size_t i = 0; i < nameLen; ++i) {
+        dirBlock[offset + 1 + i] = static_cast<uint8_t>(
+            std::toupper(static_cast<unsigned char>(dirName[i])));
+    }
+
+    // Reserved bytes at 0x14-0x1B
+    // Set creation date/time at 0x1C
+    uint32_t now = packDateTime(std::time(nullptr));
+    dirBlock[0x1C] = now & 0xFF;
+    dirBlock[0x1D] = (now >> 8) & 0xFF;
+    dirBlock[0x1E] = (now >> 16) & 0xFF;
+    dirBlock[0x1F] = (now >> 24) & 0xFF;
+
+    // Version, min version, access
+    dirBlock[0x20] = 0;
+    dirBlock[0x21] = 0;
+    dirBlock[0x22] = ACCESS_DEFAULT;
+
+    // Entry length, entries per block
+    dirBlock[0x23] = DIR_ENTRY_SIZE;
+    dirBlock[0x24] = ENTRIES_PER_BLOCK;
+
+    // File count (initially 0)
+    dirBlock[0x25] = 0;
+    dirBlock[0x26] = 0;
+
+    // Parent pointer (block number)
+    dirBlock[0x27] = parentBlock & 0xFF;
+    dirBlock[0x28] = (parentBlock >> 8) & 0xFF;
+
+    // Parent entry number (will be set after we know it)
+    // For now, set to 0
+    dirBlock[0x29] = 0;
+
+    // Parent entry length
+    dirBlock[0x2A] = DIR_ENTRY_SIZE;
+
+    writeBlock(newDirBlock, dirBlock);
+
+    // Create entry in parent directory
+    int freeEntry = findFreeDirectoryEntry(parentBlock);
+    if (freeEntry < 0) {
+        // No free entries - restore block
+        markBlockFree(newDirBlock);
+        writeVolumeBitmap();
+        return false;
+    }
+
+    DirectoryEntry newEntry;
+    std::memset(&newEntry, 0, sizeof(newEntry));
+    newEntry.storageType = STORAGE_SUBDIRECTORY;
+    parseFilename(dirName, newEntry.filename, newEntry.nameLength);
+    newEntry.fileType = FILETYPE_DIR;
+    newEntry.keyPointer = static_cast<uint16_t>(newDirBlock);
+    newEntry.blocksUsed = 1;
+    newEntry.eof = BLOCK_SIZE;
+    newEntry.creationDateTime = now;
+    newEntry.lastModDateTime = now;
+    newEntry.access = ACCESS_DEFAULT;
+    newEntry.headerPointer = parentBlock;
+
+    if (!writeDirectoryEntry(parentBlock, freeEntry, newEntry)) {
+        markBlockFree(newDirBlock);
+        writeVolumeBitmap();
+        return false;
+    }
+
+    // Update parent entry number in subdirectory header
+    dirBlock[0x29] = static_cast<uint8_t>(freeEntry);
+    writeBlock(newDirBlock, dirBlock);
+
+    // Update file count in the parent directory (volume or subdirectory)
+    updateDirectoryFileCount(parentBlock, +1);
+
+    writeVolumeBitmap();
+    return true;
+}
+
+bool AppleProDOSHandler::deleteDirectory(const std::string& path) {
+    auto [parentBlock, dirName] = resolvePath(path);
+    if (parentBlock == 0 && dirName.empty()) {
+        parentBlock = VOLUME_DIR_BLOCK;
+        dirName = path;
+    }
+
+    if (dirName.empty()) {
+        return false;
+    }
+
+    int entryIndex = findDirectoryEntry(parentBlock, dirName);
+    if (entryIndex < 0) {
+        return false;
+    }
+
+    // Read entry at physical index (not from filtered list)
+    auto entryOpt = readDirectoryEntryAt(parentBlock, static_cast<size_t>(entryIndex));
+    if (!entryOpt) {
+        return false;
+    }
+
+    const DirectoryEntry& entry = *entryOpt;
+
+    // Must be a directory
+    if (!entry.isDirectory()) {
+        return false;
+    }
+
+    // Check if directory is empty
+    auto dirEntries = readDirectory(entry.keyPointer);
+    for (const auto& subEntry : dirEntries) {
+        if (!subEntry.isDeleted() && !subEntry.isSubdirHeader()) {
+            return false;  // Directory not empty
+        }
+    }
+
+    // Free the directory block
+    markBlockFree(entry.keyPointer);
+
+    // Mark directory entry as deleted
+    DirectoryEntry deletedEntry = entry;
+    deletedEntry.storageType = STORAGE_DELETED;
+
+    if (!writeDirectoryEntry(parentBlock, entryIndex, deletedEntry)) {
+        return false;
+    }
+
+    // Update file count in the parent directory (volume or subdirectory)
+    updateDirectoryFileCount(parentBlock, -1);
+
+    writeVolumeBitmap();
+    return true;
+}
+
+ValidationResult AppleProDOSHandler::validateExtended() const {
+    ValidationResult result;
+
+    if (!m_disk) {
+        result.addError("Disk image not loaded");
+        return result;
+    }
+
+    // 1. Validate Volume Header
+    if (m_volumeHeader.storageType != STORAGE_VOLUME_HEADER) {
+        result.addError("Invalid volume header storage type", "Block 2");
+    }
+
+    if (m_volumeHeader.nameLength == 0 || m_volumeHeader.nameLength > MAX_FILENAME_LENGTH) {
+        result.addError("Invalid volume name length: " + std::to_string(m_volumeHeader.nameLength), "Block 2");
+    }
+
+    if (m_volumeHeader.entryLength != DIR_ENTRY_SIZE) {
+        result.addWarning("Non-standard entry length: " + std::to_string(m_volumeHeader.entryLength), "Block 2");
+    }
+
+    if (m_volumeHeader.entriesPerBlock != ENTRIES_PER_BLOCK) {
+        result.addWarning("Non-standard entries per block: " + std::to_string(m_volumeHeader.entriesPerBlock), "Block 2");
+    }
+
+    // 2. Validate Bitmap Pointer
+    if (m_volumeHeader.bitmapPointer == 0 || m_volumeHeader.bitmapPointer >= TOTAL_BLOCKS) {
+        result.addError("Invalid bitmap pointer: " + std::to_string(m_volumeHeader.bitmapPointer), "Block 2");
+    }
+
+    // 3. Validate Total Blocks
+    if (m_volumeHeader.totalBlocks == 0 || m_volumeHeader.totalBlocks > TOTAL_BLOCKS) {
+        result.addWarning("Unusual total blocks: " + std::to_string(m_volumeHeader.totalBlocks), "Block 2");
+    }
+
+    // 4. Count used blocks and verify against bitmap
+    std::vector<bool> usedBlocks(TOTAL_BLOCKS, false);
+    usedBlocks[0] = true;  // Boot block 0
+    usedBlocks[1] = true;  // Boot block 1
+    usedBlocks[2] = true;  // Volume directory key block
+
+    // Mark bitmap blocks as used
+    size_t bitmapBlocks = (TOTAL_BLOCKS + 4095) / 4096;  // 4096 bits per block
+    for (size_t i = 0; i < bitmapBlocks; ++i) {
+        if (m_volumeHeader.bitmapPointer + i < TOTAL_BLOCKS) {
+            usedBlocks[m_volumeHeader.bitmapPointer + i] = true;
+        }
+    }
+
+    // 5. Validate directory structure and file blocks
+    size_t fileCount = 0;
+    std::function<void(uint16_t, const std::string&)> validateDirectory;
+    validateDirectory = [&](uint16_t keyBlock, const std::string& path) {
+        if (keyBlock >= TOTAL_BLOCKS) {
+            result.addError("Directory key block out of range: " + std::to_string(keyBlock), path);
+            return;
+        }
+
+        usedBlocks[keyBlock] = true;
+
+        auto entries = readDirectory(keyBlock);
+        for (const auto& entry : entries) {
+            if (entry.isDeleted() || entry.isVolumeHeader() || entry.isSubdirHeader()) {
+                continue;
+            }
+
+            std::string filename = formatFilename(entry.filename, entry.nameLength);
+            std::string fullPath = path.empty() ? filename : path + "/" + filename;
+            ++fileCount;
+
+            // Validate key pointer
+            if (entry.keyPointer >= TOTAL_BLOCKS) {
+                result.addError("File key block out of range: " + std::to_string(entry.keyPointer), fullPath);
+                continue;
+            }
+
+            // Mark file blocks as used
+            try {
+                auto fileBlocks = getFileBlocks(entry);
+                for (uint16_t block : fileBlocks) {
+                    if (block > 0 && block < TOTAL_BLOCKS) {
+                        if (usedBlocks[block]) {
+                            result.addWarning("Block " + std::to_string(block) + " referenced multiple times", fullPath);
+                        }
+                        usedBlocks[block] = true;
+                    }
+                }
+            } catch (const std::exception& e) {
+                result.addError("Error reading file blocks: " + std::string(e.what()), fullPath);
+            }
+
+            // Recurse into subdirectories
+            if (entry.isDirectory()) {
+                validateDirectory(entry.keyPointer, fullPath);
+            }
+        }
+    };
+
+    validateDirectory(VOLUME_DIR_BLOCK, "");
+
+    // 6. Compare counted files with header file count
+    if (fileCount != m_volumeHeader.fileCount) {
+        result.addWarning("File count mismatch: header says " + std::to_string(m_volumeHeader.fileCount) +
+                         ", found " + std::to_string(fileCount), "Volume header");
+    }
+
+    // 7. Verify bitmap matches used blocks
+    for (size_t i = 0; i < TOTAL_BLOCKS; ++i) {
+        bool bitmapSaysFree = isBlockFree(i);
+        bool shouldBeFree = !usedBlocks[i];
+
+        if (bitmapSaysFree && !shouldBeFree) {
+            result.addError("Block " + std::to_string(i) + " is used but marked free in bitmap");
+        }
+        // Note: We don't flag blocks marked used but not found - they may be orphaned but not corrupted
+    }
+
+    // 8. Validate boot blocks (Block 0 and 1)
+    auto block0 = readBlock(0);
+    if (block0.size() == BLOCK_SIZE) {
+        // Check for obvious corruption patterns
+        bool allFF = true;
+        bool allZero = true;
+        for (size_t i = 0; i < BLOCK_SIZE; ++i) {
+            if (block0[i] != 0xFF) allFF = false;
+            if (block0[i] != 0x00) allZero = false;
+        }
+        if (allFF) {
+            result.addError("Boot block 0 appears corrupted (all 0xFF)", "Block 0");
+        }
+        // All zeros is valid for unbootable disk (data disks created by rdedisktool)
+        if (allZero) {
+            result.addInfo("Boot block 0 is empty (disk is not bootable - normal for data disks)");
+        }
+    }
+
+    auto block1 = readBlock(1);
+    if (block1.size() == BLOCK_SIZE) {
+        // Check for corruption patterns in boot block 1
+        // A valid ProDOS boot block should not start with 0xFF
+        // This typically indicates data corruption (e.g., partial overwrite)
+        if (block1[0] == 0xFF) {
+            // Count how many leading bytes are 0xFF
+            size_t ffCount = 0;
+            for (size_t i = 0; i < std::min(static_cast<size_t>(64), BLOCK_SIZE); ++i) {
+                if (block1[i] == 0xFF) ffCount++;
+                else break;
+            }
+
+            if (ffCount >= 64) {
+                result.addError("Boot block 1 appears corrupted (64+ bytes of 0xFF)", "Block 1");
+            } else {
+                // Even a single 0xFF at the start indicates corruption
+                // Valid ProDOS boot blocks don't start with 0xFF
+                result.addError("Boot block 1 corruption detected at offset 0 (0xFF pattern)", "Block 1");
+            }
+        }
+    }
+
+    if (result.errorCount == 0 && result.warningCount == 0) {
+        result.addInfo("All validation checks passed");
+    }
+
+    return result;
 }
 
 } // namespace rde

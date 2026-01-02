@@ -6,6 +6,7 @@
 #include <vector>
 #include <string>
 #include <map>
+#include <optional>
 
 namespace rde {
 
@@ -45,6 +46,11 @@ public:
     bool fileExists(const std::string& filename) const override;
     bool format(const std::string& volumeName = "") override;
     std::string getVolumeName() const override;
+    ValidationResult validateExtended() const override;
+
+    // Subdirectory support
+    bool createDirectory(const std::string& path);
+    bool deleteDirectory(const std::string& path);
 
 private:
     // Constants
@@ -173,9 +179,11 @@ private:
     bool parseVolumeHeader();
     void writeVolumeHeader();
     std::vector<DirectoryEntry> readDirectory(uint16_t keyBlock) const;
+    std::optional<DirectoryEntry> readDirectoryEntryAt(uint16_t dirKeyBlock, size_t physicalIndex) const;
     bool writeDirectoryEntry(uint16_t dirKeyBlock, size_t entryIndex, const DirectoryEntry& entry);
     int findDirectoryEntry(uint16_t dirKeyBlock, const std::string& filename) const;
     int findFreeDirectoryEntry(uint16_t dirKeyBlock) const;
+    bool updateDirectoryFileCount(uint16_t dirKeyBlock, int delta);
 
     // Helper methods - File I/O
     std::vector<uint8_t> readFileData(const DirectoryEntry& entry) const;

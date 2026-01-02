@@ -94,9 +94,21 @@ public:
     virtual bool format(const std::string& volumeName = "") = 0;
 
     /**
+     * Set the disk image without parsing (for formatting blank disks)
+     * @param disk Disk image to associate with this handler
+     */
+    void setDisk(DiskImage* disk) { m_disk = disk; }
+
+    /**
      * Get the volume name/label
      */
     virtual std::string getVolumeName() const = 0;
+
+    /**
+     * Perform extended file system validation
+     * @return ValidationResult containing all issues found
+     */
+    virtual ValidationResult validateExtended() const;
 
     /**
      * Create appropriate handler for a disk's file system

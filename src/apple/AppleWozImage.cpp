@@ -284,7 +284,7 @@ std::vector<uint8_t> AppleWozImage::buildWozFile() const {
 
     result.reserve(totalSize);
 
-    // Header placeholder (will fill CRC later)
+    // Initialize header (CRC32 at bytes 8-11 will be calculated after all data is written)
     result.resize(WOZ_HEADER_SIZE);
     result[0] = 'W'; result[1] = 'O'; result[2] = 'Z';
     result[3] = (m_wozVersion == 1) ? '1' : '2';

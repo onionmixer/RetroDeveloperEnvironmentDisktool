@@ -51,11 +51,12 @@ FileSystemType MSXDiskImage::getFileSystemType() const {
 }
 
 FileSystemType MSXDiskImage::detectFileSystem() const {
-    if (m_data.size() < BYTES_PER_SECTOR) {
+    const auto* bootData = getBootSector();
+    if (!bootData) {
         return FileSystemType::Unknown;
     }
 
-    const auto* boot = reinterpret_cast<const MSXBootSector*>(m_data.data());
+    const auto* boot = reinterpret_cast<const MSXBootSector*>(bootData);
 
     // Check for valid boot sector
     // First byte should be JMP instruction (0xEB or 0xE9)
@@ -192,7 +193,16 @@ uint16_t MSXDiskImage::getTotalClusters() const {
         totalSectors = bpb->totalSectors32;
     }
 
+    // If BPB doesn't have totalSectors, calculate from disk size
+    if (totalSectors == 0) {
+        totalSectors = static_cast<uint32_t>(m_data.size() / BYTES_PER_SECTOR);
+    }
+
     size_t firstDataSector = getFirstDataSector();
+    if (firstDataSector >= totalSectors) {
+        return 0;
+    }
+
     uint32_t dataSectors = totalSectors - static_cast<uint32_t>(firstDataSector);
 
     return static_cast<uint16_t>(dataSectors / getSectorsPerCluster());

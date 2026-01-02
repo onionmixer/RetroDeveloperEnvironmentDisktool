@@ -11,14 +11,11 @@ namespace rde {
  * XSA (eXtendable Storage Archive) is a compressed disk image format
  * developed by XelaSoft for MSX computers in 1994.
  *
- * This implementation is READ-ONLY. XSA files can be loaded and their
- * contents accessed, but modifications cannot be saved back to XSA format.
- * Use convertTo(DiskFormat::MSXDSK) to save changes in an uncompressed format.
- *
  * Features:
  * - LZ77 compression with adaptive Huffman coding
  * - Supports standard MSX disk geometries (360KB, 720KB)
- * - Can be converted to DSK or DMK format for editing
+ * - Can be converted to/from DSK or DMK format
+ * - Bi-directional conversion: DSK/DMK -> XSA and XSA -> DSK/DMK
  */
 class MSXXSAImage : public MSXDiskImage {
 public:
@@ -38,8 +35,8 @@ public:
     void load(const std::filesystem::path& path) override;
 
     /**
-     * Save is not supported for XSA format (read-only)
-     * @throws WriteProtectedException always
+     * Save disk image in XSA compressed format
+     * @param path Path to save the .xsa file (uses original path if empty)
      */
     void save(const std::filesystem::path& path = {}) override;
 
@@ -52,20 +49,21 @@ public:
     DiskFormat getFormat() const override { return DiskFormat::MSXXSA; }
 
     /**
-     * XSA format is always write-protected
+     * Get write protection status
+     * Note: XSA in-memory data can be modified, but only saved as compressed XSA
      */
-    bool isWriteProtected() const override { return true; }
+    bool isWriteProtected() const override { return m_writeProtected; }
 
     /**
-     * Cannot change write protection on XSA format
+     * Set write protection status
      */
     void setWriteProtected(bool protect) override;
 
     SectorBuffer readSector(size_t track, size_t side, size_t sector) override;
 
     /**
-     * Writing sectors is not supported for XSA format
-     * @throws WriteProtectedException always
+     * Write sector data
+     * Changes are kept in memory and saved when save() is called
      */
     void writeSector(size_t track, size_t side, size_t sector,
                     const SectorBuffer& data) override;
@@ -73,8 +71,8 @@ public:
     TrackBuffer readTrack(size_t track, size_t side) override;
 
     /**
-     * Writing tracks is not supported for XSA format
-     * @throws WriteProtectedException always
+     * Write track data
+     * Changes are kept in memory and saved when save() is called
      */
     void writeTrack(size_t track, size_t side, const TrackBuffer& data) override;
 
@@ -101,6 +99,22 @@ public:
      * @return true if data starts with XSA magic number
      */
     static bool isXSAFormat(const std::vector<uint8_t>& data);
+
+    /**
+     * Create XSA image from raw (uncompressed) disk data
+     * @param rawData Raw disk image data
+     * @param originalFilename Filename to store in XSA header
+     * @return New XSA image containing compressed data
+     */
+    static std::unique_ptr<MSXXSAImage> createFromRawData(
+        const std::vector<uint8_t>& rawData,
+        const std::string& originalFilename = "");
+
+    /**
+     * Get the compressed data for this image
+     * @return XSA compressed data
+     */
+    std::vector<uint8_t> getCompressedData() const;
 
 private:
     // Store original compressed data for diagnostics

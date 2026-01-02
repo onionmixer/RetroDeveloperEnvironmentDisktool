@@ -55,7 +55,7 @@ public:
     /**
      * Get boot sector data
      */
-    const uint8_t* getBootSector() const;
+    virtual const uint8_t* getBootSector() const;
 
     /**
      * Get media descriptor byte from boot sector

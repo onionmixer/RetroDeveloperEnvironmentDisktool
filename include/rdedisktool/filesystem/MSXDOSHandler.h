@@ -41,6 +41,27 @@ public:
     bool format(const std::string& volumeName = "") override;
     std::string getVolumeName() const override;
 
+    // Subdirectory support
+    bool createDirectory(const std::string& path);
+    bool deleteDirectory(const std::string& path);
+
+    // Cluster information for verbose info output
+    struct ClusterInfo {
+        uint16_t totalClusters;
+        uint16_t freeClusters;
+        uint16_t usedClusters;
+        uint16_t badClusters;
+        uint16_t reservedClusters;
+        std::vector<uint16_t> clusterMap;  // FAT value for each cluster
+    };
+
+    ClusterInfo getClusterInfo() const;
+
+    // Accessor for BPB values (for info output)
+    uint16_t getSectorsPerCluster() const { return m_sectorsPerCluster; }
+    uint16_t getBytesPerSector() const { return m_bytesPerSector; }
+    uint16_t getTotalClusters() const { return m_totalClusters; }
+
 private:
     // BPB (BIOS Parameter Block) cached values
     uint16_t m_bytesPerSector = 512;
@@ -114,6 +135,25 @@ private:
 
     FileEntry dirEntryToFileEntry(const DirEntry& entry) const;
     uint16_t countFreeClusters() const;
+
+    // Subdirectory support helpers
+    // Returns {dirCluster, entryName} where dirCluster=0 means root directory
+    std::pair<uint16_t, std::string> resolvePath(const std::string& path) const;
+
+    // Read directory entries from a subdirectory cluster chain
+    std::vector<DirEntry> readDirectoryCluster(uint16_t cluster) const;
+
+    // Write directory entries to a subdirectory cluster chain
+    void writeDirectoryCluster(uint16_t cluster, const std::vector<DirEntry>& entries);
+
+    // Find entry in any directory (root or subdirectory)
+    int findEntryInDirectory(uint16_t cluster, const std::string& name) const;
+
+    // Get directory entries for any directory
+    std::vector<DirEntry> getDirectoryEntries(uint16_t cluster) const;
+
+    // Set directory entries for any directory
+    void setDirectoryEntries(uint16_t cluster, const std::vector<DirEntry>& entries);
 };
 
 } // namespace rde

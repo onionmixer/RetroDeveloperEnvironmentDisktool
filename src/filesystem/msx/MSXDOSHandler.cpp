@@ -38,7 +38,7 @@ bool MSXDOSHandler::parseBPB() {
     }
 
     // Read boot sector (sector 0)
-    auto bootSector = m_disk->readSector(0, 0, 1);
+    auto bootSector = m_disk->readSector(0, 0, 0);
     if (bootSector.size() < 512) {
         return false;
     }
@@ -99,7 +99,7 @@ std::vector<uint8_t> MSXDOSHandler::readFAT() const {
             head = track % m_numberOfHeads;
             track /= m_numberOfHeads;
         }
-        uint16_t sectorInTrack = (sector % m_sectorsPerTrack) + 1;
+        uint16_t sectorInTrack = sector % m_sectorsPerTrack;
 
         auto data = m_disk->readSector(track, head, sectorInTrack);
         fat.insert(fat.end(), data.begin(), data.end());
@@ -123,7 +123,7 @@ void MSXDOSHandler::writeFAT(const std::vector<uint8_t>& fat) {
                 head = track % m_numberOfHeads;
                 track /= m_numberOfHeads;
             }
-            uint16_t sectorInTrack = (sector % m_sectorsPerTrack) + 1;
+            uint16_t sectorInTrack = sector % m_sectorsPerTrack;
 
             size_t offset = i * m_bytesPerSector;
             std::vector<uint8_t> sectorData(fat.begin() + offset,
@@ -229,7 +229,7 @@ std::vector<uint8_t> MSXDOSHandler::readCluster(uint16_t cluster) const {
             head = track % m_numberOfHeads;
             track /= m_numberOfHeads;
         }
-        uint16_t sectorInTrack = (sector % m_sectorsPerTrack) + 1;
+        uint16_t sectorInTrack = sector % m_sectorsPerTrack;
 
         auto sectorData = m_disk->readSector(track, head, sectorInTrack);
         data.insert(data.end(), sectorData.begin(), sectorData.end());
@@ -255,7 +255,7 @@ void MSXDOSHandler::writeCluster(uint16_t cluster, const std::vector<uint8_t>& d
             head = track % m_numberOfHeads;
             track /= m_numberOfHeads;
         }
-        uint16_t sectorInTrack = (sector % m_sectorsPerTrack) + 1;
+        uint16_t sectorInTrack = sector % m_sectorsPerTrack;
 
         std::vector<uint8_t> sectorData(m_bytesPerSector, 0);
         size_t copySize = std::min(static_cast<size_t>(m_bytesPerSector), data.size() - offset);
@@ -286,7 +286,7 @@ std::vector<MSXDOSHandler::DirEntry> MSXDOSHandler::readRootDirectory() const {
             head = track % m_numberOfHeads;
             track /= m_numberOfHeads;
         }
-        uint16_t sectorInTrack = (sector % m_sectorsPerTrack) + 1;
+        uint16_t sectorInTrack = sector % m_sectorsPerTrack;
 
         auto data = m_disk->readSector(track, head, sectorInTrack);
         dirData.insert(dirData.end(), data.begin(), data.end());
@@ -361,7 +361,7 @@ void MSXDOSHandler::writeRootDirectory(const std::vector<DirEntry>& entries) {
             head = track % m_numberOfHeads;
             track /= m_numberOfHeads;
         }
-        uint16_t sectorInTrack = (sector % m_sectorsPerTrack) + 1;
+        uint16_t sectorInTrack = sector % m_sectorsPerTrack;
 
         size_t dataOffset = i * m_bytesPerSector;
         std::vector<uint8_t> sectorData(dirData.begin() + dataOffset,
@@ -381,6 +381,11 @@ int MSXDOSHandler::findDirectoryEntry(const std::vector<DirEntry>& entries,
         // Skip deleted and end entries
         if (static_cast<uint8_t>(entry.name[0]) == DIR_FREE ||
             static_cast<uint8_t>(entry.name[0]) == DIR_END) {
+            continue;
+        }
+
+        // Skip volume labels (they are not files or directories)
+        if (entry.attr & ATTR_VOLUME_ID) {
             continue;
         }
 
@@ -489,9 +494,68 @@ uint16_t MSXDOSHandler::countFreeClusters() const {
     return count;
 }
 
+MSXDOSHandler::ClusterInfo MSXDOSHandler::getClusterInfo() const {
+    ClusterInfo info;
+    auto fat = readFAT();
+
+    info.totalClusters = m_totalClusters;
+    info.freeClusters = 0;
+    info.usedClusters = 0;
+    info.badClusters = 0;
+    info.reservedClusters = 0;
+    info.clusterMap.resize(m_totalClusters + 2, 0);
+
+    // Clusters 0 and 1 are reserved (media descriptor and 0xFFF)
+    info.clusterMap[0] = getFATEntry(fat, 0);
+    info.clusterMap[1] = getFATEntry(fat, 1);
+    info.reservedClusters = 2;
+
+    // Analyze clusters 2 through totalClusters+1
+    for (uint16_t cluster = 2; cluster < m_totalClusters + 2; ++cluster) {
+        uint16_t entry = getFATEntry(fat, cluster);
+        info.clusterMap[cluster] = entry;
+
+        if (entry == FAT12_FREE) {
+            info.freeClusters++;
+        } else if (entry == FAT12_BAD) {
+            info.badClusters++;
+        } else if (entry >= FAT12_RESERVED && entry < FAT12_BAD) {
+            info.reservedClusters++;
+        } else {
+            // Used cluster (either pointing to next cluster or EOF)
+            info.usedClusters++;
+        }
+    }
+
+    return info;
+}
+
 std::vector<FileEntry> MSXDOSHandler::listFiles(const std::string& path) {
     std::vector<FileEntry> files;
-    auto entries = readRootDirectory();
+
+    // Determine which directory to list
+    uint16_t dirCluster = 0;
+    if (!path.empty() && path != "/" && path != "\\") {
+        // Navigate to the specified directory
+        auto [parentCluster, dirName] = resolvePath(path);
+
+        if (!dirName.empty()) {
+            // Find the directory entry and get its cluster
+            auto parentEntries = getDirectoryEntries(parentCluster);
+            int idx = findDirectoryEntry(parentEntries, dirName);
+            if (idx < 0) {
+                throw FileNotFoundException("Directory not found: " + path);
+            }
+            if (!(parentEntries[idx].attr & ATTR_DIRECTORY)) {
+                throw DiskException(DiskError::InvalidParameter, "Not a directory: " + path);
+            }
+            dirCluster = parentEntries[idx].startCluster;
+        } else {
+            dirCluster = parentCluster;
+        }
+    }
+
+    auto entries = getDirectoryEntries(dirCluster);
 
     for (const auto& entry : entries) {
         // Skip deleted entries
@@ -506,6 +570,10 @@ std::vector<FileEntry> MSXDOSHandler::listFiles(const std::string& path) {
         if (entry.attr & ATTR_VOLUME_ID) {
             continue;
         }
+        // Skip . and .. entries
+        if (entry.name[0] == '.') {
+            continue;
+        }
 
         files.push_back(dirEntryToFileEntry(entry));
     }
@@ -514,8 +582,16 @@ std::vector<FileEntry> MSXDOSHandler::listFiles(const std::string& path) {
 }
 
 std::vector<uint8_t> MSXDOSHandler::readFile(const std::string& filename) {
-    auto entries = readRootDirectory();
-    int index = findDirectoryEntry(entries, filename);
+    // Resolve path to find directory and filename
+    auto [dirCluster, baseName] = resolvePath(filename);
+
+    // If path ended with /, it's a directory reference, not a file
+    if (baseName.empty()) {
+        throw FileNotFoundException("File not found: " + filename);
+    }
+
+    auto entries = getDirectoryEntries(dirCluster);
+    int index = findDirectoryEntry(entries, baseName);
 
     if (index < 0) {
         throw FileNotFoundException("File not found: " + filename);
@@ -550,11 +626,18 @@ bool MSXDOSHandler::writeFile(const std::string& filename,
         return false; // File too large
     }
 
-    auto entries = readRootDirectory();
+    // Resolve path to find directory and filename
+    auto [dirCluster, baseName] = resolvePath(filename);
+
+    if (baseName.empty()) {
+        return false; // Invalid path
+    }
+
+    auto entries = getDirectoryEntries(dirCluster);
     auto fat = readFAT();
 
     // Check if file already exists
-    int existingIndex = findDirectoryEntry(entries, filename);
+    int existingIndex = findDirectoryEntry(entries, baseName);
     if (existingIndex >= 0) {
         // Free existing clusters
         freeClusterChain(fat, entries[existingIndex].startCluster);
@@ -576,7 +659,8 @@ bool MSXDOSHandler::writeFile(const std::string& filename,
 
         if (entryIndex < 0) {
             // Need to add new entry
-            if (entries.size() >= m_rootEntryCount) {
+            // For root directory, check entry limit
+            if (dirCluster == 0 && entries.size() >= m_rootEntryCount) {
                 return false; // Directory full
             }
             DirEntry newEntry{};
@@ -588,7 +672,7 @@ bool MSXDOSHandler::writeFile(const std::string& filename,
 
     // Initialize entry
     DirEntry& entry = entries[entryIndex];
-    parseFilename(filename, entry.name, entry.ext);
+    parseFilename(baseName, entry.name, entry.ext);
     entry.attr = ATTR_ARCHIVE;
     entry.fileSize = static_cast<uint32_t>(data.size());
 
@@ -640,14 +724,21 @@ bool MSXDOSHandler::writeFile(const std::string& filename,
 
     // Write FAT and directory
     writeFAT(fat);
-    writeRootDirectory(entries);
+    setDirectoryEntries(dirCluster, entries);
 
     return true;
 }
 
 bool MSXDOSHandler::deleteFile(const std::string& filename) {
-    auto entries = readRootDirectory();
-    int index = findDirectoryEntry(entries, filename);
+    // Resolve path to find directory and filename
+    auto [dirCluster, baseName] = resolvePath(filename);
+
+    if (baseName.empty()) {
+        return false;
+    }
+
+    auto entries = getDirectoryEntries(dirCluster);
+    int index = findDirectoryEntry(entries, baseName);
 
     if (index < 0) {
         return false;
@@ -655,7 +746,8 @@ bool MSXDOSHandler::deleteFile(const std::string& filename) {
 
     auto& entry = entries[index];
     if (entry.attr & ATTR_DIRECTORY) {
-        return false; // Can't delete directories (yet)
+        // Use deleteDirectory for directories
+        return deleteDirectory(filename);
     }
 
     // Free cluster chain
@@ -668,14 +760,31 @@ bool MSXDOSHandler::deleteFile(const std::string& filename) {
     // Mark entry as deleted
     entry.name[0] = static_cast<char>(DIR_FREE);
 
-    writeRootDirectory(entries);
+    setDirectoryEntries(dirCluster, entries);
     return true;
 }
 
 bool MSXDOSHandler::renameFile(const std::string& oldName, const std::string& newName) {
-    auto entries = readRootDirectory();
-    int oldIndex = findDirectoryEntry(entries, oldName);
-    int newIndex = findDirectoryEntry(entries, newName);
+    // Resolve source path
+    auto [oldDirCluster, oldBaseName] = resolvePath(oldName);
+    if (oldBaseName.empty()) {
+        return false;
+    }
+
+    // Resolve destination path
+    auto [newDirCluster, newBaseName] = resolvePath(newName);
+    if (newBaseName.empty()) {
+        return false;
+    }
+
+    // Both must be in same directory for simple rename
+    if (oldDirCluster != newDirCluster) {
+        return false; // Move between directories not supported yet
+    }
+
+    auto entries = getDirectoryEntries(oldDirCluster);
+    int oldIndex = findDirectoryEntry(entries, oldBaseName);
+    int newIndex = findDirectoryEntry(entries, newBaseName);
 
     if (oldIndex < 0) {
         return false; // Source doesn't exist
@@ -685,8 +794,8 @@ bool MSXDOSHandler::renameFile(const std::string& oldName, const std::string& ne
         return false; // Destination already exists
     }
 
-    parseFilename(newName, entries[oldIndex].name, entries[oldIndex].ext);
-    writeRootDirectory(entries);
+    parseFilename(newBaseName, entries[oldIndex].name, entries[oldIndex].ext);
+    setDirectoryEntries(oldDirCluster, entries);
     return true;
 }
 
@@ -699,8 +808,16 @@ size_t MSXDOSHandler::getTotalSpace() const {
 }
 
 bool MSXDOSHandler::fileExists(const std::string& filename) const {
-    auto entries = readRootDirectory();
-    return findDirectoryEntry(entries, filename) >= 0;
+    try {
+        auto [dirCluster, baseName] = resolvePath(filename);
+        if (baseName.empty()) {
+            return false;
+        }
+        auto entries = getDirectoryEntries(dirCluster);
+        return findDirectoryEntry(entries, baseName) >= 0;
+    } catch (const FileNotFoundException&) {
+        return false;  // Parent directory doesn't exist
+    }
 }
 
 bool MSXDOSHandler::format(const std::string& volumeName) {
@@ -708,12 +825,66 @@ bool MSXDOSHandler::format(const std::string& volumeName) {
         return false;
     }
 
-    // Clear all sectors
+    // Initialize BPB values from disk geometry
     auto geom = m_disk->getGeometry();
+
+    m_bytesPerSector = static_cast<uint16_t>(geom.bytesPerSector);
+    if (m_bytesPerSector == 0) {
+        m_bytesPerSector = 512;
+    }
+
+    m_sectorsPerTrack = static_cast<uint16_t>(geom.sectorsPerTrack);
+    if (m_sectorsPerTrack == 0) {
+        m_sectorsPerTrack = 9;
+    }
+
+    m_numberOfHeads = static_cast<uint16_t>(geom.sides);
+    if (m_numberOfHeads == 0) {
+        m_numberOfHeads = 2;
+    }
+
+    m_totalSectors = static_cast<uint16_t>(geom.totalSectors());
+
+    // Set appropriate parameters based on disk size
+    if (m_totalSectors >= 2880) {
+        // 1.44MB: 18 sectors, 2 sides, 80 tracks
+        m_sectorsPerCluster = 1;
+        m_sectorsPerFAT = 9;
+        m_rootEntryCount = 224;
+        m_mediaDescriptor = 0xF0;
+    } else if (m_totalSectors >= 1440) {
+        // 720KB: 9 sectors, 2 sides, 80 tracks
+        m_sectorsPerCluster = 2;
+        m_sectorsPerFAT = 3;
+        m_rootEntryCount = 112;
+        m_mediaDescriptor = 0xF9;
+    } else if (m_totalSectors >= 720) {
+        // 360KB: 9 sectors, 2 sides, 40 tracks or 1 side, 80 tracks
+        m_sectorsPerCluster = 2;
+        m_sectorsPerFAT = 2;
+        m_rootEntryCount = 112;
+        m_mediaDescriptor = (m_numberOfHeads == 2) ? 0xFD : 0xF8;
+    } else {
+        // Smaller disks: use conservative defaults
+        m_sectorsPerCluster = 1;
+        m_sectorsPerFAT = 2;
+        m_rootEntryCount = 64;
+        m_mediaDescriptor = 0xF8;
+    }
+
+    // Calculate derived values
+    m_reservedSectors = 1;
+    m_numberOfFATs = 2;
+    m_rootDirSectors = ((m_rootEntryCount * 32) + (m_bytesPerSector - 1)) / m_bytesPerSector;
+    m_firstDataSector = m_reservedSectors + (m_numberOfFATs * m_sectorsPerFAT) + m_rootDirSectors;
+    m_dataSectors = m_totalSectors - m_firstDataSector;
+    m_totalClusters = m_dataSectors / m_sectorsPerCluster;
+
+    // Clear all sectors
     std::vector<uint8_t> emptySector(m_bytesPerSector, 0);
     for (size_t t = 0; t < geom.tracks; ++t) {
         for (size_t h = 0; h < geom.sides; ++h) {
-            for (size_t s = 1; s <= geom.sectorsPerTrack; ++s) {
+            for (size_t s = 0; s < geom.sectorsPerTrack; ++s) {
                 m_disk->writeSector(t, h, s, emptySector);
             }
         }
@@ -754,7 +925,7 @@ bool MSXDOSHandler::format(const std::string& volumeName) {
     bootSector[0x1FE] = 0x55;
     bootSector[0x1FF] = 0xAA;
 
-    m_disk->writeSector(0, 0, 1, bootSector);
+    m_disk->writeSector(0, 0, 0, bootSector);
 
     // Initialize FAT
     std::vector<uint8_t> fat(m_sectorsPerFAT * m_bytesPerSector, 0);
@@ -797,6 +968,386 @@ std::string MSXDOSHandler::getVolumeName() const {
     }
 
     return "";
+}
+
+//=============================================================================
+// Subdirectory Support Implementation
+//=============================================================================
+
+std::pair<uint16_t, std::string> MSXDOSHandler::resolvePath(const std::string& path) const {
+    if (path.empty() || path == "/" || path == "\\") {
+        return {0, ""};  // 0 = root directory
+    }
+
+    std::string cleanPath = path;
+    // Normalize separators
+    for (char& c : cleanPath) {
+        if (c == '\\') c = '/';
+    }
+    // Remove leading slash
+    if (!cleanPath.empty() && cleanPath[0] == '/') {
+        cleanPath = cleanPath.substr(1);
+    }
+    // Remove trailing slash
+    if (!cleanPath.empty() && cleanPath.back() == '/') {
+        cleanPath = cleanPath.substr(0, cleanPath.length() - 1);
+    }
+
+    if (cleanPath.empty()) {
+        return {0, ""};
+    }
+
+    // Split path into components
+    std::vector<std::string> components;
+    size_t start = 0;
+    size_t pos;
+    while ((pos = cleanPath.find('/', start)) != std::string::npos) {
+        if (pos > start) {
+            components.push_back(cleanPath.substr(start, pos - start));
+        }
+        start = pos + 1;
+    }
+    if (start < cleanPath.length()) {
+        components.push_back(cleanPath.substr(start));
+    }
+
+    if (components.empty()) {
+        return {0, ""};
+    }
+
+    // Last component is the target name
+    std::string targetName = components.back();
+    components.pop_back();
+
+    // Navigate through directories
+    uint16_t currentCluster = 0;  // Start from root
+
+    for (const auto& component : components) {
+        auto entries = getDirectoryEntries(currentCluster);
+        int idx = -1;
+
+        // Find directory entry
+        char name[8], ext[3];
+        parseFilename(component, name, ext);
+
+        for (size_t i = 0; i < entries.size(); ++i) {
+            const auto& entry = entries[i];
+            if (static_cast<uint8_t>(entry.name[0]) == DIR_FREE) continue;
+            if (static_cast<uint8_t>(entry.name[0]) == DIR_END) break;
+            // Skip volume labels (they are not directories)
+            if (entry.attr & ATTR_VOLUME_ID) continue;
+
+            if (std::memcmp(entry.name, name, 8) == 0 &&
+                std::memcmp(entry.ext, ext, 3) == 0) {
+                idx = static_cast<int>(i);
+                break;
+            }
+        }
+
+        if (idx < 0 || !(entries[idx].attr & ATTR_DIRECTORY)) {
+            throw FileNotFoundException("Directory not found: " + component);
+        }
+
+        currentCluster = entries[idx].startCluster;
+    }
+
+    return {currentCluster, targetName};
+}
+
+std::vector<MSXDOSHandler::DirEntry> MSXDOSHandler::readDirectoryCluster(uint16_t cluster) const {
+    std::vector<DirEntry> entries;
+
+    if (cluster < 2) {
+        return entries;
+    }
+
+    auto chain = getClusterChain(cluster);
+    for (uint16_t clust : chain) {
+        auto data = readCluster(clust);
+
+        // Parse directory entries (32 bytes each)
+        for (size_t offset = 0; offset + 32 <= data.size(); offset += 32) {
+            DirEntry entry;
+            std::memcpy(entry.name, &data[offset], 8);
+            std::memcpy(entry.ext, &data[offset + 8], 3);
+            entry.attr = data[offset + 11];
+            std::memcpy(entry.reserved, &data[offset + 12], 10);
+            entry.time = data[offset + 22] | (static_cast<uint16_t>(data[offset + 23]) << 8);
+            entry.date = data[offset + 24] | (static_cast<uint16_t>(data[offset + 25]) << 8);
+            entry.startCluster = data[offset + 26] | (static_cast<uint16_t>(data[offset + 27]) << 8);
+            entry.fileSize = data[offset + 28] |
+                            (static_cast<uint32_t>(data[offset + 29]) << 8) |
+                            (static_cast<uint32_t>(data[offset + 30]) << 16) |
+                            (static_cast<uint32_t>(data[offset + 31]) << 24);
+
+            // Check for end of directory
+            if (static_cast<uint8_t>(entry.name[0]) == DIR_END) {
+                return entries;
+            }
+
+            entries.push_back(entry);
+        }
+    }
+
+    return entries;
+}
+
+void MSXDOSHandler::writeDirectoryCluster(uint16_t cluster, const std::vector<DirEntry>& entries) {
+    if (cluster < 2) {
+        return;
+    }
+
+    size_t clusterSize = m_sectorsPerCluster * m_bytesPerSector;
+    size_t entriesPerCluster = clusterSize / 32;
+
+    auto chain = getClusterChain(cluster);
+    auto fat = readFAT();
+
+    size_t entryIdx = 0;
+
+    for (size_t chainIdx = 0; chainIdx < chain.size() && entryIdx < entries.size(); ++chainIdx) {
+        std::vector<uint8_t> data(clusterSize, 0);
+
+        for (size_t i = 0; i < entriesPerCluster && entryIdx < entries.size(); ++i, ++entryIdx) {
+            const auto& entry = entries[entryIdx];
+            size_t offset = i * 32;
+
+            std::memcpy(&data[offset], entry.name, 8);
+            std::memcpy(&data[offset + 8], entry.ext, 3);
+            data[offset + 11] = entry.attr;
+            std::memcpy(&data[offset + 12], entry.reserved, 10);
+            data[offset + 22] = entry.time & 0xFF;
+            data[offset + 23] = (entry.time >> 8) & 0xFF;
+            data[offset + 24] = entry.date & 0xFF;
+            data[offset + 25] = (entry.date >> 8) & 0xFF;
+            data[offset + 26] = entry.startCluster & 0xFF;
+            data[offset + 27] = (entry.startCluster >> 8) & 0xFF;
+            data[offset + 28] = entry.fileSize & 0xFF;
+            data[offset + 29] = (entry.fileSize >> 8) & 0xFF;
+            data[offset + 30] = (entry.fileSize >> 16) & 0xFF;
+            data[offset + 31] = (entry.fileSize >> 24) & 0xFF;
+        }
+
+        writeCluster(chain[chainIdx], data);
+    }
+
+    // Allocate more clusters if needed
+    while (entryIdx < entries.size()) {
+        uint16_t newCluster = allocateCluster(fat);
+        if (newCluster == 0) {
+            break;  // No more space
+        }
+
+        setFATEntry(fat, chain.back(), newCluster);
+        setFATEntry(fat, newCluster, FAT12_EOF);
+        chain.push_back(newCluster);
+
+        std::vector<uint8_t> data(clusterSize, 0);
+
+        for (size_t i = 0; i < entriesPerCluster && entryIdx < entries.size(); ++i, ++entryIdx) {
+            const auto& entry = entries[entryIdx];
+            size_t offset = i * 32;
+
+            std::memcpy(&data[offset], entry.name, 8);
+            std::memcpy(&data[offset + 8], entry.ext, 3);
+            data[offset + 11] = entry.attr;
+            std::memcpy(&data[offset + 12], entry.reserved, 10);
+            data[offset + 22] = entry.time & 0xFF;
+            data[offset + 23] = (entry.time >> 8) & 0xFF;
+            data[offset + 24] = entry.date & 0xFF;
+            data[offset + 25] = (entry.date >> 8) & 0xFF;
+            data[offset + 26] = entry.startCluster & 0xFF;
+            data[offset + 27] = (entry.startCluster >> 8) & 0xFF;
+            data[offset + 28] = entry.fileSize & 0xFF;
+            data[offset + 29] = (entry.fileSize >> 8) & 0xFF;
+            data[offset + 30] = (entry.fileSize >> 16) & 0xFF;
+            data[offset + 31] = (entry.fileSize >> 24) & 0xFF;
+        }
+
+        writeCluster(newCluster, data);
+        writeFAT(fat);
+    }
+}
+
+int MSXDOSHandler::findEntryInDirectory(uint16_t cluster, const std::string& name) const {
+    auto entries = getDirectoryEntries(cluster);
+    return findDirectoryEntry(entries, name);
+}
+
+std::vector<MSXDOSHandler::DirEntry> MSXDOSHandler::getDirectoryEntries(uint16_t cluster) const {
+    if (cluster == 0) {
+        return readRootDirectory();
+    }
+    return readDirectoryCluster(cluster);
+}
+
+void MSXDOSHandler::setDirectoryEntries(uint16_t cluster, const std::vector<DirEntry>& entries) {
+    if (cluster == 0) {
+        writeRootDirectory(entries);
+    } else {
+        writeDirectoryCluster(cluster, entries);
+    }
+}
+
+bool MSXDOSHandler::createDirectory(const std::string& path) {
+    if (path.empty()) {
+        return false;
+    }
+
+    // Resolve parent directory and target name
+    auto [parentCluster, dirName] = resolvePath(path);
+
+    if (dirName.empty()) {
+        return false;
+    }
+
+    // Check if already exists
+    auto parentEntries = getDirectoryEntries(parentCluster);
+    if (findDirectoryEntry(parentEntries, dirName) >= 0) {
+        return false;  // Already exists
+    }
+
+    // Allocate a cluster for the new directory
+    auto fat = readFAT();
+    uint16_t newCluster = allocateCluster(fat);
+    if (newCluster == 0) {
+        return false;  // No free clusters
+    }
+    setFATEntry(fat, newCluster, FAT12_EOF);
+
+    // Initialize the new directory with . and .. entries
+    size_t clusterSize = m_sectorsPerCluster * m_bytesPerSector;
+    std::vector<uint8_t> dirData(clusterSize, 0);
+
+    // Create "." entry
+    DirEntry dotEntry{};
+    std::memset(dotEntry.name, ' ', 8);
+    std::memset(dotEntry.ext, ' ', 3);
+    dotEntry.name[0] = '.';
+    dotEntry.attr = ATTR_DIRECTORY;
+    dotEntry.startCluster = newCluster;
+    dotEntry.time = (12 << 11) | (0 << 5) | 0;
+    dotEntry.date = ((2024 - 1980) << 9) | (1 << 5) | 1;
+
+    // Create ".." entry
+    DirEntry dotDotEntry{};
+    std::memset(dotDotEntry.name, ' ', 8);
+    std::memset(dotDotEntry.ext, ' ', 3);
+    dotDotEntry.name[0] = '.';
+    dotDotEntry.name[1] = '.';
+    dotDotEntry.attr = ATTR_DIRECTORY;
+    dotDotEntry.startCluster = parentCluster;  // 0 for root
+    dotDotEntry.time = (12 << 11) | (0 << 5) | 0;
+    dotDotEntry.date = ((2024 - 1980) << 9) | (1 << 5) | 1;
+
+    // Write . entry
+    std::memcpy(&dirData[0], dotEntry.name, 8);
+    std::memcpy(&dirData[8], dotEntry.ext, 3);
+    dirData[11] = dotEntry.attr;
+    dirData[22] = dotEntry.time & 0xFF;
+    dirData[23] = (dotEntry.time >> 8) & 0xFF;
+    dirData[24] = dotEntry.date & 0xFF;
+    dirData[25] = (dotEntry.date >> 8) & 0xFF;
+    dirData[26] = dotEntry.startCluster & 0xFF;
+    dirData[27] = (dotEntry.startCluster >> 8) & 0xFF;
+
+    // Write .. entry
+    std::memcpy(&dirData[32], dotDotEntry.name, 8);
+    std::memcpy(&dirData[40], dotDotEntry.ext, 3);
+    dirData[43] = dotDotEntry.attr;
+    dirData[54] = dotDotEntry.time & 0xFF;
+    dirData[55] = (dotDotEntry.time >> 8) & 0xFF;
+    dirData[56] = dotDotEntry.date & 0xFF;
+    dirData[57] = (dotDotEntry.date >> 8) & 0xFF;
+    dirData[58] = dotDotEntry.startCluster & 0xFF;
+    dirData[59] = (dotDotEntry.startCluster >> 8) & 0xFF;
+
+    writeCluster(newCluster, dirData);
+
+    // Create entry in parent directory
+    DirEntry newEntry{};
+    parseFilename(dirName, newEntry.name, newEntry.ext);
+    newEntry.attr = ATTR_DIRECTORY;
+    newEntry.startCluster = newCluster;
+    newEntry.fileSize = 0;  // Directories have size 0
+    newEntry.time = (12 << 11) | (0 << 5) | 0;
+    newEntry.date = ((2024 - 1980) << 9) | (1 << 5) | 1;
+
+    // Find free slot in parent directory
+    int freeSlot = -1;
+    for (size_t i = 0; i < parentEntries.size(); ++i) {
+        if (static_cast<uint8_t>(parentEntries[i].name[0]) == DIR_FREE ||
+            static_cast<uint8_t>(parentEntries[i].name[0]) == DIR_END) {
+            freeSlot = static_cast<int>(i);
+            break;
+        }
+    }
+
+    if (freeSlot >= 0) {
+        parentEntries[freeSlot] = newEntry;
+    } else {
+        parentEntries.push_back(newEntry);
+    }
+
+    setDirectoryEntries(parentCluster, parentEntries);
+    writeFAT(fat);
+
+    return true;
+}
+
+bool MSXDOSHandler::deleteDirectory(const std::string& path) {
+    if (path.empty()) {
+        return false;
+    }
+
+    // Resolve parent directory and target name
+    auto [parentCluster, dirName] = resolvePath(path);
+
+    if (dirName.empty()) {
+        return false;
+    }
+
+    auto parentEntries = getDirectoryEntries(parentCluster);
+    int idx = findDirectoryEntry(parentEntries, dirName);
+
+    if (idx < 0) {
+        return false;  // Not found
+    }
+
+    auto& entry = parentEntries[idx];
+
+    if (!(entry.attr & ATTR_DIRECTORY)) {
+        return false;  // Not a directory
+    }
+
+    // Check if directory is empty (only . and ..)
+    auto dirEntries = readDirectoryCluster(entry.startCluster);
+    for (const auto& dirEntry : dirEntries) {
+        if (static_cast<uint8_t>(dirEntry.name[0]) == DIR_FREE) continue;
+        if (static_cast<uint8_t>(dirEntry.name[0]) == DIR_END) break;
+
+        // Skip . and ..
+        if (dirEntry.name[0] == '.') {
+            if (dirEntry.name[1] == ' ' || dirEntry.name[1] == '.') {
+                continue;
+            }
+        }
+
+        // Directory not empty
+        return false;
+    }
+
+    // Free directory clusters
+    auto fat = readFAT();
+    freeClusterChain(fat, entry.startCluster);
+
+    // Mark entry as deleted
+    entry.name[0] = static_cast<char>(DIR_FREE);
+
+    setDirectoryEntries(parentCluster, parentEntries);
+    writeFAT(fat);
+
+    return true;
 }
 
 } // namespace rde

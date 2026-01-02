@@ -67,6 +67,7 @@ void MSXDMKImage::load(const std::filesystem::path& path) {
     m_filePath = path;
     m_modified = false;
     m_fileSystemDetected = false;
+    m_bootSectorCached = false;
 }
 
 void MSXDMKImage::save(const std::filesystem::path& path) {
@@ -149,6 +150,7 @@ void MSXDMKImage::create(const DiskGeometry& geometry) {
 
     m_modified = true;
     m_fileSystemDetected = false;
+    m_bootSectorCached = false;
     m_filePath.clear();
 }
 
@@ -281,6 +283,25 @@ SectorBuffer MSXDMKImage::readSector(size_t track, size_t side, size_t sector) {
         throw SectorNotFoundException(static_cast<int>(track), static_cast<int>(sector));
     }
 
+    // CRC verification (optional)
+    if (m_verifyCRC) {
+        // DAM is 4 bytes before data: 0xA1 0xA1 0xA1 0xFB
+        size_t crcStart = dataOffset - 4;
+        size_t crcLength = 4 + BYTES_PER_SECTOR;
+
+        uint16_t calculatedCRC = CRC::crc16_ccitt(&trackData[crcStart], crcLength);
+        uint16_t storedCRC = (trackData[dataOffset + BYTES_PER_SECTOR] << 8) |
+                              trackData[dataOffset + BYTES_PER_SECTOR + 1];
+
+        if (calculatedCRC != storedCRC) {
+            if (m_strictCRC) {
+                throw std::runtime_error("CRC error at track " + std::to_string(track) +
+                                        ", sector " + std::to_string(sector));
+            }
+            // Non-strict mode: just continue (could log warning)
+        }
+    }
+
     return SectorBuffer(trackData.begin() + dataOffset,
                         trackData.begin() + dataOffset + BYTES_PER_SECTOR);
 }
@@ -318,7 +339,24 @@ void MSXDMKImage::writeSector(size_t track, size_t side, size_t sector,
     std::copy(data.begin(), data.begin() + copySize,
               m_data.begin() + trackOffset + dataOffset);
 
-    // TODO: Update CRC
+    // Zero-fill if data is shorter than sector size
+    if (copySize < BYTES_PER_SECTOR) {
+        std::fill(m_data.begin() + trackOffset + dataOffset + copySize,
+                  m_data.begin() + trackOffset + dataOffset + BYTES_PER_SECTOR, 0);
+    }
+
+    // Update Data CRC
+    // DAM (Data Address Mark) is 4 bytes before data: 0xA1 0xA1 0xA1 0xFB
+    // CRC covers DAM (4 bytes) + sector data (512 bytes) = 516 bytes
+    size_t crcStart = trackOffset + dataOffset - 4;
+    size_t crcLength = 4 + BYTES_PER_SECTOR;
+
+    uint16_t dataCrc = CRC::crc16_ccitt(&m_data[crcStart], crcLength);
+
+    // Store CRC as Big Endian (high byte first)
+    size_t crcOffset = trackOffset + dataOffset + BYTES_PER_SECTOR;
+    m_data[crcOffset] = (dataCrc >> 8) & 0xFF;
+    m_data[crcOffset + 1] = dataCrc & 0xFF;
 
     m_modified = true;
 }
@@ -366,6 +404,26 @@ TrackBuffer MSXDMKImage::buildFormattedTrack(size_t track, size_t side,
                                               const std::array<SectorBuffer, 9>& sectors) {
     TrackBuffer result(m_trackLength, 0);
 
+    // Build sector order based on interleave factor
+    std::array<size_t, 9> sectorOrder;
+    if (m_interleave <= 1) {
+        // No interleave: 0, 1, 2, 3, 4, 5, 6, 7, 8
+        for (size_t i = 0; i < 9; ++i) {
+            sectorOrder[i] = i;
+        }
+    } else {
+        // Interleave: distribute sectors
+        size_t pos = 0;
+        std::fill(sectorOrder.begin(), sectorOrder.end(), 9);  // Mark as unused
+        for (size_t i = 0; i < 9; ++i) {
+            while (sectorOrder[pos] != 9) {
+                pos = (pos + 1) % 9;
+            }
+            sectorOrder[pos] = i;
+            pos = (pos + m_interleave) % 9;
+        }
+    }
+
     // IDAM table (128 bytes)
     size_t idamIdx = 0;
     size_t dataPos = DMK_IDAM_SIZE;
@@ -388,22 +446,24 @@ TrackBuffer MSXDMKImage::buildFormattedTrack(size_t track, size_t side,
     std::fill(result.begin() + dataPos, result.begin() + dataPos + 50, 0x4E);
     dataPos += 50;
 
-    // Write sectors
-    for (size_t sect = 0; sect < 9 && idamIdx < DMK_IDAM_COUNT; ++sect) {
-        // Record IDAM position (with DD flag)
+    // Write sectors in interleaved order
+    for (size_t i = 0; i < 9 && idamIdx < DMK_IDAM_COUNT; ++i) {
+        size_t sect = sectorOrder[i];
+        // Sync (12 bytes of 0x00)
+        std::fill(result.begin() + dataPos, result.begin() + dataPos + 12, 0x00);
+        dataPos += 12;
+
+        // ID Address Mark sync bytes
+        result[dataPos++] = 0xA1;  // Sync mark
+        result[dataPos++] = 0xA1;
+        result[dataPos++] = 0xA1;
+
+        // Record IDAM position (with DD flag) - must point to the 0xFE byte
         uint16_t idamPtr = 0x8000 | static_cast<uint16_t>(dataPos);  // DD flag set
         result[idamIdx * 2] = idamPtr & 0xFF;
         result[idamIdx * 2 + 1] = (idamPtr >> 8) & 0xFF;
         ++idamIdx;
 
-        // Sync (12 bytes of 0x00)
-        std::fill(result.begin() + dataPos, result.begin() + dataPos + 12, 0x00);
-        dataPos += 12;
-
-        // ID Address Mark
-        result[dataPos++] = 0xA1;  // Sync mark
-        result[dataPos++] = 0xA1;
-        result[dataPos++] = 0xA1;
         result[dataPos++] = 0xFE;  // IDAM
 
         // ID field: track, side, sector (1-based), size code
@@ -412,7 +472,7 @@ TrackBuffer MSXDMKImage::buildFormattedTrack(size_t track, size_t side,
         result[dataPos++] = static_cast<uint8_t>(sect + 1);  // 1-based
         result[dataPos++] = 0x02;  // 512 bytes
 
-        // ID CRC (placeholder - would calculate real CRC)
+        // ID CRC (CRC-CCITT over IDAM: sync + address mark + C/H/S/N)
         uint16_t idCrc = CRC::crc16_ccitt(&result[dataPos - 8], 8);
         result[dataPos++] = (idCrc >> 8) & 0xFF;
         result[dataPos++] = idCrc & 0xFF;
@@ -499,6 +559,24 @@ std::unique_ptr<DiskImage> MSXDMKImage::convertTo(DiskFormat format) const {
     }
 
     throw NotImplementedException("Conversion to " + std::string(formatToString(format)));
+}
+
+const uint8_t* MSXDMKImage::getBootSector() const {
+    if (!m_bootSectorCached) {
+        // Read boot sector from track 0, side 0, sector 0
+        try {
+            m_cachedBootSector = const_cast<MSXDMKImage*>(this)->readSector(0, 0, 0);
+            m_bootSectorCached = true;
+        } catch (...) {
+            return nullptr;
+        }
+    }
+
+    if (m_cachedBootSector.size() < BYTES_PER_SECTOR) {
+        return nullptr;
+    }
+
+    return m_cachedBootSector.data();
 }
 
 bool MSXDMKImage::validate() const {
