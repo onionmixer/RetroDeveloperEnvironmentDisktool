@@ -3,6 +3,7 @@
 
 #include "rdedisktool/FileSystemHandler.h"
 #include "rdedisktool/apple/AppleDiskImage.h"
+#include "rdedisktool/apple/AppleConstants.h"
 #include <vector>
 #include <string>
 
@@ -46,30 +47,30 @@ public:
     ValidationResult validateExtended() const override;
 
 private:
-    // Constants
-    static constexpr size_t SECTOR_SIZE = 256;
-    static constexpr size_t SECTORS_PER_TRACK = 16;
-    static constexpr size_t VTOC_TRACK = 17;
-    static constexpr size_t VTOC_SECTOR = 0;
-    static constexpr size_t CATALOG_TRACK = 17;
-    static constexpr size_t FIRST_CATALOG_SECTOR = 15;
-    static constexpr size_t DIR_ENTRY_SIZE = 35;
-    static constexpr size_t ENTRIES_PER_SECTOR = 7;
-    static constexpr size_t MAX_TRACKS = 35;
+    // Constants from AppleConstants::DOS33
+    static constexpr size_t SECTOR_SIZE = AppleConstants::DOS33::SECTOR_SIZE;
+    static constexpr size_t SECTORS_PER_TRACK = AppleConstants::DOS33::SECTORS_PER_TRACK;
+    static constexpr size_t VTOC_TRACK = AppleConstants::DOS33::VTOC_TRACK;
+    static constexpr size_t VTOC_SECTOR = AppleConstants::DOS33::VTOC_SECTOR;
+    static constexpr size_t CATALOG_TRACK = AppleConstants::DOS33::CATALOG_TRACK;
+    static constexpr size_t FIRST_CATALOG_SECTOR = AppleConstants::DOS33::FIRST_CATALOG_SECTOR;
+    static constexpr size_t DIR_ENTRY_SIZE = AppleConstants::DOS33::DIR_ENTRY_SIZE;
+    static constexpr size_t ENTRIES_PER_SECTOR = AppleConstants::DOS33::ENTRIES_PER_SECTOR;
+    static constexpr size_t MAX_TRACKS = AppleConstants::DOS33::MAX_TRACKS;
 
-    // File type codes
-    static constexpr uint8_t FILETYPE_TEXT = 0x00;
-    static constexpr uint8_t FILETYPE_INTEGER = 0x01;
-    static constexpr uint8_t FILETYPE_APPLESOFT = 0x02;
-    static constexpr uint8_t FILETYPE_BINARY = 0x04;
-    static constexpr uint8_t FILETYPE_STYPE = 0x08;
-    static constexpr uint8_t FILETYPE_RELOCATABLE = 0x10;
-    static constexpr uint8_t FILETYPE_A = 0x20;
-    static constexpr uint8_t FILETYPE_B = 0x40;
+    // File type codes from AppleConstants::DOS33
+    static constexpr uint8_t FILETYPE_TEXT = AppleConstants::DOS33::FILETYPE_TEXT;
+    static constexpr uint8_t FILETYPE_INTEGER = AppleConstants::DOS33::FILETYPE_INTEGER;
+    static constexpr uint8_t FILETYPE_APPLESOFT = AppleConstants::DOS33::FILETYPE_APPLESOFT;
+    static constexpr uint8_t FILETYPE_BINARY = AppleConstants::DOS33::FILETYPE_BINARY;
+    static constexpr uint8_t FILETYPE_STYPE = AppleConstants::DOS33::FILETYPE_STYPE;
+    static constexpr uint8_t FILETYPE_RELOCATABLE = AppleConstants::DOS33::FILETYPE_RELOCATABLE;
+    static constexpr uint8_t FILETYPE_A = AppleConstants::DOS33::FILETYPE_A;
+    static constexpr uint8_t FILETYPE_B = AppleConstants::DOS33::FILETYPE_B;
 
-    // File flags
-    static constexpr uint8_t FLAG_LOCKED = 0x80;
-    static constexpr uint8_t FLAG_DELETED = 0xFF;
+    // File flags from AppleConstants::DOS33
+    static constexpr uint8_t FLAG_LOCKED = AppleConstants::DOS33::FLAG_LOCKED;
+    static constexpr uint8_t FLAG_DELETED = AppleConstants::DOS33::FLAG_DELETED;
 
     // VTOC structure
     struct VTOC {

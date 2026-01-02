@@ -6,6 +6,7 @@
 #include "rdedisktool/filesystem/AppleProDOSHandler.h"
 #include "rdedisktool/msx/MSXXSAImage.h"
 #include "rdedisktool/msx/MSXDiskImage.h"
+#include "rdedisktool/utils/CommandOptions.h"
 #include "rdedisktool/Version.h"
 #include <iostream>
 #include <iomanip>
@@ -401,6 +402,87 @@ void CLI::printInfo(const std::string& message) const {
 }
 
 //=============================================================================
+// Disk Loading Helpers
+//=============================================================================
+
+LoadedDisk CLI::loadDiskImage(const std::string& imagePath) {
+    LoadedDisk result;
+
+    // Detect format
+    result.format = DiskImageFactory::detectFormat(imagePath);
+    if (result.format == DiskFormat::Unknown) {
+        printError("Unable to detect disk format: " + imagePath);
+        return result;
+    }
+
+    // Open disk image
+    try {
+        result.image = DiskImageFactory::open(imagePath, result.format);
+    } catch (const std::exception& e) {
+        printError("Failed to open disk image: " + std::string(e.what()));
+        return result;
+    }
+
+    if (!result.image) {
+        printError("Failed to open disk image: " + imagePath);
+        return result;
+    }
+
+    // Create filesystem handler
+    result.handler = FileSystemHandler::create(result.image.get());
+    if (!result.handler) {
+        printError("File system not supported for this disk format");
+        return result;
+    }
+
+    return result;
+}
+
+LoadedDisk CLI::loadDiskImageOnly(const std::string& imagePath) {
+    LoadedDisk result;
+
+    // Detect format
+    result.format = DiskImageFactory::detectFormat(imagePath);
+    if (result.format == DiskFormat::Unknown) {
+        printError("Unable to detect disk format: " + imagePath);
+        return result;
+    }
+
+    // Open disk image
+    try {
+        result.image = DiskImageFactory::open(imagePath, result.format);
+    } catch (const std::exception& e) {
+        printError("Failed to open disk image: " + std::string(e.what()));
+        return result;
+    }
+
+    if (!result.image) {
+        printError("Failed to open disk image: " + imagePath);
+        return result;
+    }
+
+    // Try to create filesystem handler (optional for this method)
+    result.handler = FileSystemHandler::create(result.image.get());
+
+    return result;
+}
+
+bool CLI::saveDiskImage(DiskImage* image, const std::string& operation) {
+    if (!image) {
+        printError("No disk image to save");
+        return false;
+    }
+
+    try {
+        image->save();
+        return true;
+    } catch (const std::exception& e) {
+        printError("Error saving disk image after " + operation + ": " + std::string(e.what()));
+        return false;
+    }
+}
+
+//=============================================================================
 // Command Implementations
 //=============================================================================
 
@@ -530,21 +612,12 @@ int CLI::cmdList(const std::vector<std::string>& args) {
     std::string path = args.size() > 1 ? args[1] : "";
 
     try {
-        DiskFormat format = DiskImageFactory::detectFormat(imagePath);
-        if (format == DiskFormat::Unknown) {
-            printError("Unable to detect disk format");
+        auto disk = loadDiskImage(imagePath);
+        if (!disk) {
             return 1;
         }
 
-        auto image = DiskImageFactory::open(imagePath, format);
-        auto handler = FileSystemHandler::create(image.get());
-
-        if (!handler) {
-            printError("File system not supported for this disk format");
-            return 1;
-        }
-
-        auto files = handler->listFiles(path);
+        auto files = disk.handler->listFiles(path);
 
         if (m_quiet) {
             // Quiet mode: output only filenames
@@ -553,7 +626,7 @@ int CLI::cmdList(const std::vector<std::string>& args) {
             }
         } else {
             std::cout << "Directory listing for: " << imagePath << "\n";
-            std::cout << "Volume: " << handler->getVolumeName() << "\n\n";
+            std::cout << "Volume: " << disk.handler->getVolumeName() << "\n\n";
 
             std::cout << std::left << std::setw(30) << "Name"
                       << std::right << std::setw(10) << "Size"
@@ -583,7 +656,7 @@ int CLI::cmdList(const std::vector<std::string>& args) {
 
             std::cout << std::string(52, '-') << "\n";
             std::cout << files.size() << " file(s), " << totalSize << " bytes\n";
-            std::cout << "Free space: " << handler->getFreeSpace() << " bytes\n";
+            std::cout << "Free space: " << disk.handler->getFreeSpace() << " bytes\n";
         }
 
         return 0;
@@ -618,26 +691,17 @@ int CLI::cmdExtract(const std::vector<std::string>& args) {
     }
 
     try {
-        DiskFormat format = DiskImageFactory::detectFormat(imagePath);
-        if (format == DiskFormat::Unknown) {
-            printError("Unable to detect disk format");
+        auto disk = loadDiskImage(imagePath);
+        if (!disk) {
             return 1;
         }
 
-        auto image = DiskImageFactory::open(imagePath, format);
-        auto handler = FileSystemHandler::create(image.get());
-
-        if (!handler) {
-            printError("File system not supported for this disk format");
-            return 1;
-        }
-
-        if (!handler->fileExists(filename)) {
+        if (!disk.handler->fileExists(filename)) {
             printError("File not found: " + filename);
             return 1;
         }
 
-        auto data = handler->readFile(filename);
+        auto data = disk.handler->readFile(filename);
 
         std::ofstream outFile(outputPath, std::ios::binary);
         if (!outFile) {
@@ -661,27 +725,27 @@ int CLI::cmdExtract(const std::vector<std::string>& args) {
 }
 
 int CLI::cmdAdd(const std::vector<std::string>& args) {
-    // Parse options
-    bool forceOverwrite = false;
-    std::vector<std::string> positionalArgs;
+    // Parse options using CommandOptions
+    rdedisktool::CommandOptions opts;
+    opts.addFlag("force", {"-f", "--force"});
 
-    for (const auto& arg : args) {
-        if (arg == "-f" || arg == "--force") {
-            forceOverwrite = true;
-        } else {
-            positionalArgs.push_back(arg);
-        }
+    std::string parseError;
+    if (!opts.parse(args, &parseError)) {
+        printError(parseError);
+        printCommandHelp("add");
+        return 1;
     }
 
-    if (positionalArgs.size() < 2) {
+    if (opts.positionalCount() < 2) {
         printError("Missing arguments");
         printCommandHelp("add");
         return 1;
     }
 
-    const std::string& imagePath = positionalArgs[0];
-    const std::string& hostFile = positionalArgs[1];
-    std::string targetName = positionalArgs.size() > 2 ? positionalArgs[2] : "";
+    bool forceOverwrite = opts.hasFlag("force");
+    const std::string& imagePath = opts.getPositional(0);
+    const std::string& hostFile = opts.getPositional(1);
+    std::string targetName = opts.getPositional(2);
 
     // Extract filename from path if target name not specified
     if (targetName.empty()) {
@@ -705,28 +769,19 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
         inFile.close();
 
         // Open disk image
-        DiskFormat format = DiskImageFactory::detectFormat(imagePath);
-        if (format == DiskFormat::Unknown) {
-            printError("Unable to detect disk format");
-            return 1;
-        }
-
-        auto image = DiskImageFactory::open(imagePath, format);
-        auto handler = FileSystemHandler::create(image.get());
-
-        if (!handler) {
-            printError("File system not supported for this disk format");
+        auto disk = loadDiskImage(imagePath);
+        if (!disk) {
             return 1;
         }
 
         // Check if file already exists
-        if (handler->fileExists(targetName)) {
+        if (disk.handler->fileExists(targetName)) {
             if (!forceOverwrite) {
                 printError("File already exists: " + targetName + "\nUse --force to overwrite");
                 return 1;
             }
             // Delete existing file before adding new one
-            if (!handler->deleteFile(targetName)) {
+            if (!disk.handler->deleteFile(targetName)) {
                 printError("Failed to delete existing file: " + targetName);
                 return 1;
             }
@@ -736,7 +791,7 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
         }
 
         // Check free space
-        if (handler->getFreeSpace() < data.size()) {
+        if (disk.handler->getFreeSpace() < data.size()) {
             printError("Not enough space on disk");
             return 1;
         }
@@ -745,13 +800,15 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
         FileMetadata metadata;
         metadata.targetName = targetName;
 
-        if (!handler->writeFile(targetName, data, metadata)) {
+        if (!disk.handler->writeFile(targetName, data, metadata)) {
             printError("Failed to write file to disk image");
             return 1;
         }
 
         // Save disk image
-        image->save();
+        if (!saveDiskImage(disk.image.get(), "add")) {
+            return 1;
+        }
 
         if (!m_quiet) {
             std::cout << "Added: " << hostFile << " -> " << targetName
@@ -776,32 +833,25 @@ int CLI::cmdDelete(const std::vector<std::string>& args) {
     const std::string& filename = args[1];
 
     try {
-        DiskFormat format = DiskImageFactory::detectFormat(imagePath);
-        if (format == DiskFormat::Unknown) {
-            printError("Unable to detect disk format");
+        auto disk = loadDiskImage(imagePath);
+        if (!disk) {
             return 1;
         }
 
-        auto image = DiskImageFactory::open(imagePath, format);
-        auto handler = FileSystemHandler::create(image.get());
-
-        if (!handler) {
-            printError("File system not supported for this disk format");
-            return 1;
-        }
-
-        if (!handler->fileExists(filename)) {
+        if (!disk.handler->fileExists(filename)) {
             printError("File not found: " + filename);
             return 1;
         }
 
-        if (!handler->deleteFile(filename)) {
+        if (!disk.handler->deleteFile(filename)) {
             printError("Failed to delete file: " + filename);
             return 1;
         }
 
         // Save disk image
-        image->save();
+        if (!saveDiskImage(disk.image.get(), "delete")) {
+            return 1;
+        }
 
         if (!m_quiet) {
             std::cout << "Deleted: " << filename << "\n";
@@ -815,84 +865,46 @@ int CLI::cmdDelete(const std::vector<std::string>& args) {
 }
 
 int CLI::cmdMkdir(const std::vector<std::string>& args) {
-    if (args.size() < 2) {
+    // Parse options using CommandOptions
+    rdedisktool::CommandOptions opts;
+    // No options defined - mkdir just takes positional arguments
+
+    std::string parseError;
+    if (!opts.parse(args, &parseError)) {
+        printError(parseError);
+        printCommandHelp("mkdir");
+        return 1;
+    }
+
+    if (opts.positionalCount() < 2) {
         printError("Missing arguments");
         printCommandHelp("mkdir");
         return 1;
     }
 
-    std::string imagePath;
-    std::string dirPath;
-    std::string formatStr;
-
-    // Parse arguments
-    size_t i = 0;
-    while (i < args.size()) {
-        if (args[i] == "-f" || args[i] == "--format") {
-            if (i + 1 >= args.size()) {
-                printError("Missing format argument");
-                return 1;
-            }
-            formatStr = args[++i];
-        } else if (imagePath.empty()) {
-            imagePath = args[i];
-        } else if (dirPath.empty()) {
-            dirPath = args[i];
-        }
-        ++i;
-    }
-
-    if (imagePath.empty() || dirPath.empty()) {
-        printError("Missing arguments");
-        printCommandHelp("mkdir");
-        return 1;
-    }
+    const std::string& imagePath = opts.getPositional(0);
+    const std::string& dirPath = opts.getPositional(1);
 
     try {
-        DiskFormat format;
-        if (!formatStr.empty()) {
-            format = formatFromString(formatStr);
-            if (format == DiskFormat::Unknown) {
-                printError("Unknown disk format: " + formatStr);
-                return 1;
-            }
-        } else {
-            format = DiskImageFactory::detectFormat(imagePath);
-            if (format == DiskFormat::Unknown) {
-                printError("Unable to detect disk format");
-                return 1;
-            }
-        }
-
-        auto image = DiskImageFactory::open(imagePath, format);
-        auto handler = FileSystemHandler::create(image.get());
-
-        if (!handler) {
-            printError("File system not supported for this disk format");
+        auto disk = loadDiskImage(imagePath);
+        if (!disk) {
             return 1;
         }
 
-        // Check if handler supports createDirectory
-        bool success = false;
-
-        // Try MSXDOSHandler
-        auto* msxHandler = dynamic_cast<MSXDOSHandler*>(handler.get());
-        if (msxHandler) {
-            success = msxHandler->createDirectory(dirPath);
+        // Use unified directory interface
+        if (!disk.handler->supportsDirectories()) {
+            printError("This file system does not support directories");
+            return 1;
         }
 
-        // Try AppleProDOSHandler
-        auto* prodosHandler = dynamic_cast<AppleProDOSHandler*>(handler.get());
-        if (prodosHandler) {
-            success = prodosHandler->createDirectory(dirPath);
-        }
-
-        if (!success) {
+        if (!disk.handler->createDirectory(dirPath)) {
             printError("Failed to create directory: " + dirPath);
             return 1;
         }
 
-        image->save();
+        if (!saveDiskImage(disk.image.get(), "mkdir")) {
+            return 1;
+        }
 
         if (!m_quiet) {
             std::cout << "Created directory: " << dirPath << "\n";
@@ -906,84 +918,46 @@ int CLI::cmdMkdir(const std::vector<std::string>& args) {
 }
 
 int CLI::cmdRmdir(const std::vector<std::string>& args) {
-    if (args.size() < 2) {
+    // Parse options using CommandOptions
+    rdedisktool::CommandOptions opts;
+    // No options defined - rmdir just takes positional arguments
+
+    std::string parseError;
+    if (!opts.parse(args, &parseError)) {
+        printError(parseError);
+        printCommandHelp("rmdir");
+        return 1;
+    }
+
+    if (opts.positionalCount() < 2) {
         printError("Missing arguments");
         printCommandHelp("rmdir");
         return 1;
     }
 
-    std::string imagePath;
-    std::string dirPath;
-    std::string formatStr;
-
-    // Parse arguments
-    size_t i = 0;
-    while (i < args.size()) {
-        if (args[i] == "-f" || args[i] == "--format") {
-            if (i + 1 >= args.size()) {
-                printError("Missing format argument");
-                return 1;
-            }
-            formatStr = args[++i];
-        } else if (imagePath.empty()) {
-            imagePath = args[i];
-        } else if (dirPath.empty()) {
-            dirPath = args[i];
-        }
-        ++i;
-    }
-
-    if (imagePath.empty() || dirPath.empty()) {
-        printError("Missing arguments");
-        printCommandHelp("rmdir");
-        return 1;
-    }
+    const std::string& imagePath = opts.getPositional(0);
+    const std::string& dirPath = opts.getPositional(1);
 
     try {
-        DiskFormat format;
-        if (!formatStr.empty()) {
-            format = formatFromString(formatStr);
-            if (format == DiskFormat::Unknown) {
-                printError("Unknown disk format: " + formatStr);
-                return 1;
-            }
-        } else {
-            format = DiskImageFactory::detectFormat(imagePath);
-            if (format == DiskFormat::Unknown) {
-                printError("Unable to detect disk format");
-                return 1;
-            }
-        }
-
-        auto image = DiskImageFactory::open(imagePath, format);
-        auto handler = FileSystemHandler::create(image.get());
-
-        if (!handler) {
-            printError("File system not supported for this disk format");
+        auto disk = loadDiskImage(imagePath);
+        if (!disk) {
             return 1;
         }
 
-        // Check if handler supports deleteDirectory
-        bool success = false;
-
-        // Try MSXDOSHandler
-        auto* msxHandler = dynamic_cast<MSXDOSHandler*>(handler.get());
-        if (msxHandler) {
-            success = msxHandler->deleteDirectory(dirPath);
+        // Use unified directory interface
+        if (!disk.handler->supportsDirectories()) {
+            printError("This file system does not support directories");
+            return 1;
         }
 
-        // Try AppleProDOSHandler
-        auto* prodosHandler = dynamic_cast<AppleProDOSHandler*>(handler.get());
-        if (prodosHandler) {
-            success = prodosHandler->deleteDirectory(dirPath);
-        }
-
-        if (!success) {
+        if (!disk.handler->deleteDirectory(dirPath)) {
             printError("Failed to remove directory: " + dirPath + " (directory may not be empty)");
             return 1;
         }
 
-        image->save();
+        if (!saveDiskImage(disk.image.get(), "rmdir")) {
+            return 1;
+        }
 
         if (!m_quiet) {
             std::cout << "Removed directory: " << dirPath << "\n";
@@ -997,70 +971,33 @@ int CLI::cmdRmdir(const std::vector<std::string>& args) {
 }
 
 int CLI::cmdCreate(const std::vector<std::string>& args) {
-    if (args.empty()) {
+    // Parse options using CommandOptions
+    rdedisktool::CommandOptions opts;
+    opts.addValue("format", {"-f", "--format"});
+    opts.addValue("filesystem", {"--fs", "--filesystem"});
+    opts.addValue("volume", {"-n", "--volume"});
+    opts.addValue("geometry", {"-g", "--geometry"});
+    opts.addFlag("force", {"--force"});
+
+    std::string parseError;
+    if (!opts.parse(args, &parseError)) {
+        printError(parseError);
+        printCommandHelp("create");
+        return 1;
+    }
+
+    if (opts.positionalCount() < 1) {
         printError("Missing output file argument");
         printCommandHelp("create");
         return 1;
     }
 
-    // Option variables
-    std::string outputPath;
-    std::string formatStr;
-    std::string filesystemStr;
-    std::string volumeName;
-    std::string geometryStr;
-    bool force = false;
-
-    // Parse arguments and options
-    size_t i = 0;
-    if (!args.empty() && !args[0].empty() && args[0][0] != '-') {
-        outputPath = args[0];
-        i = 1;
-    }
-
-    for (; i < args.size(); ++i) {
-        const std::string& arg = args[i];
-
-        if (arg == "--format" || arg == "-f") {
-            if (++i >= args.size()) {
-                printError("--format requires a value");
-                return 1;
-            }
-            formatStr = args[i];
-        } else if (arg == "--filesystem" || arg == "--fs") {
-            if (++i >= args.size()) {
-                printError("--filesystem requires a value");
-                return 1;
-            }
-            filesystemStr = args[i];
-        } else if (arg == "--volume" || arg == "-n") {
-            if (++i >= args.size()) {
-                printError("--volume requires a value");
-                return 1;
-            }
-            volumeName = args[i];
-        } else if (arg == "--geometry" || arg == "-g") {
-            if (++i >= args.size()) {
-                printError("--geometry requires a value");
-                return 1;
-            }
-            geometryStr = args[i];
-        } else if (arg == "--force") {
-            force = true;
-        } else if (!arg.empty() && arg[0] != '-' && outputPath.empty()) {
-            outputPath = arg;
-        } else {
-            printError("Unknown option: " + arg);
-            printCommandHelp("create");
-            return 1;
-        }
-    }
-
-    if (outputPath.empty()) {
-        printError("Missing output file argument");
-        printCommandHelp("create");
-        return 1;
-    }
+    const std::string& outputPath = opts.getPositional(0);
+    std::string formatStr = opts.getValue("format");
+    std::string filesystemStr = opts.getValue("filesystem");
+    std::string volumeName = opts.getValue("volume");
+    std::string geometryStr = opts.getValue("geometry");
+    bool force = opts.hasFlag("force");
 
     // Determine disk format
     DiskFormat format = DiskFormat::Unknown;
@@ -1190,41 +1127,28 @@ int CLI::cmdCreate(const std::vector<std::string>& args) {
 }
 
 int CLI::cmdConvert(const std::vector<std::string>& args) {
-    if (args.size() < 2) {
-        printError("Missing arguments");
+    // Parse options using CommandOptions
+    rdedisktool::CommandOptions opts;
+    opts.addValue("format", {"-f", "--format"});
+
+    std::string parseError;
+    if (!opts.parse(args, &parseError)) {
+        printError(parseError);
         printCommandHelp("convert");
         return 1;
     }
 
+    if (opts.positionalCount() < 2) {
+        printError("Missing input or output file");
+        printCommandHelp("convert");
+        return 1;
+    }
+
+    const std::string& inputPath = opts.getPositional(0);
+    const std::string& outputPath = opts.getPositional(1);
+    std::string formatStr = opts.getValue("format");
+
     try {
-        std::string inputPath;
-        std::string outputPath;
-        std::string formatStr;
-
-        // Parse arguments
-        size_t i = 0;
-        while (i < args.size()) {
-            const std::string& arg = args[i];
-
-            if (arg == "-f" || arg == "--format") {
-                if (++i >= args.size()) {
-                    printError("--format requires a value");
-                    return 1;
-                }
-                formatStr = args[i];
-            } else if (inputPath.empty()) {
-                inputPath = arg;
-            } else if (outputPath.empty()) {
-                outputPath = arg;
-            }
-            ++i;
-        }
-
-        if (inputPath.empty() || outputPath.empty()) {
-            printError("Missing input or output file");
-            printCommandHelp("convert");
-            return 1;
-        }
 
         // Open input image
         auto inputImage = DiskImageFactory::open(inputPath);
@@ -1354,92 +1278,65 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
 }
 
 int CLI::cmdDump(const std::vector<std::string>& args) {
-    if (args.empty()) {
+    // Parse options using CommandOptions
+    rdedisktool::CommandOptions opts;
+    opts.addValue("track", {"-t", "--track"});
+    opts.addValue("sector", {"-s", "--sector"});
+    opts.addValue("side", {"--side"}, "0");
+    opts.addValue("format", {"-f", "--format"});
+
+    std::string parseError;
+    if (!opts.parse(args, &parseError)) {
+        printError(parseError);
+        printCommandHelp("dump");
+        return 1;
+    }
+
+    if (opts.positionalCount() < 1) {
         printError("Missing image file argument");
         printCommandHelp("dump");
         return 1;
     }
 
-    // Parse arguments
-    std::string imagePath;
-    std::string formatStr;
-    int track = -1;
-    int sector = -1;
-    int side = 0;
+    const std::string& imagePath = opts.getPositional(0);
+    std::string formatStr = opts.getValue("format");
 
-    size_t i = 0;
-    if (!args.empty() && !args[0].empty() && args[0][0] != '-') {
-        imagePath = args[0];
-        i = 1;
-    }
-
-    for (; i < args.size(); ++i) {
-        const std::string& arg = args[i];
-
-        if (arg == "--track" || arg == "-t") {
-            if (++i >= args.size()) {
-                printError("--track requires a value");
-                return 1;
-            }
-            try {
-                track = std::stoi(args[i]);
-            } catch (...) {
-                printError("Invalid track number: " + args[i]);
-                return 1;
-            }
-        } else if (arg == "--sector" || arg == "-s") {
-            if (++i >= args.size()) {
-                printError("--sector requires a value");
-                return 1;
-            }
-            try {
-                sector = std::stoi(args[i]);
-            } catch (...) {
-                printError("Invalid sector number: " + args[i]);
-                return 1;
-            }
-        } else if (arg == "--side") {
-            if (++i >= args.size()) {
-                printError("--side requires a value");
-                return 1;
-            }
-            try {
-                side = std::stoi(args[i]);
-            } catch (...) {
-                printError("Invalid side number: " + args[i]);
-                return 1;
-            }
-        } else if (arg == "--format" || arg == "-f") {
-            if (++i >= args.size()) {
-                printError("--format requires a value");
-                return 1;
-            }
-            formatStr = args[i];
-        } else if (!arg.empty() && arg[0] != '-' && imagePath.empty()) {
-            imagePath = arg;
-        } else {
-            printError("Unknown option: " + arg);
-            printCommandHelp("dump");
-            return 1;
-        }
-    }
-
-    // Validate required arguments
-    if (imagePath.empty()) {
-        printError("Missing image file argument");
-        printCommandHelp("dump");
-        return 1;
-    }
-
-    if (track < 0) {
+    // Parse and validate track
+    std::string trackStr = opts.getValue("track");
+    if (trackStr.empty()) {
         printError("Missing --track argument");
         printCommandHelp("dump");
         return 1;
     }
+    int track;
+    try {
+        track = std::stoi(trackStr);
+    } catch (...) {
+        printError("Invalid track number: " + trackStr);
+        return 1;
+    }
 
-    if (sector < 0) {
+    // Parse and validate sector
+    std::string sectorStr = opts.getValue("sector");
+    if (sectorStr.empty()) {
         printError("Missing --sector argument");
         printCommandHelp("dump");
+        return 1;
+    }
+    int sector;
+    try {
+        sector = std::stoi(sectorStr);
+    } catch (...) {
+        printError("Invalid sector number: " + sectorStr);
+        return 1;
+    }
+
+    // Parse side (has default value of 0)
+    int side;
+    try {
+        side = std::stoi(opts.getValue("side", "0"));
+    } catch (...) {
+        printError("Invalid side number: " + opts.getValue("side"));
         return 1;
     }
 

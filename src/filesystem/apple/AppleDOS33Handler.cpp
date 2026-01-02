@@ -12,6 +12,7 @@
 
 #include "rdedisktool/filesystem/AppleDOS33Handler.h"
 #include "rdedisktool/Exceptions.h"
+#include "rdedisktool/utils/BinaryReader.h"
 #include <algorithm>
 #include <cstring>
 #include <cctype>
@@ -42,17 +43,18 @@ bool AppleDOS33Handler::parseVTOC() {
         return false;
     }
 
-    // Parse VTOC
-    m_vtoc.firstCatalogTrack = vtocData[0x01];
-    m_vtoc.firstCatalogSector = vtocData[0x02];
-    m_vtoc.dosRelease = vtocData[0x03];
-    m_vtoc.volumeNumber = vtocData[0x06];
-    m_vtoc.maxTSPairs = vtocData[0x27];
-    m_vtoc.lastTrackAllocated = vtocData[0x30];
-    m_vtoc.allocationDirection = static_cast<int8_t>(vtocData[0x31]);
-    m_vtoc.tracksPerDisk = vtocData[0x34];
-    m_vtoc.sectorsPerTrack = vtocData[0x35];
-    m_vtoc.bytesPerSector = vtocData[0x36] | (static_cast<uint16_t>(vtocData[0x37]) << 8);
+    // Parse VTOC using BinaryReader
+    rdedisktool::BinaryReader reader(vtocData);
+    m_vtoc.firstCatalogTrack = reader.readU8(0x01);
+    m_vtoc.firstCatalogSector = reader.readU8(0x02);
+    m_vtoc.dosRelease = reader.readU8(0x03);
+    m_vtoc.volumeNumber = reader.readU8(0x06);
+    m_vtoc.maxTSPairs = reader.readU8(0x27);
+    m_vtoc.lastTrackAllocated = reader.readU8(0x30);
+    m_vtoc.allocationDirection = reader.readS8(0x31);
+    m_vtoc.tracksPerDisk = reader.readU8(0x34);
+    m_vtoc.sectorsPerTrack = reader.readU8(0x35);
+    m_vtoc.bytesPerSector = reader.readU16LE(0x36);
 
     // Validate
     if (m_vtoc.tracksPerDisk == 0 || m_vtoc.sectorsPerTrack == 0) {

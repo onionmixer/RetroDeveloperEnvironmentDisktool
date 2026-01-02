@@ -1,4 +1,5 @@
 #include "rdedisktool/DiskImageFactory.h"
+#include "rdedisktool/FormatDetector.h"
 #include <fstream>
 #include <algorithm>
 #include <cctype>
@@ -12,230 +13,41 @@ std::map<DiskFormat, DiskImageFactory::CreatorFunc>& DiskImageFactory::getCreato
 }
 
 //=============================================================================
-// Format Detection
+// Format Detection (delegated to FormatDetector)
 //=============================================================================
 
 DiskFormat DiskImageFactory::detectFormat(const std::filesystem::path& path) {
-    // Check if file exists
-    if (!std::filesystem::exists(path)) {
-        throw FileNotFoundException(path.string());
-    }
-
-    // Read file content
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
-        throw ReadException("Cannot open file: " + path.string());
-    }
-
-    // Get file size
-    file.seekg(0, std::ios::end);
-    size_t fileSize = static_cast<size_t>(file.tellg());
-    file.seekg(0, std::ios::beg);
-
-    // Read data (limit to 64KB for format detection)
-    size_t readSize = std::min(fileSize, size_t(65536));
-    std::vector<uint8_t> data(readSize);
-    file.read(reinterpret_cast<char*>(data.data()), readSize);
-
-    // Store full file size for size-based detection
-    data.resize(fileSize);  // Resize to actual size for size checks
-
-    // Get extension (lowercase)
-    std::string extension = path.extension().string();
-    std::transform(extension.begin(), extension.end(), extension.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-
-    return detectFormat(data, extension);
+    // Delegate to FormatDetector
+    return rdedisktool::FormatDetector::detect(path);
 }
 
 DiskFormat DiskImageFactory::detectFormat(const std::vector<uint8_t>& data,
                                           const std::string& extension) {
-    if (data.empty()) {
-        return DiskFormat::Unknown;
-    }
-
-    // Try WOZ format first (has clear magic number)
-    DiskFormat wozFormat = detectWOZFormat(data);
-    if (wozFormat != DiskFormat::Unknown) {
-        return wozFormat;
-    }
-
-    // Try DMK format
-    DiskFormat dmkFormat = detectDMKFormat(data);
-    if (dmkFormat != DiskFormat::Unknown) {
-        return dmkFormat;
-    }
-
-    // Try XSA format (has magic number "PCK\x08")
-    DiskFormat xsaFormat = detectXSAFormat(data);
-    if (xsaFormat != DiskFormat::Unknown) {
-        return xsaFormat;
-    }
-
-    // Detect based on extension and size
-    std::string ext = extension;
-    std::transform(ext.begin(), ext.end(), ext.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-
-    size_t fileSize = data.size();
-
-    // Apple II specific extensions (unambiguous)
-    if (ext == ".do") {
-        return DiskFormat::AppleDO;
-    }
-    if (ext == ".po") {
-        return DiskFormat::ApplePO;
-    }
-    if (ext == ".nib") {
-        // NIB files are 232960 bytes (6656 * 35 tracks)
-        if (fileSize == 232960) {
-            return DiskFormat::AppleNIB;
-        }
-        // NB2 variant is 6384 bytes per track
-        if (fileSize == 223440) {
-            return DiskFormat::AppleNIB2;
-        }
-    }
-    if (ext == ".nb2") {
-        return DiskFormat::AppleNIB2;
-    }
-    if (ext == ".woz") {
-        return detectWOZFormat(data);
-    }
-
-    // MSX specific extensions (unambiguous)
-    if (ext == ".dmk") {
-        return DiskFormat::MSXDMK;
-    }
-    if (ext == ".xsa") {
-        return DiskFormat::MSXXSA;
-    }
-
-    // For .dsk extension, need to determine if it's Apple II or MSX
-    if (ext == ".dsk" || ext.empty()) {
-        // First check MSX standard sizes (more varied than Apple II)
-        if (fileSize == 163840 ||   // 1S 40T 8S (320KB single-sided)
-            fileSize == 184320 ||   // 1S 40T 9S (360KB)
-            fileSize == 327680 ||   // 2S 40T 8S (640KB double-sided)
-            fileSize == 368640 ||   // 2S 40T 9S (720KB)
-            fileSize == 737280) {   // 2S 80T 9S (720KB DS/DD)
-            return detectMSXFormat(data, ext);
-        }
-
-        // Apple II standard sizes
-        if (fileSize == 143360) {  // 35 tracks * 16 sectors * 256 bytes
-            return detectAppleFormat(data, ext);
-        }
-        if (fileSize == 116480) {  // 35 tracks * 13 sectors * 256 bytes (DOS 3.2)
-            return DiskFormat::AppleDO;
-        }
-
-        // For non-standard sizes, try content-based detection
-        return detectDSKByContent(data);
-    }
-
-    return DiskFormat::Unknown;
+    // Delegate to FormatDetector
+    return rdedisktool::FormatDetector::detect(data, extension);
 }
 
+// Legacy detection methods - delegate to FormatDetector for backwards compatibility
 DiskFormat DiskImageFactory::detectAppleFormat(const std::vector<uint8_t>& data,
                                                const std::string& extension) {
-    // Default to DOS order for .do and .dsk
-    if (extension == ".do") {
-        return DiskFormat::AppleDO;
-    }
-    if (extension == ".po") {
-        return DiskFormat::ApplePO;
-    }
-
-    // For .dsk, try to detect ProDOS vs DOS 3.3 by examining boot sector
-    if (data.size() >= 512) {
-        // ProDOS volumes typically have specific signatures
-        // Check for ProDOS signature at block 0
-        // For now, default to DOS order
-    }
-
-    return DiskFormat::AppleDO;
+    return rdedisktool::FormatDetector::detectAppleFormat(data, extension);
 }
 
 DiskFormat DiskImageFactory::detectMSXFormat(const std::vector<uint8_t>& data,
                                              const std::string& extension) {
-    // Check for MSX boot sector signature
-    if (data.size() >= 512) {
-        // MSX boot sectors typically start with JMP instruction (0xEB or 0xE9)
-        if (data[0] == 0xEB || data[0] == 0xE9) {
-            return DiskFormat::MSXDSK;
-        }
-
-        // Check OEM name for MSX signatures
-        // Bytes 3-10 often contain "MSX" or manufacturer name
-    }
-
-    return DiskFormat::MSXDSK;
+    return rdedisktool::FormatDetector::detectMSXFormat(data, extension);
 }
 
 DiskFormat DiskImageFactory::detectWOZFormat(const std::vector<uint8_t>& data) {
-    // WOZ magic number: "WOZ1" or "WOZ2"
-    if (data.size() < 8) {
-        return DiskFormat::Unknown;
-    }
-
-    if (data[0] == 'W' && data[1] == 'O' && data[2] == 'Z') {
-        if (data[3] == '1') {
-            return DiskFormat::AppleWOZ1;
-        }
-        if (data[3] == '2') {
-            return DiskFormat::AppleWOZ2;
-        }
-    }
-
-    return DiskFormat::Unknown;
+    return rdedisktool::FormatDetector::detectWOZFormat(data);
 }
 
 DiskFormat DiskImageFactory::detectDMKFormat(const std::vector<uint8_t>& data) {
-    // DMK format detection
-    // DMK header is 16 bytes with specific structure
-    if (data.size() < 16) {
-        return DiskFormat::Unknown;
-    }
-
-    // DMK header structure:
-    // Byte 0: Write protect (0x00 = writable, 0xFF = protected)
-    // Byte 1: Number of tracks
-    // Bytes 2-3: Track length (little-endian)
-    // Byte 4: Flags
-
-    uint8_t writeProtect = data[0];
-    uint8_t numTracks = data[1];
-    uint16_t trackLength = data[2] | (data[3] << 8);
-
-    // Validate DMK header
-    if ((writeProtect != 0x00 && writeProtect != 0xFF) ||
-        numTracks == 0 || numTracks > 86 ||
-        trackLength < 128 || trackLength > 16384) {
-        return DiskFormat::Unknown;
-    }
-
-    // Check if file size matches expected DMK size
-    size_t expectedSize = 16 + (numTracks * trackLength);
-    if (data.size() >= expectedSize) {
-        return DiskFormat::MSXDMK;
-    }
-
-    return DiskFormat::Unknown;
+    return rdedisktool::FormatDetector::detectDMKFormat(data);
 }
 
 DiskFormat DiskImageFactory::detectXSAFormat(const std::vector<uint8_t>& data) {
-    // XSA magic number: "PCK\x08"
-    if (data.size() < 4) {
-        return DiskFormat::Unknown;
-    }
-
-    if (data[0] == 'P' && data[1] == 'C' &&
-        data[2] == 'K' && data[3] == 0x08) {
-        return DiskFormat::MSXXSA;
-    }
-
-    return DiskFormat::Unknown;
+    return rdedisktool::FormatDetector::detectXSAFormat(data);
 }
 
 DiskFormat DiskImageFactory::detectDSKByContent(const std::vector<uint8_t>& data) {

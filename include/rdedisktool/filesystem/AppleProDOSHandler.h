@@ -3,6 +3,7 @@
 
 #include "rdedisktool/FileSystemHandler.h"
 #include "rdedisktool/apple/AppleDiskImage.h"
+#include "rdedisktool/apple/AppleConstants.h"
 #include <vector>
 #include <string>
 #include <map>
@@ -48,73 +49,75 @@ public:
     std::string getVolumeName() const override;
     ValidationResult validateExtended() const override;
 
-    // Subdirectory support
-    bool createDirectory(const std::string& path);
-    bool deleteDirectory(const std::string& path);
+    // Directory operations (override from FileSystemHandler)
+    bool supportsDirectories() const override { return true; }
+    bool createDirectory(const std::string& path) override;
+    bool deleteDirectory(const std::string& path) override;
+    bool isDirectory(const std::string& path) const override;
 
 private:
-    // Constants
-    static constexpr size_t BLOCK_SIZE = 512;
-    static constexpr size_t BLOCKS_PER_TRACK = 8;
-    static constexpr size_t BOOT_BLOCK = 0;
-    static constexpr size_t VOLUME_DIR_BLOCK = 2;
-    static constexpr size_t BITMAP_BLOCK = 6;
-    static constexpr size_t DIR_ENTRY_SIZE = 0x27;       // 39 bytes
-    static constexpr size_t ENTRIES_PER_BLOCK = 13;
-    static constexpr size_t MAX_FILENAME_LENGTH = 15;
-    static constexpr size_t TOTAL_BLOCKS = 280;          // 140K disk
+    // Constants from AppleConstants::ProDOS
+    static constexpr size_t BLOCK_SIZE = AppleConstants::ProDOS::BLOCK_SIZE;
+    static constexpr size_t BLOCKS_PER_TRACK = AppleConstants::ProDOS::BLOCKS_PER_TRACK;
+    static constexpr size_t BOOT_BLOCK = AppleConstants::ProDOS::BOOT_BLOCK;
+    static constexpr size_t VOLUME_DIR_BLOCK = AppleConstants::ProDOS::VOLUME_DIR_BLOCK;
+    static constexpr size_t BITMAP_BLOCK = AppleConstants::ProDOS::BITMAP_BLOCK;
+    static constexpr size_t DIR_ENTRY_SIZE = AppleConstants::ProDOS::DIR_ENTRY_SIZE;
+    static constexpr size_t ENTRIES_PER_BLOCK = AppleConstants::ProDOS::ENTRIES_PER_BLOCK;
+    static constexpr size_t MAX_FILENAME_LENGTH = AppleConstants::ProDOS::MAX_FILENAME_LENGTH;
+    static constexpr size_t TOTAL_BLOCKS = AppleConstants::ProDOS::TOTAL_BLOCKS;
 
-    // Storage types (upper nibble of storage_type_and_name_length)
-    static constexpr uint8_t STORAGE_DELETED = 0x00;
-    static constexpr uint8_t STORAGE_SEEDLING = 0x01;    // 1 data block
-    static constexpr uint8_t STORAGE_SAPLING = 0x02;     // 1 index + up to 256 data blocks
-    static constexpr uint8_t STORAGE_TREE = 0x03;        // 1 master + up to 256 index blocks
-    static constexpr uint8_t STORAGE_PASCAL_AREA = 0x04;
-    static constexpr uint8_t STORAGE_GSOS_FORK = 0x05;
-    static constexpr uint8_t STORAGE_SUBDIRECTORY = 0x0D;
-    static constexpr uint8_t STORAGE_SUBDIR_HEADER = 0x0E;
-    static constexpr uint8_t STORAGE_VOLUME_HEADER = 0x0F;
+    // Storage types from AppleConstants::ProDOS
+    static constexpr uint8_t STORAGE_DELETED = AppleConstants::ProDOS::STORAGE_DELETED;
+    static constexpr uint8_t STORAGE_SEEDLING = AppleConstants::ProDOS::STORAGE_SEEDLING;
+    static constexpr uint8_t STORAGE_SAPLING = AppleConstants::ProDOS::STORAGE_SAPLING;
+    static constexpr uint8_t STORAGE_TREE = AppleConstants::ProDOS::STORAGE_TREE;
+    static constexpr uint8_t STORAGE_PASCAL_AREA = AppleConstants::ProDOS::STORAGE_PASCAL_AREA;
+    static constexpr uint8_t STORAGE_GSOS_FORK = AppleConstants::ProDOS::STORAGE_GSOS_FORK;
+    static constexpr uint8_t STORAGE_SUBDIRECTORY = AppleConstants::ProDOS::STORAGE_SUBDIRECTORY;
+    static constexpr uint8_t STORAGE_SUBDIR_HEADER = AppleConstants::ProDOS::STORAGE_SUBDIR_HEADER;
+    static constexpr uint8_t STORAGE_VOLUME_HEADER = AppleConstants::ProDOS::STORAGE_VOLUME_HEADER;
 
-    // File types
-    static constexpr uint8_t FILETYPE_UNK = 0x00;
-    static constexpr uint8_t FILETYPE_BAD = 0x01;
-    static constexpr uint8_t FILETYPE_PCD = 0x02;  // Pascal code
-    static constexpr uint8_t FILETYPE_PTX = 0x03;  // Pascal text
-    static constexpr uint8_t FILETYPE_TXT = 0x04;
-    static constexpr uint8_t FILETYPE_PDA = 0x05;  // Pascal data
-    static constexpr uint8_t FILETYPE_BIN = 0x06;
-    static constexpr uint8_t FILETYPE_FNT = 0x07;  // Font
-    static constexpr uint8_t FILETYPE_FOT = 0x08;  // Graphics screen
-    static constexpr uint8_t FILETYPE_BA3 = 0x09;  // Business BASIC program
-    static constexpr uint8_t FILETYPE_DA3 = 0x0A;  // Business BASIC data
-    static constexpr uint8_t FILETYPE_WPF = 0x0B;  // Word processor
-    static constexpr uint8_t FILETYPE_SOS = 0x0C;  // SOS system
-    static constexpr uint8_t FILETYPE_DIR = 0x0F;
-    static constexpr uint8_t FILETYPE_RPD = 0x10;  // RPS data
-    static constexpr uint8_t FILETYPE_RPI = 0x11;  // RPS index
-    static constexpr uint8_t FILETYPE_AFD = 0x12;  // AppleFile discard
-    static constexpr uint8_t FILETYPE_AFM = 0x13;  // AppleFile model
-    static constexpr uint8_t FILETYPE_AFR = 0x14;  // AppleFile report
-    static constexpr uint8_t FILETYPE_SCL = 0x15;  // Screen library
-    static constexpr uint8_t FILETYPE_PFS = 0x16;  // PFS document
-    static constexpr uint8_t FILETYPE_ADB = 0x19;  // AppleWorks database
-    static constexpr uint8_t FILETYPE_AWP = 0x1A;  // AppleWorks word proc
-    static constexpr uint8_t FILETYPE_ASP = 0x1B;  // AppleWorks spreadsheet
-    static constexpr uint8_t FILETYPE_CMD = 0xF0;  // ProDOS added command
-    static constexpr uint8_t FILETYPE_INT = 0xFA;  // Integer BASIC
-    static constexpr uint8_t FILETYPE_IVR = 0xFB;  // Integer BASIC variables
-    static constexpr uint8_t FILETYPE_BAS = 0xFC;  // Applesoft BASIC
-    static constexpr uint8_t FILETYPE_VAR = 0xFD;  // Applesoft variables
-    static constexpr uint8_t FILETYPE_REL = 0xFE;  // Relocatable code
-    static constexpr uint8_t FILETYPE_SYS = 0xFF;  // ProDOS system
+    // File types from AppleConstants::ProDOS
+    static constexpr uint8_t FILETYPE_UNK = AppleConstants::ProDOS::FILETYPE_UNK;
+    static constexpr uint8_t FILETYPE_BAD = AppleConstants::ProDOS::FILETYPE_BAD;
+    static constexpr uint8_t FILETYPE_PCD = AppleConstants::ProDOS::FILETYPE_PCD;
+    static constexpr uint8_t FILETYPE_PTX = AppleConstants::ProDOS::FILETYPE_PTX;
+    static constexpr uint8_t FILETYPE_TXT = AppleConstants::ProDOS::FILETYPE_TXT;
+    static constexpr uint8_t FILETYPE_PDA = AppleConstants::ProDOS::FILETYPE_PDA;
+    static constexpr uint8_t FILETYPE_BIN = AppleConstants::ProDOS::FILETYPE_BIN;
+    static constexpr uint8_t FILETYPE_FNT = AppleConstants::ProDOS::FILETYPE_FNT;
+    static constexpr uint8_t FILETYPE_FOT = AppleConstants::ProDOS::FILETYPE_FOT;
+    static constexpr uint8_t FILETYPE_BA3 = AppleConstants::ProDOS::FILETYPE_BA3;
+    static constexpr uint8_t FILETYPE_DA3 = AppleConstants::ProDOS::FILETYPE_DA3;
+    static constexpr uint8_t FILETYPE_WPF = AppleConstants::ProDOS::FILETYPE_WPF;
+    static constexpr uint8_t FILETYPE_SOS = AppleConstants::ProDOS::FILETYPE_SOS;
+    static constexpr uint8_t FILETYPE_DIR = AppleConstants::ProDOS::FILETYPE_DIR;
+    static constexpr uint8_t FILETYPE_RPD = AppleConstants::ProDOS::FILETYPE_RPD;
+    static constexpr uint8_t FILETYPE_RPI = AppleConstants::ProDOS::FILETYPE_RPI;
+    static constexpr uint8_t FILETYPE_AFD = AppleConstants::ProDOS::FILETYPE_AFD;
+    static constexpr uint8_t FILETYPE_AFM = AppleConstants::ProDOS::FILETYPE_AFM;
+    static constexpr uint8_t FILETYPE_AFR = AppleConstants::ProDOS::FILETYPE_AFR;
+    static constexpr uint8_t FILETYPE_SCL = AppleConstants::ProDOS::FILETYPE_SCL;
+    static constexpr uint8_t FILETYPE_PFS = AppleConstants::ProDOS::FILETYPE_PFS;
+    static constexpr uint8_t FILETYPE_ADB = AppleConstants::ProDOS::FILETYPE_ADB;
+    static constexpr uint8_t FILETYPE_AWP = AppleConstants::ProDOS::FILETYPE_AWP;
+    static constexpr uint8_t FILETYPE_ASP = AppleConstants::ProDOS::FILETYPE_ASP;
+    static constexpr uint8_t FILETYPE_CMD = AppleConstants::ProDOS::FILETYPE_CMD;
+    static constexpr uint8_t FILETYPE_INT = AppleConstants::ProDOS::FILETYPE_INT;
+    static constexpr uint8_t FILETYPE_IVR = AppleConstants::ProDOS::FILETYPE_IVR;
+    static constexpr uint8_t FILETYPE_BAS = AppleConstants::ProDOS::FILETYPE_BAS;
+    static constexpr uint8_t FILETYPE_VAR = AppleConstants::ProDOS::FILETYPE_VAR;
+    static constexpr uint8_t FILETYPE_REL = AppleConstants::ProDOS::FILETYPE_REL;
+    static constexpr uint8_t FILETYPE_SYS = AppleConstants::ProDOS::FILETYPE_SYS;
 
-    // Access flags
-    static constexpr uint8_t ACCESS_READ = 0x01;
-    static constexpr uint8_t ACCESS_WRITE = 0x02;
-    static constexpr uint8_t ACCESS_BACKUP = 0x20;
-    static constexpr uint8_t ACCESS_RENAME = 0x40;
-    static constexpr uint8_t ACCESS_DESTROY = 0x80;
-    static constexpr uint8_t ACCESS_DEFAULT = 0xC3;  // Read, write, rename, destroy
+    // Access flags from AppleConstants::ProDOS
+    static constexpr uint8_t ACCESS_READ = AppleConstants::ProDOS::ACCESS_READ;
+    static constexpr uint8_t ACCESS_WRITE = AppleConstants::ProDOS::ACCESS_WRITE;
+    static constexpr uint8_t ACCESS_BACKUP = AppleConstants::ProDOS::ACCESS_BACKUP;
+    static constexpr uint8_t ACCESS_RENAME = AppleConstants::ProDOS::ACCESS_RENAME;
+    static constexpr uint8_t ACCESS_DESTROY = AppleConstants::ProDOS::ACCESS_DESTROY;
+    static constexpr uint8_t ACCESS_DEFAULT = AppleConstants::ProDOS::ACCESS_DEFAULT;
 
     // Directory entry structure
     struct DirectoryEntry {

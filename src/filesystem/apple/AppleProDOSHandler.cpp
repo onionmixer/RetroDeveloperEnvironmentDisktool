@@ -17,6 +17,7 @@
 
 #include "rdedisktool/filesystem/AppleProDOSHandler.h"
 #include "rdedisktool/Exceptions.h"
+#include "rdedisktool/utils/BinaryReader.h"
 #include <algorithm>
 #include <cstring>
 #include <cctype>
@@ -103,18 +104,17 @@ bool AppleProDOSHandler::parseVolumeHeader() {
     m_volumeHeader.name[m_volumeHeader.nameLength] = '\0';
 
     // Skip reserved (8 bytes at offset 0x14)
-    // Parse creation date/time (offset 0x1C)
-    m_volumeHeader.creationDateTime = block[0x1C] | (block[0x1D] << 8) |
-                                      (block[0x1E] << 16) | (block[0x1F] << 24);
-
-    m_volumeHeader.version = block[0x20];
-    m_volumeHeader.minVersion = block[0x21];
-    m_volumeHeader.access = block[0x22];
-    m_volumeHeader.entryLength = block[0x23];
-    m_volumeHeader.entriesPerBlock = block[0x24];
-    m_volumeHeader.fileCount = block[0x25] | (block[0x26] << 8);
-    m_volumeHeader.bitmapPointer = block[0x27] | (block[0x28] << 8);
-    m_volumeHeader.totalBlocks = block[0x29] | (block[0x2A] << 8);
+    // Parse remaining header fields using BinaryReader
+    rdedisktool::BinaryReader reader(block);
+    m_volumeHeader.creationDateTime = reader.readU32LE(0x1C);
+    m_volumeHeader.version = reader.readU8(0x20);
+    m_volumeHeader.minVersion = reader.readU8(0x21);
+    m_volumeHeader.access = reader.readU8(0x22);
+    m_volumeHeader.entryLength = reader.readU8(0x23);
+    m_volumeHeader.entriesPerBlock = reader.readU8(0x24);
+    m_volumeHeader.fileCount = reader.readU16LE(0x25);
+    m_volumeHeader.bitmapPointer = reader.readU16LE(0x27);
+    m_volumeHeader.totalBlocks = reader.readU16LE(0x29);
 
     // Validate
     if (m_volumeHeader.entryLength != DIR_ENTRY_SIZE) {
@@ -141,30 +141,24 @@ void AppleProDOSHandler::writeVolumeHeader() {
     }
 
     size_t offset = 4;
+    rdedisktool::BinaryWriter writer(block);
 
     // Storage type and name length
-    block[offset] = (m_volumeHeader.storageType << 4) | (m_volumeHeader.nameLength & 0x0F);
+    writer.writeU8(offset, (m_volumeHeader.storageType << 4) | (m_volumeHeader.nameLength & 0x0F));
 
     // Volume name
-    std::memcpy(&block[offset + 1], m_volumeHeader.name, m_volumeHeader.nameLength);
+    writer.writeBytes(offset + 1, m_volumeHeader.name, m_volumeHeader.nameLength);
 
-    // Creation date/time
-    block[0x1C] = m_volumeHeader.creationDateTime & 0xFF;
-    block[0x1D] = (m_volumeHeader.creationDateTime >> 8) & 0xFF;
-    block[0x1E] = (m_volumeHeader.creationDateTime >> 16) & 0xFF;
-    block[0x1F] = (m_volumeHeader.creationDateTime >> 24) & 0xFF;
-
-    block[0x20] = m_volumeHeader.version;
-    block[0x21] = m_volumeHeader.minVersion;
-    block[0x22] = m_volumeHeader.access;
-    block[0x23] = m_volumeHeader.entryLength;
-    block[0x24] = m_volumeHeader.entriesPerBlock;
-    block[0x25] = m_volumeHeader.fileCount & 0xFF;
-    block[0x26] = (m_volumeHeader.fileCount >> 8) & 0xFF;
-    block[0x27] = m_volumeHeader.bitmapPointer & 0xFF;
-    block[0x28] = (m_volumeHeader.bitmapPointer >> 8) & 0xFF;
-    block[0x29] = m_volumeHeader.totalBlocks & 0xFF;
-    block[0x2A] = (m_volumeHeader.totalBlocks >> 8) & 0xFF;
+    // Write header fields using BinaryWriter
+    writer.writeU32LE(0x1C, m_volumeHeader.creationDateTime);
+    writer.writeU8(0x20, m_volumeHeader.version);
+    writer.writeU8(0x21, m_volumeHeader.minVersion);
+    writer.writeU8(0x22, m_volumeHeader.access);
+    writer.writeU8(0x23, m_volumeHeader.entryLength);
+    writer.writeU8(0x24, m_volumeHeader.entriesPerBlock);
+    writer.writeU16LE(0x25, m_volumeHeader.fileCount);
+    writer.writeU16LE(0x27, m_volumeHeader.bitmapPointer);
+    writer.writeU16LE(0x29, m_volumeHeader.totalBlocks);
 
     writeBlock(VOLUME_DIR_BLOCK, block);
 }
@@ -1554,6 +1548,30 @@ bool AppleProDOSHandler::deleteDirectory(const std::string& path) {
 
     writeVolumeBitmap();
     return true;
+}
+
+bool AppleProDOSHandler::isDirectory(const std::string& path) const {
+    if (path.empty() || path == "/") {
+        return true;  // Root is always a directory
+    }
+
+    auto [parentBlock, targetName] = resolvePath(path);
+
+    if (targetName.empty()) {
+        return true;  // Path resolved to root
+    }
+
+    int entryIndex = findDirectoryEntry(parentBlock, targetName);
+    if (entryIndex < 0) {
+        return false;  // Not found
+    }
+
+    auto entryOpt = readDirectoryEntryAt(parentBlock, static_cast<size_t>(entryIndex));
+    if (!entryOpt) {
+        return false;
+    }
+
+    return entryOpt->isDirectory();
 }
 
 ValidationResult AppleProDOSHandler::validateExtended() const {

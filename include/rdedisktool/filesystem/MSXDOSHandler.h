@@ -41,9 +41,11 @@ public:
     bool format(const std::string& volumeName = "") override;
     std::string getVolumeName() const override;
 
-    // Subdirectory support
-    bool createDirectory(const std::string& path);
-    bool deleteDirectory(const std::string& path);
+    // Directory operations (override from FileSystemHandler)
+    bool supportsDirectories() const override { return true; }
+    bool createDirectory(const std::string& path) override;
+    bool deleteDirectory(const std::string& path) override;
+    bool isDirectory(const std::string& path) const override;
 
     // Cluster information for verbose info output
     struct ClusterInfo {

@@ -32,6 +32,7 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 set(CORE_SOURCES
     src/core/DiskImage.cpp
     src/core/DiskImageFactory.cpp
+    src/core/FormatDetector.cpp
     src/core/CRC.cpp
 )
 
@@ -53,6 +54,7 @@ set(MSX_SOURCES
     src/msx/MSXXSAImage.cpp
     src/msx/XSAExtractor.cpp
     src/msx/XSACompressor.cpp
+    src/msx/XSAHeader.cpp
     src/msx/MFMEncoder.cpp
 )
 
@@ -67,6 +69,8 @@ set(FILESYSTEM_SOURCES
 
 # Utility sources
 set(UTILS_SOURCES
+    src/utils/BinaryReader.cpp
+    src/utils/CommandOptions.cpp
     src/utils/FileUtils.cpp
     src/utils/FilenameConverter.cpp
     src/utils/TimestampUtils.cpp

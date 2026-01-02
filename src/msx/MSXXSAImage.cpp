@@ -3,7 +3,9 @@
 #include "rdedisktool/msx/MSXDMKImage.h"
 #include "rdedisktool/msx/XSAExtractor.h"
 #include "rdedisktool/msx/XSACompressor.h"
+#include "rdedisktool/msx/XSAHeader.h"
 #include "rdedisktool/DiskImageFactory.h"
+#include "rdedisktool/utils/BinaryReader.h"
 #include <fstream>
 #include <sstream>
 
@@ -55,16 +57,10 @@ void MSXXSAImage::load(const std::filesystem::path& path) {
     // Store compressed size for diagnostics
     m_compressedSize = fileSize;
 
-    // Extract original filename from header
-    if (fileSize > 12) {
-        size_t filenameStart = 12;
-        size_t filenameEnd = filenameStart;
-        while (filenameEnd < fileSize && compressedData[filenameEnd] != 0) {
-            ++filenameEnd;
-        }
-        m_originalFilename = std::string(
-            reinterpret_cast<char*>(&compressedData[filenameStart]),
-            filenameEnd - filenameStart);
+    // Extract original filename from header using XSAHeader
+    rdedisktool::XSAHeader header;
+    if (header.read(compressedData) > 0) {
+        m_originalFilename = header.originalFilename;
     }
 
     // Decompress XSA data
@@ -246,14 +242,17 @@ bool MSXXSAImage::validate() const {
 
     // Check for valid boot sector
     if (m_data.size() >= BYTES_PER_SECTOR) {
+        rdedisktool::BinaryReader reader(m_data);
+
         // Check for JMP instruction
-        if (m_data[0] != 0xEB && m_data[0] != 0xE9) {
+        uint8_t jumpByte = reader.readU8(0);
+        if (jumpByte != 0xEB && jumpByte != 0xE9) {
             // May still be valid but unformatted
             return true;
         }
 
         // Check bytes per sector
-        uint16_t bps = m_data[11] | (m_data[12] << 8);
+        uint16_t bps = reader.readU16LE(11);
         if (bps != 512) {
             return false;
         }
@@ -305,7 +304,8 @@ std::string MSXXSAImage::getDiagnostics() const {
 }
 
 bool MSXXSAImage::isXSAFormat(const std::vector<uint8_t>& data) {
-    return XSAExtractor::isXSAFormat(data);
+    // Use XSAHeader for format detection
+    return rdedisktool::XSAHeader::isXSAFormat(data);
 }
 
 std::unique_ptr<MSXXSAImage> MSXXSAImage::createFromRawData(

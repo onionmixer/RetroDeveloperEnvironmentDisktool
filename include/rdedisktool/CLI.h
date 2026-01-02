@@ -10,6 +10,27 @@
 
 namespace rde {
 
+// Forward declarations
+class DiskImage;
+class FileSystemHandler;
+
+/**
+ * Helper struct for loaded disk image with handler
+ * Used to reduce code duplication in command handlers
+ */
+struct LoadedDisk {
+    std::unique_ptr<DiskImage> image;
+    std::unique_ptr<FileSystemHandler> handler;
+    DiskFormat format = DiskFormat::Unknown;
+
+    // Allow implicit bool conversion for easy null checking
+    explicit operator bool() const { return image && handler; }
+
+    // Check if only image is loaded (no filesystem handler)
+    bool hasImage() const { return image != nullptr; }
+    bool hasHandler() const { return handler != nullptr; }
+};
+
 /**
  * Command-line interface handler for rdedisktool
  */
@@ -121,6 +142,11 @@ private:
     static void printError(const std::string& message);
     static void printWarning(const std::string& message);
     void printInfo(const std::string& message) const;
+
+    // Disk loading helpers (reduce code duplication)
+    LoadedDisk loadDiskImage(const std::string& imagePath);
+    LoadedDisk loadDiskImageOnly(const std::string& imagePath);
+    bool saveDiskImage(DiskImage* image, const std::string& operation);
 };
 
 } // namespace rde

@@ -12,6 +12,7 @@
 
 #include "rdedisktool/filesystem/MSXDOSHandler.h"
 #include "rdedisktool/Exceptions.h"
+#include "rdedisktool/utils/BinaryReader.h"
 #include <algorithm>
 #include <cstring>
 #include <cctype>
@@ -43,17 +44,18 @@ bool MSXDOSHandler::parseBPB() {
         return false;
     }
 
-    // Parse BPB (BIOS Parameter Block) starting at offset 0x0B
-    m_bytesPerSector = bootSector[0x0B] | (static_cast<uint16_t>(bootSector[0x0C]) << 8);
-    m_sectorsPerCluster = bootSector[0x0D];
-    m_reservedSectors = bootSector[0x0E] | (static_cast<uint16_t>(bootSector[0x0F]) << 8);
-    m_numberOfFATs = bootSector[0x10];
-    m_rootEntryCount = bootSector[0x11] | (static_cast<uint16_t>(bootSector[0x12]) << 8);
-    m_totalSectors = bootSector[0x13] | (static_cast<uint16_t>(bootSector[0x14]) << 8);
-    m_mediaDescriptor = bootSector[0x15];
-    m_sectorsPerFAT = bootSector[0x16] | (static_cast<uint16_t>(bootSector[0x17]) << 8);
-    m_sectorsPerTrack = bootSector[0x18] | (static_cast<uint16_t>(bootSector[0x19]) << 8);
-    m_numberOfHeads = bootSector[0x1A] | (static_cast<uint16_t>(bootSector[0x1B]) << 8);
+    // Parse BPB (BIOS Parameter Block) using BinaryReader
+    rdedisktool::BinaryReader reader(bootSector);
+    m_bytesPerSector = reader.readU16LE(0x0B);
+    m_sectorsPerCluster = reader.readU8(0x0D);
+    m_reservedSectors = reader.readU16LE(0x0E);
+    m_numberOfFATs = reader.readU8(0x10);
+    m_rootEntryCount = reader.readU16LE(0x11);
+    m_totalSectors = reader.readU16LE(0x13);
+    m_mediaDescriptor = reader.readU8(0x15);
+    m_sectorsPerFAT = reader.readU16LE(0x16);
+    m_sectorsPerTrack = reader.readU16LE(0x18);
+    m_numberOfHeads = reader.readU16LE(0x1A);
 
     // Validate BPB
     if (m_bytesPerSector == 0 || m_sectorsPerCluster == 0 ||
@@ -292,20 +294,19 @@ std::vector<MSXDOSHandler::DirEntry> MSXDOSHandler::readRootDirectory() const {
         dirData.insert(dirData.end(), data.begin(), data.end());
     }
 
-    // Parse directory entries (32 bytes each)
+    // Parse directory entries (32 bytes each) using BinaryReader
     for (size_t offset = 0; offset + 32 <= dirData.size(); offset += 32) {
+        rdedisktool::BinaryReader reader(dirData, offset);
         DirEntry entry;
-        std::memcpy(entry.name, &dirData[offset], 8);
-        std::memcpy(entry.ext, &dirData[offset + 8], 3);
-        entry.attr = dirData[offset + 11];
-        std::memcpy(entry.reserved, &dirData[offset + 12], 10);
-        entry.time = dirData[offset + 22] | (static_cast<uint16_t>(dirData[offset + 23]) << 8);
-        entry.date = dirData[offset + 24] | (static_cast<uint16_t>(dirData[offset + 25]) << 8);
-        entry.startCluster = dirData[offset + 26] | (static_cast<uint16_t>(dirData[offset + 27]) << 8);
-        entry.fileSize = dirData[offset + 28] |
-                        (static_cast<uint32_t>(dirData[offset + 29]) << 8) |
-                        (static_cast<uint32_t>(dirData[offset + 30]) << 16) |
-                        (static_cast<uint32_t>(dirData[offset + 31]) << 24);
+
+        reader.readBytes(0, entry.name, 8);
+        reader.readBytes(8, entry.ext, 3);
+        entry.attr = reader.readU8(11);
+        reader.readBytes(12, entry.reserved, 10);
+        entry.time = reader.readU16LE(22);
+        entry.date = reader.readU16LE(24);
+        entry.startCluster = reader.readU16LE(26);
+        entry.fileSize = reader.readU32LE(28);
 
         // Check for end of directory
         if (static_cast<uint8_t>(entry.name[0]) == DIR_END) {
@@ -323,7 +324,7 @@ void MSXDOSHandler::writeRootDirectory(const std::vector<DirEntry>& entries) {
         return;
     }
 
-    // Build directory data
+    // Build directory data using BinaryWriter
     std::vector<uint8_t> dirData(m_rootDirSectors * m_bytesPerSector, 0);
 
     size_t offset = 0;
@@ -332,20 +333,15 @@ void MSXDOSHandler::writeRootDirectory(const std::vector<DirEntry>& entries) {
             break;
         }
 
-        std::memcpy(&dirData[offset], entry.name, 8);
-        std::memcpy(&dirData[offset + 8], entry.ext, 3);
-        dirData[offset + 11] = entry.attr;
-        std::memcpy(&dirData[offset + 12], entry.reserved, 10);
-        dirData[offset + 22] = entry.time & 0xFF;
-        dirData[offset + 23] = (entry.time >> 8) & 0xFF;
-        dirData[offset + 24] = entry.date & 0xFF;
-        dirData[offset + 25] = (entry.date >> 8) & 0xFF;
-        dirData[offset + 26] = entry.startCluster & 0xFF;
-        dirData[offset + 27] = (entry.startCluster >> 8) & 0xFF;
-        dirData[offset + 28] = entry.fileSize & 0xFF;
-        dirData[offset + 29] = (entry.fileSize >> 8) & 0xFF;
-        dirData[offset + 30] = (entry.fileSize >> 16) & 0xFF;
-        dirData[offset + 31] = (entry.fileSize >> 24) & 0xFF;
+        rdedisktool::BinaryWriter writer(dirData, offset);
+        writer.writeBytes(0, entry.name, 8);
+        writer.writeBytes(8, entry.ext, 3);
+        writer.writeU8(11, entry.attr);
+        writer.writeBytes(12, entry.reserved, 10);
+        writer.writeU16LE(22, entry.time);
+        writer.writeU16LE(24, entry.date);
+        writer.writeU16LE(26, entry.startCluster);
+        writer.writeU32LE(28, entry.fileSize);
 
         offset += 32;
     }
@@ -890,40 +886,33 @@ bool MSXDOSHandler::format(const std::string& volumeName) {
         }
     }
 
-    // Create boot sector with BPB
+    // Create boot sector with BPB using BinaryWriter
     std::vector<uint8_t> bootSector(m_bytesPerSector, 0);
+    rdedisktool::BinaryWriter writer(bootSector);
 
     // Jump instruction
-    bootSector[0] = 0xEB;
-    bootSector[1] = 0xFE;
-    bootSector[2] = 0x90;
+    writer.writeU8(0, 0xEB);
+    writer.writeU8(1, 0xFE);
+    writer.writeU8(2, 0x90);
 
     // OEM name
-    const char* oemName = "MSXDOS  ";
-    std::memcpy(&bootSector[3], oemName, 8);
+    writer.writeString(3, "MSXDOS  ", 8);
 
-    // BPB
-    bootSector[0x0B] = m_bytesPerSector & 0xFF;
-    bootSector[0x0C] = (m_bytesPerSector >> 8) & 0xFF;
-    bootSector[0x0D] = m_sectorsPerCluster;
-    bootSector[0x0E] = m_reservedSectors & 0xFF;
-    bootSector[0x0F] = (m_reservedSectors >> 8) & 0xFF;
-    bootSector[0x10] = m_numberOfFATs;
-    bootSector[0x11] = m_rootEntryCount & 0xFF;
-    bootSector[0x12] = (m_rootEntryCount >> 8) & 0xFF;
-    bootSector[0x13] = m_totalSectors & 0xFF;
-    bootSector[0x14] = (m_totalSectors >> 8) & 0xFF;
-    bootSector[0x15] = m_mediaDescriptor;
-    bootSector[0x16] = m_sectorsPerFAT & 0xFF;
-    bootSector[0x17] = (m_sectorsPerFAT >> 8) & 0xFF;
-    bootSector[0x18] = m_sectorsPerTrack & 0xFF;
-    bootSector[0x19] = (m_sectorsPerTrack >> 8) & 0xFF;
-    bootSector[0x1A] = m_numberOfHeads & 0xFF;
-    bootSector[0x1B] = (m_numberOfHeads >> 8) & 0xFF;
+    // BPB (BIOS Parameter Block)
+    writer.writeU16LE(0x0B, m_bytesPerSector);
+    writer.writeU8(0x0D, m_sectorsPerCluster);
+    writer.writeU16LE(0x0E, m_reservedSectors);
+    writer.writeU8(0x10, m_numberOfFATs);
+    writer.writeU16LE(0x11, m_rootEntryCount);
+    writer.writeU16LE(0x13, m_totalSectors);
+    writer.writeU8(0x15, m_mediaDescriptor);
+    writer.writeU16LE(0x16, m_sectorsPerFAT);
+    writer.writeU16LE(0x18, m_sectorsPerTrack);
+    writer.writeU16LE(0x1A, m_numberOfHeads);
 
     // Boot signature
-    bootSector[0x1FE] = 0x55;
-    bootSector[0x1FF] = 0xAA;
+    writer.writeU8(0x1FE, 0x55);
+    writer.writeU8(0x1FF, 0xAA);
 
     m_disk->writeSector(0, 0, 0, bootSector);
 
@@ -1065,20 +1054,19 @@ std::vector<MSXDOSHandler::DirEntry> MSXDOSHandler::readDirectoryCluster(uint16_
     for (uint16_t clust : chain) {
         auto data = readCluster(clust);
 
-        // Parse directory entries (32 bytes each)
+        // Parse directory entries (32 bytes each) using BinaryReader
         for (size_t offset = 0; offset + 32 <= data.size(); offset += 32) {
+            rdedisktool::BinaryReader reader(data, offset);
             DirEntry entry;
-            std::memcpy(entry.name, &data[offset], 8);
-            std::memcpy(entry.ext, &data[offset + 8], 3);
-            entry.attr = data[offset + 11];
-            std::memcpy(entry.reserved, &data[offset + 12], 10);
-            entry.time = data[offset + 22] | (static_cast<uint16_t>(data[offset + 23]) << 8);
-            entry.date = data[offset + 24] | (static_cast<uint16_t>(data[offset + 25]) << 8);
-            entry.startCluster = data[offset + 26] | (static_cast<uint16_t>(data[offset + 27]) << 8);
-            entry.fileSize = data[offset + 28] |
-                            (static_cast<uint32_t>(data[offset + 29]) << 8) |
-                            (static_cast<uint32_t>(data[offset + 30]) << 16) |
-                            (static_cast<uint32_t>(data[offset + 31]) << 24);
+
+            reader.readBytes(0, entry.name, 8);
+            reader.readBytes(8, entry.ext, 3);
+            entry.attr = reader.readU8(11);
+            reader.readBytes(12, entry.reserved, 10);
+            entry.time = reader.readU16LE(22);
+            entry.date = reader.readU16LE(24);
+            entry.startCluster = reader.readU16LE(26);
+            entry.fileSize = reader.readU32LE(28);
 
             // Check for end of directory
             if (static_cast<uint8_t>(entry.name[0]) == DIR_END) {
@@ -1110,22 +1098,16 @@ void MSXDOSHandler::writeDirectoryCluster(uint16_t cluster, const std::vector<Di
 
         for (size_t i = 0; i < entriesPerCluster && entryIdx < entries.size(); ++i, ++entryIdx) {
             const auto& entry = entries[entryIdx];
-            size_t offset = i * 32;
+            rdedisktool::BinaryWriter writer(data, i * 32);
 
-            std::memcpy(&data[offset], entry.name, 8);
-            std::memcpy(&data[offset + 8], entry.ext, 3);
-            data[offset + 11] = entry.attr;
-            std::memcpy(&data[offset + 12], entry.reserved, 10);
-            data[offset + 22] = entry.time & 0xFF;
-            data[offset + 23] = (entry.time >> 8) & 0xFF;
-            data[offset + 24] = entry.date & 0xFF;
-            data[offset + 25] = (entry.date >> 8) & 0xFF;
-            data[offset + 26] = entry.startCluster & 0xFF;
-            data[offset + 27] = (entry.startCluster >> 8) & 0xFF;
-            data[offset + 28] = entry.fileSize & 0xFF;
-            data[offset + 29] = (entry.fileSize >> 8) & 0xFF;
-            data[offset + 30] = (entry.fileSize >> 16) & 0xFF;
-            data[offset + 31] = (entry.fileSize >> 24) & 0xFF;
+            writer.writeBytes(0, entry.name, 8);
+            writer.writeBytes(8, entry.ext, 3);
+            writer.writeU8(11, entry.attr);
+            writer.writeBytes(12, entry.reserved, 10);
+            writer.writeU16LE(22, entry.time);
+            writer.writeU16LE(24, entry.date);
+            writer.writeU16LE(26, entry.startCluster);
+            writer.writeU32LE(28, entry.fileSize);
         }
 
         writeCluster(chain[chainIdx], data);
@@ -1146,22 +1128,16 @@ void MSXDOSHandler::writeDirectoryCluster(uint16_t cluster, const std::vector<Di
 
         for (size_t i = 0; i < entriesPerCluster && entryIdx < entries.size(); ++i, ++entryIdx) {
             const auto& entry = entries[entryIdx];
-            size_t offset = i * 32;
+            rdedisktool::BinaryWriter writer(data, i * 32);
 
-            std::memcpy(&data[offset], entry.name, 8);
-            std::memcpy(&data[offset + 8], entry.ext, 3);
-            data[offset + 11] = entry.attr;
-            std::memcpy(&data[offset + 12], entry.reserved, 10);
-            data[offset + 22] = entry.time & 0xFF;
-            data[offset + 23] = (entry.time >> 8) & 0xFF;
-            data[offset + 24] = entry.date & 0xFF;
-            data[offset + 25] = (entry.date >> 8) & 0xFF;
-            data[offset + 26] = entry.startCluster & 0xFF;
-            data[offset + 27] = (entry.startCluster >> 8) & 0xFF;
-            data[offset + 28] = entry.fileSize & 0xFF;
-            data[offset + 29] = (entry.fileSize >> 8) & 0xFF;
-            data[offset + 30] = (entry.fileSize >> 16) & 0xFF;
-            data[offset + 31] = (entry.fileSize >> 24) & 0xFF;
+            writer.writeBytes(0, entry.name, 8);
+            writer.writeBytes(8, entry.ext, 3);
+            writer.writeU8(11, entry.attr);
+            writer.writeBytes(12, entry.reserved, 10);
+            writer.writeU16LE(22, entry.time);
+            writer.writeU16LE(24, entry.date);
+            writer.writeU16LE(26, entry.startCluster);
+            writer.writeU32LE(28, entry.fileSize);
         }
 
         writeCluster(newCluster, data);
@@ -1240,27 +1216,27 @@ bool MSXDOSHandler::createDirectory(const std::string& path) {
     dotDotEntry.time = (12 << 11) | (0 << 5) | 0;
     dotDotEntry.date = ((2024 - 1980) << 9) | (1 << 5) | 1;
 
-    // Write . entry
-    std::memcpy(&dirData[0], dotEntry.name, 8);
-    std::memcpy(&dirData[8], dotEntry.ext, 3);
-    dirData[11] = dotEntry.attr;
-    dirData[22] = dotEntry.time & 0xFF;
-    dirData[23] = (dotEntry.time >> 8) & 0xFF;
-    dirData[24] = dotEntry.date & 0xFF;
-    dirData[25] = (dotEntry.date >> 8) & 0xFF;
-    dirData[26] = dotEntry.startCluster & 0xFF;
-    dirData[27] = (dotEntry.startCluster >> 8) & 0xFF;
+    // Write . entry using BinaryWriter
+    {
+        rdedisktool::BinaryWriter writer(dirData, 0);
+        writer.writeBytes(0, dotEntry.name, 8);
+        writer.writeBytes(8, dotEntry.ext, 3);
+        writer.writeU8(11, dotEntry.attr);
+        writer.writeU16LE(22, dotEntry.time);
+        writer.writeU16LE(24, dotEntry.date);
+        writer.writeU16LE(26, dotEntry.startCluster);
+    }
 
-    // Write .. entry
-    std::memcpy(&dirData[32], dotDotEntry.name, 8);
-    std::memcpy(&dirData[40], dotDotEntry.ext, 3);
-    dirData[43] = dotDotEntry.attr;
-    dirData[54] = dotDotEntry.time & 0xFF;
-    dirData[55] = (dotDotEntry.time >> 8) & 0xFF;
-    dirData[56] = dotDotEntry.date & 0xFF;
-    dirData[57] = (dotDotEntry.date >> 8) & 0xFF;
-    dirData[58] = dotDotEntry.startCluster & 0xFF;
-    dirData[59] = (dotDotEntry.startCluster >> 8) & 0xFF;
+    // Write .. entry using BinaryWriter
+    {
+        rdedisktool::BinaryWriter writer(dirData, 32);
+        writer.writeBytes(0, dotDotEntry.name, 8);
+        writer.writeBytes(8, dotDotEntry.ext, 3);
+        writer.writeU8(11, dotDotEntry.attr);
+        writer.writeU16LE(22, dotDotEntry.time);
+        writer.writeU16LE(24, dotDotEntry.date);
+        writer.writeU16LE(26, dotDotEntry.startCluster);
+    }
 
     writeCluster(newCluster, dirData);
 
@@ -1348,6 +1324,28 @@ bool MSXDOSHandler::deleteDirectory(const std::string& path) {
     writeFAT(fat);
 
     return true;
+}
+
+bool MSXDOSHandler::isDirectory(const std::string& path) const {
+    if (path.empty()) {
+        return true;  // Root is always a directory
+    }
+
+    // Resolve parent directory and target name
+    auto [parentCluster, targetName] = resolvePath(path);
+
+    if (targetName.empty()) {
+        return true;  // Path resolved to root
+    }
+
+    auto entries = getDirectoryEntries(parentCluster);
+    int idx = findDirectoryEntry(entries, targetName);
+
+    if (idx < 0) {
+        return false;  // Not found
+    }
+
+    return (entries[idx].attr & ATTR_DIRECTORY) != 0;
 }
 
 } // namespace rde

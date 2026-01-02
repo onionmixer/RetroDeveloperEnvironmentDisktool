@@ -110,6 +110,46 @@ public:
      */
     virtual ValidationResult validateExtended() const;
 
+    //=========================================================================
+    // Directory Operations (optional - may not be supported by all file systems)
+    //=========================================================================
+
+    /**
+     * Check if this file system supports directories
+     * @return true if directories are supported
+     */
+    virtual bool supportsDirectories() const { return false; }
+
+    /**
+     * Create a directory
+     * @param path Directory path
+     * @return true on success, false if not supported or failed
+     */
+    virtual bool createDirectory(const std::string& path) {
+        (void)path;
+        return false;
+    }
+
+    /**
+     * Delete a directory
+     * @param path Directory path
+     * @return true on success, false if not supported, failed, or not empty
+     */
+    virtual bool deleteDirectory(const std::string& path) {
+        (void)path;
+        return false;
+    }
+
+    /**
+     * Check if a path is a directory
+     * @param path Path to check
+     * @return true if path is a directory
+     */
+    virtual bool isDirectory(const std::string& path) const {
+        (void)path;
+        return false;
+    }
+
     /**
      * Create appropriate handler for a disk's file system
      * @param disk Disk image to create handler for

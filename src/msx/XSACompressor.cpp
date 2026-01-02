@@ -1,4 +1,6 @@
 #include "rdedisktool/msx/XSACompressor.h"
+#include "rdedisktool/msx/XSAHeader.h"
+#include "rdedisktool/utils/BinaryReader.h"
 #include <algorithm>
 #include <cstring>
 
@@ -23,21 +25,14 @@ XSACompressor::XSACompressor(const std::string& originalFilename)
 
 std::vector<uint8_t> XSACompressor::compress(const std::vector<uint8_t>& data) {
     if (data.empty()) {
-        // Return minimal valid XSA with just header
+        // Return minimal valid XSA with just header for empty data
         m_output.clear();
         m_nrWritten = 0;
 
-        // Write header
-        for (uint8_t b : MAGIC) {
-            m_output.push_back(b);
-            ++m_nrWritten;
-        }
-        // Original length = 0 (empty data)
-        for (int i = 0; i < 4; ++i) m_output.push_back(0);
-        // Compressed length = 0 (empty data, no compressed content)
-        for (int i = 0; i < 4; ++i) m_output.push_back(0);
-        // Null filename
-        m_output.push_back(0);
+        // Write header using XSAHeader (lengths remain 0 for empty data)
+        rdedisktool::XSAHeader header;
+        header.originalFilename = "";  // Empty filename for empty data
+        header.write(m_output);
 
         return m_output;
     }
@@ -318,45 +313,15 @@ void XSACompressor::flushOut() {
 //=============================================================================
 
 void XSACompressor::writeHeader(const std::string& filename) {
-    // Magic number
-    for (uint8_t b : MAGIC) {
-        m_output.push_back(b);
-        ++m_nrWritten;
-    }
-
-    // Reserve space for original length (4 bytes)
-    for (int i = 0; i < 4; ++i) {
-        m_output.push_back(0);
-        ++m_nrWritten;
-    }
-
-    // Reserve space for compressed length (4 bytes)
-    for (int i = 0; i < 4; ++i) {
-        m_output.push_back(0);
-        ++m_nrWritten;
-    }
-
-    // Original filename (null-terminated)
-    for (char c : filename) {
-        m_output.push_back(static_cast<uint8_t>(c));
-        ++m_nrWritten;
-    }
-    m_output.push_back(0);
-    ++m_nrWritten;
+    // Use XSAHeader to write header
+    rdedisktool::XSAHeader header;
+    header.originalFilename = filename;
+    m_nrWritten += header.write(m_output);
 }
 
 void XSACompressor::updateLengths(uint32_t orgLen, uint32_t compLen) {
-    // Update original length at offset 4
-    for (int i = 0; i < 4; ++i) {
-        m_output[4 + i] = static_cast<uint8_t>(orgLen & 0xFF);
-        orgLen >>= 8;
-    }
-
-    // Update compressed length at offset 8
-    for (int i = 0; i < 4; ++i) {
-        m_output[8 + i] = static_cast<uint8_t>(compLen & 0xFF);
-        compLen >>= 8;
-    }
+    // Use XSAHeader static method to update lengths
+    rdedisktool::XSAHeader::updateLengths(m_output, orgLen, compLen);
 }
 
 //=============================================================================
