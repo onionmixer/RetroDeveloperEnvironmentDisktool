@@ -1070,6 +1070,26 @@ std::vector<uint8_t> AppleProDOSHandler::readFile(const std::string& filename) {
     return readFileData(entry);
 }
 
+// Helper function to convert DOS 3.3 file type to ProDOS file type
+static uint8_t convertDOS33ToProDOSFileType(uint8_t dos33Type) {
+    // DOS 3.3 file type codes → ProDOS file type codes
+    switch (dos33Type) {
+        case 0x00:  // DOS 3.3 Text (T)
+            return AppleConstants::ProDOS::FILETYPE_TXT;  // 0x04
+        case 0x01:  // DOS 3.3 Integer BASIC (I)
+            return AppleConstants::ProDOS::FILETYPE_INT;  // 0xFA
+        case 0x02:  // DOS 3.3 Applesoft BASIC (A)
+            return AppleConstants::ProDOS::FILETYPE_BAS;  // 0xFC
+        case 0x04:  // DOS 3.3 Binary (B)
+            return AppleConstants::ProDOS::FILETYPE_BIN;  // 0x06
+        case 0x10:  // DOS 3.3 Relocatable (R)
+            return AppleConstants::ProDOS::FILETYPE_REL;  // 0xFE
+        default:
+            // If already a ProDOS type or unknown, return as-is
+            return dos33Type;
+    }
+}
+
 bool AppleProDOSHandler::writeFile(const std::string& filename,
                                     const std::vector<uint8_t>& data,
                                     const FileMetadata& metadata) {
@@ -1134,7 +1154,9 @@ bool AppleProDOSHandler::writeFile(const std::string& filename,
     std::memset(&entry, 0, sizeof(entry));
     entry.storageType = storageType;
     parseFilename(name, entry.filename, entry.nameLength);
-    entry.fileType = metadata.fileType != 0 ? metadata.fileType : FILETYPE_BIN;
+    // Convert DOS 3.3 file type to ProDOS file type if necessary
+    uint8_t fileType = metadata.fileType != 0 ? metadata.fileType : FILETYPE_BIN;
+    entry.fileType = convertDOS33ToProDOSFileType(fileType);
     entry.keyPointer = static_cast<uint16_t>(keyBlock);
     entry.blocksUsed = static_cast<uint16_t>(blocksNeeded);
     entry.eof = static_cast<uint32_t>(data.size());
