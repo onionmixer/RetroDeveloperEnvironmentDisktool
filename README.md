@@ -40,6 +40,59 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 | ProDOS | Apple II | Yes | Block-based allocation, up to 32MB |
 | MSX-DOS | MSX | Yes | FAT12, MSX-DOS 1/2 compatible |
 
+## Build & Installation
+
+### Prerequisites
+- CMake 3.16 or higher
+- C++17 compatible compiler (GCC, Clang, or MSVC)
+
+### Building from Source
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd RetroDeveloperEnvironmentDisktool
+
+# Create build directory
+mkdir build && cd build
+
+# Configure and build
+cmake ..
+cmake --build .
+
+# Or for Release build
+cmake -DCMAKE_BUILD_TYPE=Release ..
+cmake --build .
+```
+
+### Installation
+
+```bash
+# Install to system (requires root/admin privileges)
+sudo cmake --install .
+
+# Or specify install prefix
+cmake -DCMAKE_INSTALL_PREFIX=/usr/local ..
+cmake --build .
+sudo cmake --install .
+```
+
+### Uninstallation
+
+```bash
+# Remove installed files
+sudo cmake --build . --target uninstall
+```
+
+### Build Options
+
+| Option | Description |
+|--------|-------------|
+| `-DCMAKE_BUILD_TYPE=Release` | Release build with optimizations |
+| `-DCMAKE_BUILD_TYPE=Debug` | Debug build with symbols |
+| `-DBUILD_TESTS=ON` | Build test suite |
+| `-DCMAKE_INSTALL_PREFIX=<path>` | Custom installation prefix |
+
 ## Usage
 
 ```bash
@@ -147,7 +200,7 @@ rdedisktool add [options] <image_file> <host_file> [target_name]
 | Option | Description |
 |--------|-------------|
 | `-f, --force` | Overwrite existing file without prompting |
-| `-t, --type <type>` | File type for DOS 3.3 (see table below) |
+| `-t, --type <type>` | File type for Apple II disks (see table below) |
 | `-a, --addr <addr>` | Load address for binary files (hex: 0x0803 or $0803) |
 
 **DOS 3.3 File Types:**
@@ -159,6 +212,15 @@ rdedisktool add [options] <image_file> <host_file> [target_name]
 | B | 0x04 | Binary file (machine code) |
 | S | 0x08 | S-type file |
 | R | 0x10 | Relocatable object code |
+
+> **Note**: When adding files to **ProDOS** disks, DOS 3.3 file type codes are automatically converted to their ProDOS equivalents:
+> | DOS 3.3 | ProDOS | ProDOS Code |
+> |---------|--------|-------------|
+> | T (0x00) | TXT | 0x04 |
+> | I (0x01) | INT | 0xFA |
+> | A (0x02) | BAS | 0xFC |
+> | B (0x04) | BIN | 0x06 |
+> | R (0x10) | REL | 0xFE |
 
 Examples:
 ```bash
