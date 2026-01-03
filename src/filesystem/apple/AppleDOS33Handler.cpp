@@ -535,8 +535,49 @@ bool AppleDOS33Handler::writeFile(const std::string& filename,
         deleteFile(filename);
     }
 
+    // Determine file type
+    uint8_t fileType = metadata.fileType != 0 ? metadata.fileType : FILETYPE_BINARY;
+
+    // Prepare file data - add header for Binary/Applesoft/Integer files if load address specified
+    std::vector<uint8_t> fileData;
+    bool needsHeader = (fileType == FILETYPE_BINARY ||
+                        fileType == FILETYPE_APPLESOFT ||
+                        fileType == FILETYPE_INTEGER) &&
+                       metadata.loadAddress != 0;
+
+    if (needsHeader) {
+        // Check if data already has a valid header (load address + length)
+        // by checking if first 4 bytes could be a header
+        bool hasExistingHeader = false;
+        if (data.size() >= 4) {
+            uint16_t existingLen = static_cast<uint16_t>(data[2]) |
+                                   (static_cast<uint16_t>(data[3]) << 8);
+            // If the length in header matches remaining data size, assume header exists
+            if (existingLen == data.size() - 4) {
+                hasExistingHeader = true;
+            }
+        }
+
+        if (!hasExistingHeader) {
+            // Add 4-byte header: load address (2 bytes) + length (2 bytes)
+            uint16_t loadAddr = metadata.loadAddress;
+            uint16_t fileLen = static_cast<uint16_t>(data.size());
+
+            fileData.reserve(data.size() + 4);
+            fileData.push_back(loadAddr & 0xFF);          // Load address low byte
+            fileData.push_back((loadAddr >> 8) & 0xFF);   // Load address high byte
+            fileData.push_back(fileLen & 0xFF);           // Length low byte
+            fileData.push_back((fileLen >> 8) & 0xFF);    // Length high byte
+            fileData.insert(fileData.end(), data.begin(), data.end());
+        } else {
+            fileData = data;  // Use data as-is (already has header)
+        }
+    } else {
+        fileData = data;  // No header needed
+    }
+
     // Calculate sectors needed
-    size_t sectorsNeeded = (data.size() + SECTOR_SIZE - 1) / SECTOR_SIZE;
+    size_t sectorsNeeded = (fileData.size() + SECTOR_SIZE - 1) / SECTOR_SIZE;
     if (sectorsNeeded == 0) {
         sectorsNeeded = 1;
     }
@@ -566,9 +607,9 @@ bool AppleDOS33Handler::writeFile(const std::string& filename,
     size_t offset = 0;
     for (const auto& ts : dataSectors) {
         std::vector<uint8_t> sectorData(SECTOR_SIZE, 0);
-        size_t copySize = std::min(static_cast<size_t>(SECTOR_SIZE), data.size() - offset);
-        if (offset < data.size()) {
-            std::copy(data.begin() + offset, data.begin() + offset + copySize, sectorData.begin());
+        size_t copySize = std::min(static_cast<size_t>(SECTOR_SIZE), fileData.size() - offset);
+        if (offset < fileData.size()) {
+            std::copy(fileData.begin() + offset, fileData.begin() + offset + copySize, sectorData.begin());
         }
         writeSector(ts.track, ts.sector, sectorData);
         offset += SECTOR_SIZE;
@@ -600,7 +641,7 @@ bool AppleDOS33Handler::writeFile(const std::string& filename,
                 CatalogEntry newEntry;
                 newEntry.trackSectorListTrack = tsListSector.track;
                 newEntry.trackSectorListSector = tsListSector.sector;
-                newEntry.fileType = metadata.fileType != 0 ? metadata.fileType : FILETYPE_BINARY;
+                newEntry.fileType = fileType;
                 parseFilename(filename, newEntry.filename);
                 // Calculate T/S list sectors: each can hold 122 data sector pairs
                 size_t tsListSectors = (sectorsNeeded + 121) / 122;

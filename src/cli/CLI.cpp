@@ -4,6 +4,7 @@
 #include "rdedisktool/FileSystemHandler.h"
 #include "rdedisktool/filesystem/MSXDOSHandler.h"
 #include "rdedisktool/filesystem/AppleProDOSHandler.h"
+#include "rdedisktool/apple/AppleConstants.h"
 #include "rdedisktool/msx/MSXXSAImage.h"
 #include "rdedisktool/msx/MSXDiskImage.h"
 #include "rdedisktool/utils/CommandOptions.h"
@@ -120,7 +121,11 @@ void CLI::initCommands() {
     registerCommand("add",
         [this](const std::vector<std::string>& args) { return cmdAdd(args); },
         "Add file to disk image",
-        "add [--force] <image_file> <host_file> [target_name]");
+        "add [options] <image_file> <host_file> [target_name]\n"
+        "    Options:\n"
+        "      -f, --force         Overwrite existing file\n"
+        "      -t, --type <type>   File type for DOS 3.3 (T/I/A/B/S/R)\n"
+        "      -a, --addr <addr>   Load address for binary files (hex: 0x0803 or $0803)");
 
     registerCommand("delete",
         [this](const std::vector<std::string>& args) { return cmdDelete(args); },
@@ -724,10 +729,62 @@ int CLI::cmdExtract(const std::vector<std::string>& args) {
     }
 }
 
+// Helper function to parse DOS 3.3 file type from string
+static uint8_t parseFileTypeString(const std::string& typeStr) {
+    if (typeStr.empty()) return 0;
+
+    char c = std::toupper(static_cast<unsigned char>(typeStr[0]));
+    switch (c) {
+        case 'T': return AppleConstants::DOS33::FILETYPE_TEXT;
+        case 'I': return AppleConstants::DOS33::FILETYPE_INTEGER;
+        case 'A': return AppleConstants::DOS33::FILETYPE_APPLESOFT;
+        case 'B': return AppleConstants::DOS33::FILETYPE_BINARY;
+        case 'S': return AppleConstants::DOS33::FILETYPE_STYPE;
+        case 'R': return AppleConstants::DOS33::FILETYPE_RELOCATABLE;
+        default:
+            throw std::invalid_argument("Invalid file type: " + typeStr +
+                " (use T, I, A, B, S, or R)");
+    }
+}
+
+// Helper function to parse address string (supports 0x, $, or decimal)
+static uint16_t parseAddressString(const std::string& addrStr) {
+    if (addrStr.empty()) return 0;
+
+    std::string numStr = addrStr;
+    int base = 10;
+
+    // Handle hex prefixes: 0x or $
+    if (addrStr.size() > 2 && (addrStr.substr(0, 2) == "0x" || addrStr.substr(0, 2) == "0X")) {
+        base = 16;
+        numStr = addrStr.substr(2);
+    } else if (addrStr[0] == '$') {
+        base = 16;
+        numStr = addrStr.substr(1);
+    }
+
+    try {
+        size_t pos = 0;
+        unsigned long value = std::stoul(numStr, &pos, base);
+        if (pos != numStr.size()) {
+            throw std::invalid_argument("Invalid address format");
+        }
+        if (value > 0xFFFF) {
+            throw std::out_of_range("Address exceeds 16-bit range (0x0000-0xFFFF)");
+        }
+        return static_cast<uint16_t>(value);
+    } catch (const std::exception&) {
+        throw std::invalid_argument("Invalid address: " + addrStr +
+            " (use decimal, 0x1234, or $1234)");
+    }
+}
+
 int CLI::cmdAdd(const std::vector<std::string>& args) {
     // Parse options using CommandOptions
     rdedisktool::CommandOptions opts;
     opts.addFlag("force", {"-f", "--force"});
+    opts.addValue("type", {"-t", "--type"});
+    opts.addValue("addr", {"-a", "--addr"});
 
     std::string parseError;
     if (!opts.parse(args, &parseError)) {
@@ -746,6 +803,25 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
     const std::string& imagePath = opts.getPositional(0);
     const std::string& hostFile = opts.getPositional(1);
     std::string targetName = opts.getPositional(2);
+
+    // Parse file type and load address options
+    uint8_t fileType = 0;
+    uint16_t loadAddress = 0;
+
+    try {
+        std::string typeStr = opts.getValue("type");
+        if (!typeStr.empty()) {
+            fileType = parseFileTypeString(typeStr);
+        }
+
+        std::string addrStr = opts.getValue("addr");
+        if (!addrStr.empty()) {
+            loadAddress = parseAddressString(addrStr);
+        }
+    } catch (const std::exception& e) {
+        printError(e.what());
+        return 1;
+    }
 
     // Extract filename from path if target name not specified
     if (targetName.empty()) {
@@ -799,6 +875,8 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
         // Write file
         FileMetadata metadata;
         metadata.targetName = targetName;
+        metadata.fileType = fileType;
+        metadata.loadAddress = loadAddress;
 
         if (!disk.handler->writeFile(targetName, data, metadata)) {
             printError("Failed to write file to disk image");
@@ -812,7 +890,28 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
 
         if (!m_quiet) {
             std::cout << "Added: " << hostFile << " -> " << targetName
-                      << " (" << data.size() << " bytes)\n";
+                      << " (" << data.size() << " bytes)";
+            if (fileType != 0 || loadAddress != 0) {
+                std::cout << " [";
+                if (fileType != 0) {
+                    const char* typeNames[] = {"T", "I", "A", "", "B", "", "", "", "S"};
+                    if (fileType <= 8) {
+                        std::cout << "type=" << typeNames[fileType];
+                    } else if (fileType == 0x10) {
+                        std::cout << "type=R";
+                    }
+                }
+                if (fileType != 0 && loadAddress != 0) {
+                    std::cout << ", ";
+                }
+                if (loadAddress != 0) {
+                    std::cout << "addr=$" << std::hex << std::uppercase
+                              << std::setw(4) << std::setfill('0') << loadAddress
+                              << std::dec;
+                }
+                std::cout << "]";
+            }
+            std::cout << "\n";
         }
 
         return 0;

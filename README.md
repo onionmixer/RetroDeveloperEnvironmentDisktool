@@ -141,12 +141,24 @@ rdedisktool extract game.dsk GAMES/RPG/SAVE.DAT ./mysave.dat
 
 #### add - Add file to disk image
 ```bash
-rdedisktool add [--force] <image_file> <host_file> [target_name]
+rdedisktool add [options] <image_file> <host_file> [target_name]
 ```
 
 | Option | Description |
 |--------|-------------|
 | `-f, --force` | Overwrite existing file without prompting |
+| `-t, --type <type>` | File type for DOS 3.3 (see table below) |
+| `-a, --addr <addr>` | Load address for binary files (hex: 0x0803 or $0803) |
+
+**DOS 3.3 File Types:**
+| Type | Code | Description |
+|------|------|-------------|
+| T | 0x00 | Text file |
+| I | 0x01 | Integer BASIC program |
+| A | 0x02 | Applesoft BASIC program |
+| B | 0x04 | Binary file (machine code) |
+| S | 0x08 | S-type file |
+| R | 0x10 | Relocatable object code |
 
 Examples:
 ```bash
@@ -161,6 +173,15 @@ rdedisktool add mydisk.dsk ./save.dat GAMES/RPG/SAVE.DAT
 
 # Overwrite existing file
 rdedisktool add --force mydisk.dsk ./updated.com GAME.COM
+
+# Add DOS 3.3 binary file with load address
+rdedisktool add disk.do ./HELLO.BIN HELLO --type B --addr 0x0803
+
+# Add binary at hi-res graphics page 2
+rdedisktool add disk.do ./PICTURE.BIN MYPIC -t B -a $4000
+
+# Add Applesoft BASIC program
+rdedisktool add disk.do ./HELLO.BAS HELLO --type A
 ```
 
 #### delete - Delete file from disk image
@@ -399,9 +420,42 @@ rdedisktool list appleii.do
 # Extract Applesoft BASIC program
 rdedisktool extract appleii.do HELLO hello.bas
 
-# Add binary file
+# Add binary file (default type)
 rdedisktool add appleii.do ./newprog.bin NEWPROG
 ```
+
+#### Adding DOS 3.3 Binary Files with Load Address
+
+DOS 3.3 binary files require a load address to execute properly with `BRUN`. The `--type` and `--addr` options allow you to specify this metadata:
+
+```bash
+# Add binary file with load address $0803 (standard for most programs)
+rdedisktool add disk.do ./HELLO.BIN HELLO --type B --addr 0x0803
+
+# Add binary file at $4000 (common for hi-res graphics)
+rdedisktool add disk.do ./PICTURE.BIN MYPIC -t B -a $4000
+
+# Add binary file at $6000 (alternative address)
+rdedisktool add disk.do ./GAME.BIN GAME --type B --addr 0x6000
+
+# Add Applesoft BASIC program
+rdedisktool add disk.do ./HELLO.BAS HELLO --type A
+
+# Add text file
+rdedisktool add disk.do ./README.TXT README --type T
+```
+
+**Common Load Addresses:**
+| Address | Typical Use |
+|---------|-------------|
+| $0801 | Applesoft BASIC programs |
+| $0803 | Binary programs (after BASIC stub) |
+| $2000 | Hi-res graphics page 1 |
+| $4000 | Hi-res graphics page 2 |
+| $6000 | Common program area |
+| $9600 | RWTS buffer area |
+
+> **Note**: When `--addr` is specified for binary files (type B), a 4-byte header (load address + length) is automatically prepended to the file data. If the file already contains a valid DOS 3.3 header, it will not be added again.
 
 ### Working with Subdirectories
 
@@ -479,6 +533,42 @@ rdedisktool rmdir mydisk.po DOCS/MANUAL
 - Track 17, Sector 0: VTOC (Volume Table of Contents)
 - Track 17, Sectors 15-1: Catalog (directory)
 - Each file has a Track/Sector list
+
+#### DOS 3.3 File Types
+
+| Code | Type | Description |
+|------|------|-------------|
+| 0x00 | T | Text file (sequential access) |
+| 0x01 | I | Integer BASIC program |
+| 0x02 | A | Applesoft BASIC program |
+| 0x04 | B | Binary file (machine code) |
+| 0x08 | S | S-type file (special system) |
+| 0x10 | R | Relocatable object code |
+| 0x20 | a | A-type file |
+| 0x40 | b | B-type file |
+
+> **Note**: Bit 7 (0x80) of the file type byte indicates a locked file.
+
+#### DOS 3.3 Binary File Format
+
+Binary files (type B), Applesoft (type A), and Integer BASIC (type I) files include a 4-byte header:
+
+```
+Offset  Size  Description
+------  ----  -----------
+0       2     Load address (little-endian)
+2       2     File length (little-endian)
+4       n     Actual program data
+```
+
+**Example**: A 59-byte program at $0803:
+```
+03 08        ; Load address: $0803
+3B 00        ; Length: $003B (59 bytes)
+[59 bytes of program data]
+```
+
+This header is automatically added when using `--addr` with the `add` command. DOS 3.3 uses this information when executing `BRUN` or `BLOAD` commands.
 
 ### Apple ProDOS Structure
 - Block-based (512 bytes per block, 280 blocks on 140KB disk)
