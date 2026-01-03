@@ -1,0 +1,39 @@
+# cmake_uninstall.cmake.in
+# Uninstall script template for CMake
+
+if(NOT EXISTS "@CMAKE_BINARY_DIR@/install_manifest.txt")
+    message(FATAL_ERROR "Cannot find install manifest: @CMAKE_BINARY_DIR@/install_manifest.txt")
+endif()
+
+file(READ "@CMAKE_BINARY_DIR@/install_manifest.txt" files)
+string(REGEX REPLACE "\n" ";" files "${files}")
+
+foreach(file ${files})
+    message(STATUS "Uninstalling: $ENV{DESTDIR}${file}")
+    if(IS_SYMLINK "$ENV{DESTDIR}${file}" OR EXISTS "$ENV{DESTDIR}${file}")
+        exec_program(
+            "@CMAKE_COMMAND@" ARGS "-E remove \"$ENV{DESTDIR}${file}\""
+            OUTPUT_VARIABLE rm_out
+            RETURN_VALUE rm_retval
+        )
+        if(NOT "${rm_retval}" STREQUAL 0)
+            message(FATAL_ERROR "Problem when removing $ENV{DESTDIR}${file}")
+        endif()
+    else()
+        message(STATUS "File $ENV{DESTDIR}${file} does not exist.")
+    endif()
+endforeach()
+
+# Remove empty directories (optional)
+# This removes the include/rdedisktool directory if it's empty
+set(INCLUDE_DIR "@CMAKE_INSTALL_PREFIX@/include/rdedisktool")
+if(EXISTS "${INCLUDE_DIR}" AND IS_DIRECTORY "${INCLUDE_DIR}")
+    file(GLOB dir_contents "${INCLUDE_DIR}/*")
+    list(LENGTH dir_contents dir_size)
+    if(dir_size EQUAL 0)
+        message(STATUS "Removing empty directory: ${INCLUDE_DIR}")
+        exec_program("@CMAKE_COMMAND@" ARGS "-E remove_directory \"${INCLUDE_DIR}\"")
+    endif()
+endif()
+
+message(STATUS "Uninstall completed.")
