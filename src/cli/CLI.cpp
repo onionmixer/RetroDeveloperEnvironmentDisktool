@@ -260,7 +260,7 @@ std::vector<std::string> CLI::parseGlobalOptions(const std::vector<std::string>&
 
 void CLI::printVersion() const {
     std::cout << RDEDISKTOOL_FULL_NAME << " v" << RDEDISKTOOL_VERSION << "\n";
-    std::cout << "Supported platforms: Apple II, MSX\n";
+    std::cout << "Supported platforms: Apple II, MSX, X68000\n";
 }
 
 void CLI::printHelp() const {
