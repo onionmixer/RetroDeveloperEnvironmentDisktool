@@ -1,12 +1,12 @@
 # RDE Disk Tool (Retro Developer Environment Disk Tool)
 
-A cross-platform command-line tool for manipulating disk images used by retro computer emulators. Supports Apple II and MSX disk formats.
+A cross-platform command-line tool for manipulating disk images used by retro computer emulators. Supports Apple II, MSX, and X68000 disk formats.
 
 ## Features
 
-- **Multi-platform support**: Apple II and MSX disk images
+- **Multi-platform support**: Apple II, MSX, and X68000 disk images
 - **File operations**: List, extract, add, and delete files
-- **Subdirectory support**: Full subdirectory operations for ProDOS and MSX-DOS
+- **Subdirectory support**: Full subdirectory operations for ProDOS, MSX-DOS, and Human68k
 - **Format conversion**: Convert between compatible disk formats
 - **XSA compression**: Compress/decompress MSX disk images (LZ77 + Huffman, ~99% compression)
 - **Disk creation**: Create new formatted disk images
@@ -32,6 +32,14 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 
 > **Note**: XSA format is **read-only**. You can list and extract files, but cannot add, delete, or modify files directly. Use `convert` to decompress to DSK/DMK for modifications, then re-compress if needed.
 
+### X68000
+| Format | Extension | Description |
+|--------|-----------|-------------|
+| XDF | .xdf | Raw sector dump (1.2MB, 1024 bytes/sector) |
+| DIM | .dim | DIM format with 256-byte header (supports 2HD/2HS/2HC/2HDE/2HQ) |
+
+> **Note**: X68000 uses 1024-byte sectors (for 2HD disks), different from the standard PC 512-byte sectors. Both XDF and DIM formats are fully read-write supported.
+
 ## Supported File Systems
 
 | File System | Platform | Subdirectories | Notes |
@@ -39,6 +47,7 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 | DOS 3.3 | Apple II | No | VTOC-based allocation, 140KB max |
 | ProDOS | Apple II | Yes | Block-based allocation, up to 32MB |
 | MSX-DOS | MSX | Yes | FAT12, MSX-DOS 1/2 compatible |
+| Human68k | X68000 | Yes | FAT12-based, 1024-byte sectors, 8.3 filenames |
 
 ## Build & Installation
 
@@ -260,7 +269,7 @@ rdedisktool delete mydisk.dsk OLDFILE.TXT
 rdedisktool delete mydisk.dsk GAMES/OLD.COM
 ```
 
-#### mkdir - Create directory (ProDOS, MSX-DOS)
+#### mkdir - Create directory (ProDOS, MSX-DOS, Human68k)
 ```bash
 rdedisktool mkdir <image_file> <directory> [-f <format>]
 ```
@@ -278,7 +287,7 @@ rdedisktool mkdir mydisk.dsk GAMES
 rdedisktool mkdir mydisk.dsk GAMES/RPG
 ```
 
-#### rmdir - Remove directory (ProDOS, MSX-DOS)
+#### rmdir - Remove directory (ProDOS, MSX-DOS, Human68k)
 ```bash
 rdedisktool rmdir <image_file> <directory> [-f <format>]
 ```
@@ -306,7 +315,7 @@ rdedisktool create <file> -f <format> [--fs <filesystem>] [-n <volume>] [-g <geo
 | Option | Description |
 |--------|-------------|
 | `-f, --format <fmt>` | Disk format (required if not detectable from extension) |
-| `--fs, --filesystem <fs>` | Initialize with filesystem: dos33, prodos, msxdos, fat12 |
+| `--fs, --filesystem <fs>` | Initialize with filesystem: dos33, prodos, msxdos, fat12, human68k |
 | `-n, --volume <name>` | Volume name (optional, ignored for DOS 3.3) |
 | `-g, --geometry <spec>` | Custom geometry: tracks:sides:sectors:bytes |
 | `--force` | Overwrite existing file |
@@ -316,6 +325,7 @@ rdedisktool create <file> -f <format> [--fs <filesystem>] [-n <volume>] [-g <geo
 |----------|---------|
 | Apple II | do, po, nib, nb2, woz, woz1, woz2 |
 | MSX | msxdsk, dmk |
+| X68000 | xdf, dim |
 
 Examples:
 ```bash
@@ -327,6 +337,12 @@ rdedisktool create game.po -f po --fs prodos -n MYGAME
 
 # Create MSX-DOS disk with volume name
 rdedisktool create msx.dsk -f msxdsk --fs msxdos -n MSXDISK
+
+# Create X68000 XDF disk with Human68k filesystem
+rdedisktool create x68k.xdf -f xdf --fs human68k -n X68KDISK
+
+# Create X68000 DIM disk with Human68k filesystem
+rdedisktool create x68k.dim -f dim --fs human68k -n X68KDISK
 
 # Create disk with custom geometry
 rdedisktool create custom.do -f do -g 40:1:16:256
@@ -432,6 +448,36 @@ rdedisktool add game.dsk ./patch.bin PATCH.BIN
 rdedisktool delete game.dsk OLD.COM
 ```
 
+### Working with X68000 Disks
+
+```bash
+# Create a new X68000 disk with Human68k filesystem
+rdedisktool create x68k.xdf -f xdf --fs human68k -n MYDISK
+
+# Get disk information
+rdedisktool info x68k.xdf
+
+# List files
+rdedisktool list x68k.xdf
+
+# Add a file
+rdedisktool add x68k.xdf ./game.x GAME.X
+
+# Extract a file
+rdedisktool extract x68k.xdf GAME.X ./game_backup.x
+
+# Delete a file
+rdedisktool delete x68k.xdf OLDFILE.DAT
+
+# Create and manage subdirectories
+rdedisktool mkdir x68k.xdf GAMES
+rdedisktool add x68k.xdf ./shooter.x GAMES/SHOOTER.X
+rdedisktool list x68k.xdf GAMES
+rdedisktool rmdir x68k.xdf GAMES  # (must be empty)
+```
+
+> **Note**: X68000 uses 8.3 filename format. Long filenames will be truncated (e.g., `test_file.txt` becomes `TEST_FIL.TXT`).
+
 ### Working with XSA Compressed Disks
 
 XSA is a compressed disk image format that significantly reduces file size while maintaining full compatibility. **XSA images are read-only** - you can view and extract files, but cannot modify them directly.
@@ -521,7 +567,7 @@ rdedisktool add disk.do ./README.TXT README --type T
 
 ### Working with Subdirectories
 
-Subdirectory operations are supported for file systems that support directories: **ProDOS** and **MSX-DOS**.
+Subdirectory operations are supported for file systems that support directories: **ProDOS**, **MSX-DOS**, and **Human68k**.
 
 > **Note**: DOS 3.3 does not support subdirectories.
 
@@ -578,6 +624,31 @@ rdedisktool extract mydisk.po DOCS/MANUAL/CHAPTER1.TXT
 # Delete and cleanup
 rdedisktool delete mydisk.po DOCS/MANUAL/CHAPTER1.TXT
 rdedisktool rmdir mydisk.po DOCS/MANUAL
+```
+
+#### Human68k Subdirectory Example
+
+```bash
+# Create a new Human68k formatted disk
+rdedisktool create mydisk.xdf -f xdf --fs human68k -n MYDISK
+
+# Create a directory structure
+rdedisktool mkdir mydisk.xdf GAMES
+rdedisktool mkdir mydisk.xdf GAMES/ACTION
+
+# Add files to subdirectories
+rdedisktool add mydisk.xdf ./shooter.x GAMES/ACTION/SHOOTER.X
+
+# List subdirectory contents
+rdedisktool list mydisk.xdf GAMES
+rdedisktool list mydisk.xdf GAMES/ACTION
+
+# Extract file from subdirectory
+rdedisktool extract mydisk.xdf GAMES/ACTION/SHOOTER.X
+
+# Delete and cleanup
+rdedisktool delete mydisk.xdf GAMES/ACTION/SHOOTER.X
+rdedisktool rmdir mydisk.xdf GAMES/ACTION
 ```
 
 ## Technical Details
@@ -652,8 +723,68 @@ When using `dump` to inspect directory sectors, you may see special marker bytes
 | MSX-DOS/FAT12 | `0xE5` | First byte of filename | File entry marked as deleted |
 | DOS 3.3 | `0xFF` | T/S list track field | Catalog entry marked as deleted |
 | ProDOS | `0x00` | Storage type nibble | Entry marked as deleted |
+| Human68k | `0xE5` | First byte of filename | File entry marked as deleted |
 
 These markers are normal and indicate previously deleted files. The disk space is available for reuse.
+
+### Human68k File System Structure (X68000)
+
+Human68k is the native operating system for Sharp X68000 computers, using a FAT12-based file system with X68000-specific characteristics.
+
+**Disk Geometry (2HD):**
+- 77 cylinders × 2 heads × 8 sectors = 1,232 sectors
+- 1,024 bytes per sector (different from PC's 512 bytes)
+- Total capacity: 1,261,568 bytes (~1.2MB)
+
+**File System Layout:**
+| Sector | Contents |
+|--------|----------|
+| 0 | Boot sector with BPB |
+| 1-4 | FAT1 and FAT2 (2 sectors each) |
+| 5-10 | Root directory (192 entries) |
+| 11+ | Data area |
+
+**Boot Sector BPB (BIOS Parameter Block):**
+- Bytes/sector: 1024
+- Sectors/cluster: 1
+- Reserved sectors: 1
+- Number of FATs: 2
+- Root entries: 192
+- Media descriptor: 0xFE (2HD)
+
+**Directory Entry (32 bytes):**
+| Offset | Size | Description |
+|--------|------|-------------|
+| 0x00 | 8 | Filename (space-padded) |
+| 0x08 | 3 | Extension (space-padded) |
+| 0x0B | 1 | Attributes |
+| 0x0C | 10 | Reserved |
+| 0x16 | 2 | Time (DOS format) |
+| 0x18 | 2 | Date (DOS format) |
+| 0x1A | 2 | Start cluster |
+| 0x1C | 4 | File size |
+
+**File Attributes:**
+| Bit | Value | Description |
+|-----|-------|-------------|
+| 0 | 0x01 | Read-only |
+| 1 | 0x02 | Hidden |
+| 2 | 0x04 | System |
+| 3 | 0x08 | Volume label |
+| 4 | 0x10 | Directory |
+| 5 | 0x20 | Archive |
+
+**DIM File Format:**
+DIM format includes a 256-byte header before the disk data:
+| Offset | Size | Description |
+|--------|------|-------------|
+| 0x00 | 1 | Disk type (0=2HD, 1=2HS, 2=2HC, 3=2HDE, 9=2HQ) |
+| 0x01 | 170 | Track existence flags (1=present, 0=absent) |
+| 0xAB | 15 | Header info ("DIFC HEADER" signature) |
+| 0xBA | 4 | Creation date |
+| 0xBE | 4 | Creation time |
+| 0xC2 | 61 | Comment |
+| 0xFF | 1 | Overtrack flag |
 
 ### XSA Compressed Format
 XSA (eXtendable Storage Archive) is a compressed disk image format developed by XelaSoft for MSX computers in 1994.

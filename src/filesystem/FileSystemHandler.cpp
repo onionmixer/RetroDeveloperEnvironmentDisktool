@@ -8,6 +8,7 @@
 #include "rdedisktool/filesystem/MSXDOSHandler.h"
 #include "rdedisktool/filesystem/AppleDOS33Handler.h"
 #include "rdedisktool/filesystem/AppleProDOSHandler.h"
+#include "rdedisktool/filesystem/x68000/Human68kHandler.h"
 #include "rdedisktool/DiskImage.h"
 
 namespace rde {
@@ -51,6 +52,15 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::create(DiskImage* disk) {
         }
     }
 
+    // X68000 disk formats
+    if (format == DiskFormat::X68000XDF || format == DiskFormat::X68000DIM) {
+        auto handler = std::make_unique<Human68kHandler>();
+        if (handler->initialize(disk)) {
+            return handler;
+        }
+        return nullptr;
+    }
+
     return nullptr;
 }
 
@@ -72,6 +82,9 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::createForType(FileSystemTy
 
         case FileSystemType::ProDOS:
             return std::make_unique<AppleProDOSHandler>();
+
+        case FileSystemType::Human68k:
+            return std::make_unique<Human68kHandler>();
 
         default:
             return nullptr;

@@ -38,6 +38,9 @@ rde::DiskFormat formatFromString(const std::string& str) {
     if (s == "msxdsk" || s == "msx") return rde::DiskFormat::MSXDSK;
     if (s == "dmk" || s == "msxdmk") return rde::DiskFormat::MSXDMK;
     if (s == "xsa" || s == "msxxsa") return rde::DiskFormat::MSXXSA;
+    // X68000 formats
+    if (s == "xdf" || s == "x68000xdf" || s == "x68k") return rde::DiskFormat::X68000XDF;
+    if (s == "dim" || s == "x68000dim") return rde::DiskFormat::X68000DIM;
     return rde::DiskFormat::Unknown;
 }
 
@@ -48,6 +51,7 @@ rde::FileSystemType fileSystemFromString(const std::string& str) {
     if (s == "msxdos" || s == "msxdos1") return rde::FileSystemType::MSXDOS1;
     if (s == "msxdos2") return rde::FileSystemType::MSXDOS2;
     if (s == "fat12") return rde::FileSystemType::FAT12;
+    if (s == "human68k" || s == "human") return rde::FileSystemType::Human68k;
     return rde::FileSystemType::Unknown;
 }
 
@@ -62,6 +66,9 @@ bool isFileSystemCompatible(rde::DiskFormat format, rde::FileSystemType fsType) 
     // MSX formats
     bool isMSX = (format == rde::DiskFormat::MSXDSK ||
                   format == rde::DiskFormat::MSXDMK);
+    // X68000 formats
+    bool isX68000 = (format == rde::DiskFormat::X68000XDF ||
+                     format == rde::DiskFormat::X68000DIM);
 
     if (isApple) {
         return (fsType == rde::FileSystemType::DOS33 ||
@@ -71,6 +78,9 @@ bool isFileSystemCompatible(rde::DiskFormat format, rde::FileSystemType fsType) 
         return (fsType == rde::FileSystemType::MSXDOS1 ||
                 fsType == rde::FileSystemType::MSXDOS2 ||
                 fsType == rde::FileSystemType::FAT12);
+    }
+    if (isX68000) {
+        return (fsType == rde::FileSystemType::Human68k);
     }
     return false;
 }
@@ -275,6 +285,7 @@ void CLI::printHelp() const {
     std::cout << "  Apple II: .do, .dsk (DOS order), .po (ProDOS order),\n";
     std::cout << "            .nib (Nibble), .woz (WOZ v1/v2)\n";
     std::cout << "  MSX:      .dsk (Raw sector), .dmk (DMK), .xsa (XSA compressed)\n";
+    std::cout << "  X68000:   .xdf (XDF), .dim (DIM)\n";
     std::cout << "\n";
 
     std::cout << "Run 'rdedisktool help <command>' for detailed command help.\n";
@@ -1104,7 +1115,7 @@ int CLI::cmdCreate(const std::vector<std::string>& args) {
         format = formatFromString(formatStr);
         if (format == DiskFormat::Unknown) {
             printError("Unknown disk format: " + formatStr);
-            printError("Supported formats: do, po, nib, nb2, woz, woz1, woz2, msxdsk, dmk");
+            printError("Supported formats: do, po, nib, nb2, woz, woz1, woz2, msxdsk, dmk, xdf, dim");
             return 1;
         }
     } else {
@@ -1116,7 +1127,7 @@ int CLI::cmdCreate(const std::vector<std::string>& args) {
         }
         if (format == DiskFormat::Unknown) {
             printError("Cannot determine format from extension. Use --format option.");
-            printError("Supported formats: do, po, nib, nb2, woz, woz1, woz2, msxdsk, dmk");
+            printError("Supported formats: do, po, nib, nb2, woz, woz1, woz2, msxdsk, dmk, xdf, dim");
             return 1;
         }
     }
@@ -1270,7 +1281,7 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
 
         if (outputFormat == DiskFormat::Unknown) {
             printError("Cannot determine output format. Use --format option.");
-            printError("Supported formats: do, po, dsk, dmk, msxdsk, xsa");
+            printError("Supported formats: do, po, dsk, dmk, msxdsk, xsa, xdf, dim");
             return 1;
         }
 

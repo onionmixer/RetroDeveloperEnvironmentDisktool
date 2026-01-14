@@ -115,6 +115,21 @@ public:
     static rde::DiskFormat detectMSXFormat(const std::vector<uint8_t>& data,
                                             const std::string& ext);
 
+    /**
+     * Detect X68000 XDF format
+     * @param data File content
+     * @param fileSize File size
+     * @return X68000XDF or Unknown
+     */
+    static rde::DiskFormat detectXDFFormat(const std::vector<uint8_t>& data, size_t fileSize);
+
+    /**
+     * Detect X68000 DIM format
+     * @param data File content
+     * @return X68000DIM or Unknown
+     */
+    static rde::DiskFormat detectDIMFormat(const std::vector<uint8_t>& data);
+
     //=========================================================================
     // Utility Methods
     //=========================================================================
@@ -172,6 +187,10 @@ private:
     static constexpr size_t MSX_640K = 327680;       // 2S 40T 8S
     static constexpr size_t MSX_720K_40 = 368640;    // 2S 40T 9S
     static constexpr size_t MSX_720K_80 = 737280;    // 2S 80T 9S
+
+    // X68000 sizes
+    static constexpr size_t X68000_XDF = 1261568;    // 77*2*8*1024
+    static constexpr size_t X68000_DIM_HEADER = 256; // DIM header size
 
     /**
      * Check if file size matches known MSX disk sizes

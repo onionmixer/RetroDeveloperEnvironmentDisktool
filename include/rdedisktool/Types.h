@@ -13,7 +13,8 @@ namespace rde {
 enum class Platform {
     Unknown,
     AppleII,
-    MSX
+    MSX,
+    X68000
 };
 
 // Disk format enumeration
@@ -29,7 +30,10 @@ enum class DiskFormat {
     // MSX formats
     MSXDSK,         // Standard DSK (.dsk)
     MSXDMK,         // DMK format (.dmk)
-    MSXXSA          // XSA compressed (.xsa)
+    MSXXSA,         // XSA compressed (.xsa)
+    // X68000 formats
+    X68000XDF,      // X68000 XDF format (.xdf)
+    X68000DIM       // X68000 DIM format (.dim)
 };
 
 // File system type
@@ -42,7 +46,9 @@ enum class FileSystemType {
     MSXDOS1,        // MSX-DOS 1
     MSXDOS2,        // MSX-DOS 2
     FAT12,          // FAT12
-    FAT16           // FAT16
+    FAT16,          // FAT16
+    // X68000
+    Human68k        // Human68k file system
 };
 
 // Sector order for Apple II
@@ -84,6 +90,15 @@ enum class MSXFileAttrib : uint8_t {
     VolumeLabel = 0x08,
     Directory = 0x10,
     Archive = 0x20
+};
+
+// X68000 DIM disk types
+enum class X68000DIMType : uint8_t {
+    DIM_2HD  = 0,   // 1024 bytes/sector, 8 sectors/track
+    DIM_2HS  = 1,   // 1024 bytes/sector, 9 sectors/track
+    DIM_2HC  = 2,   // 512 bytes/sector, 15 sectors/track
+    DIM_2HDE = 3,   // 1024 bytes/sector, 9 sectors/track (extended)
+    DIM_2HQ  = 9    // 512 bytes/sector, 18 sectors/track
 };
 
 // Disk geometry
@@ -180,6 +195,7 @@ inline const char* platformToString(Platform p) {
     switch (p) {
         case Platform::AppleII: return "Apple II";
         case Platform::MSX: return "MSX";
+        case Platform::X68000: return "X68000";
         default: return "Unknown";
     }
 }
@@ -195,6 +211,8 @@ inline const char* formatToString(DiskFormat f) {
         case DiskFormat::MSXDSK: return "MSX DSK";
         case DiskFormat::MSXDMK: return "MSX DMK";
         case DiskFormat::MSXXSA: return "MSX XSA";
+        case DiskFormat::X68000XDF: return "X68000 XDF";
+        case DiskFormat::X68000DIM: return "X68000 DIM";
         default: return "Unknown";
     }
 }
@@ -210,6 +228,8 @@ inline const char* formatToExtension(DiskFormat f) {
         case DiskFormat::MSXDSK: return ".dsk";
         case DiskFormat::MSXDMK: return ".dmk";
         case DiskFormat::MSXXSA: return ".xsa";
+        case DiskFormat::X68000XDF: return ".xdf";
+        case DiskFormat::X68000DIM: return ".dim";
         default: return "";
     }
 }
@@ -226,6 +246,9 @@ inline DiskFormat stringToFormat(const std::string& s) {
     if (s == "dsk" || s == "msxdsk" || s == "msx") return DiskFormat::MSXDSK;
     if (s == "dmk" || s == "msxdmk") return DiskFormat::MSXDMK;
     if (s == "xsa" || s == "msxxsa") return DiskFormat::MSXXSA;
+    // X68000 formats
+    if (s == "xdf" || s == "x68000xdf" || s == "x68k") return DiskFormat::X68000XDF;
+    if (s == "dim" || s == "x68000dim") return DiskFormat::X68000DIM;
     return DiskFormat::Unknown;
 }
 
@@ -237,6 +260,7 @@ inline const char* fileSystemTypeToString(FileSystemType f) {
         case FileSystemType::MSXDOS2: return "MSX-DOS 2";
         case FileSystemType::FAT12: return "FAT12";
         case FileSystemType::FAT16: return "FAT16";
+        case FileSystemType::Human68k: return "Human68k";
         default: return "Unknown";
     }
 }

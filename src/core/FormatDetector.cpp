@@ -88,6 +88,12 @@ rde::DiskFormat FormatDetector::detectByMagic(const std::vector<uint8_t>& data) 
         return xsaFormat;
     }
 
+    // Try X68000 DIM format (has header with type byte)
+    rde::DiskFormat dimFormat = detectDIMFormat(data);
+    if (dimFormat != rde::DiskFormat::Unknown) {
+        return dimFormat;
+    }
+
     return rde::DiskFormat::Unknown;
 }
 
@@ -123,6 +129,14 @@ rde::DiskFormat FormatDetector::detectByExtension(const std::string& ext, size_t
         return rde::DiskFormat::MSXXSA;
     }
 
+    // X68000 specific extensions
+    if (ext == ".xdf") {
+        return rde::DiskFormat::X68000XDF;
+    }
+    if (ext == ".dim") {
+        return rde::DiskFormat::X68000DIM;
+    }
+
     return rde::DiskFormat::Unknown;
 }
 
@@ -142,6 +156,11 @@ rde::DiskFormat FormatDetector::detectByContent(const std::vector<uint8_t>& data
         }
         if (fileSize == APPLE_DOS32) {
             return rde::DiskFormat::AppleDO;
+        }
+
+        // Check X68000 XDF size
+        if (fileSize == X68000_XDF) {
+            return detectXDFFormat(data, fileSize);
         }
 
         // Non-standard sizes: analyze content
@@ -182,10 +201,22 @@ rde::DiskFormat FormatDetector::detectDMKFormat(const std::vector<uint8_t>& data
     uint8_t numTracks = data[1];
     uint16_t trackLength = data[2] | (data[3] << 8);
 
-    // Validate DMK header
+    // Validate DMK header - stricter validation
     if ((writeProtect != 0x00 && writeProtect != 0xFF) ||
         numTracks == 0 || numTracks > 86 ||
-        trackLength < 128 || trackLength > 16384) {
+        trackLength < 2560 || trackLength > 16384) {  // DMK track length typically >= 2560
+        return rde::DiskFormat::Unknown;
+    }
+
+    // Additional DMK validation: check reserved bytes should be zero
+    bool hasReservedZeros = true;
+    for (int i = 5; i < 12; ++i) {
+        if (data[i] != 0x00) {
+            hasReservedZeros = false;
+            break;
+        }
+    }
+    if (!hasReservedZeros) {
         return rde::DiskFormat::Unknown;
     }
 
@@ -338,6 +369,114 @@ bool FormatDetector::isMSXDiskSize(size_t size) {
            size == MSX_640K ||
            size == MSX_720K_40 ||
            size == MSX_720K_80;
+}
+
+//=============================================================================
+// X68000 Format Detection
+//=============================================================================
+
+rde::DiskFormat FormatDetector::detectXDFFormat(const std::vector<uint8_t>& data, size_t fileSize) {
+    // XDF has a fixed size of 1,261,568 bytes
+    if (fileSize != X68000_XDF) {
+        return rde::DiskFormat::Unknown;
+    }
+
+    // XDF has no magic number, but we can check for X68000 IPL signature
+    // X68000 boot sector typically starts with 0x60 (BRA instruction)
+    if (data.size() >= 10) {
+        // Check for JMP instruction at start (common in X68000)
+        if (data[0] == 0x60) {
+            return rde::DiskFormat::X68000XDF;
+        }
+        // Check for "X68IPL" signature
+        if (data[3] == 'X' && data[4] == '6' && data[5] == '8' &&
+            data[6] == 'I' && data[7] == 'P' && data[8] == 'L') {
+            return rde::DiskFormat::X68000XDF;
+        }
+    }
+
+    // If size matches exactly, assume XDF
+    return rde::DiskFormat::X68000XDF;
+}
+
+rde::DiskFormat FormatDetector::detectDIMFormat(const std::vector<uint8_t>& data) {
+    // DIM requires at least 256-byte header
+    if (data.size() < X68000_DIM_HEADER) {
+        return rde::DiskFormat::Unknown;
+    }
+
+    // Check for "DIFC HEADER" signature at offset 0xAB (171)
+    // This is a strong indicator of DIM format
+    bool hasDIFCSignature = false;
+    if (data.size() >= 182) {  // 171 + 11 = 182
+        hasDIFCSignature = (data[171] == 'D' && data[172] == 'I' &&
+                           data[173] == 'F' && data[174] == 'C');
+    }
+
+    // DIM type is stored in first byte, valid values are 0-3 and 9
+    uint8_t dimType = data[0];
+    if (dimType > 3 && dimType != 9) {
+        // If no DIFC signature and invalid type, not a DIM file
+        if (!hasDIFCSignature) {
+            return rde::DiskFormat::Unknown;
+        }
+    }
+
+    // Check track flags validity (bytes 1-170)
+    // Track flags should be 0 or 1
+    int flagCount0 = 0, flagCount1 = 0, flagCountOther = 0;
+    for (size_t i = 1; i < 171; ++i) {
+        if (data[i] == 0) flagCount0++;
+        else if (data[i] == 1) flagCount1++;
+        else flagCountOther++;
+    }
+
+    // DIM track flags should be mostly 0s and 1s
+    // Allow some tolerance for corrupted files
+    if (flagCountOther > 10 && !hasDIFCSignature) {
+        return rde::DiskFormat::Unknown;
+    }
+
+    // If we have DIFC signature, it's definitely DIM
+    if (hasDIFCSignature) {
+        return rde::DiskFormat::X68000DIM;
+    }
+
+    // Additional validation: check if file size is reasonable for DIM
+    // Track sizes: 2HD=8192, 2HS/2HDE=9216, 2HC=7680, 2HQ=9216
+    static constexpr size_t trackSizes[10] = {
+        8192, 9216, 7680, 9216, 0, 0, 0, 0, 0, 9216
+    };
+
+    size_t trackSize = trackSizes[dimType];
+    if (trackSize == 0) {
+        return rde::DiskFormat::Unknown;
+    }
+
+    // Minimum size: header + at least one track
+    size_t minSize = X68000_DIM_HEADER + trackSize;
+    if (data.size() < minSize) {
+        return rde::DiskFormat::Unknown;
+    }
+
+    // Count present tracks and verify file size
+    size_t presentTracks = 0;
+    for (size_t i = 1; i < 171; ++i) {
+        if (data[i] == 1) presentTracks++;
+    }
+
+    // Verify file size matches expected size (with some tolerance)
+    size_t expectedSize = X68000_DIM_HEADER + (presentTracks * trackSize);
+    if (data.size() >= expectedSize - trackSize && data.size() <= expectedSize + trackSize) {
+        return rde::DiskFormat::X68000DIM;
+    }
+
+    // If mostly valid track flags and reasonable type, assume DIM
+    if (flagCount1 > 50 && flagCountOther == 0 && dimType <= 3) {
+        return rde::DiskFormat::X68000DIM;
+    }
+
+    return rde::DiskFormat::Unknown;
 }
 
 //=============================================================================

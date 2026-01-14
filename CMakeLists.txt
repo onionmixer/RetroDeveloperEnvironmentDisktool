@@ -58,6 +58,13 @@ set(MSX_SOURCES
     src/msx/MFMEncoder.cpp
 )
 
+# X68000 format sources
+set(X68000_SOURCES
+    src/x68000/X68000DiskImage.cpp
+    src/x68000/X68000XDFImage.cpp
+    src/x68000/X68000DIMImage.cpp
+)
+
 # Filesystem sources
 set(FILESYSTEM_SOURCES
     src/filesystem/FileSystemHandler.cpp
@@ -65,6 +72,7 @@ set(FILESYSTEM_SOURCES
     src/filesystem/apple/AppleProDOSHandler.cpp
     src/filesystem/msx/MSXDOSHandler.cpp
     src/filesystem/msx/MSXFATUtils.cpp
+    src/filesystem/x68000/Human68kHandler.cpp
 )
 
 # Utility sources
@@ -87,6 +95,7 @@ add_library(rdedisktool_lib STATIC
     ${CORE_SOURCES}
     ${APPLE_SOURCES}
     ${MSX_SOURCES}
+    ${X68000_SOURCES}
     ${FILESYSTEM_SOURCES}
     ${UTILS_SOURCES}
 )

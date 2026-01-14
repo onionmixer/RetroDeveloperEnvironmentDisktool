@@ -131,6 +131,10 @@ Platform DiskImageFactory::getPlatformForFormat(DiskFormat format) {
         case DiskFormat::MSXXSA:
             return Platform::MSX;
 
+        case DiskFormat::X68000XDF:
+        case DiskFormat::X68000DIM:
+            return Platform::X68000;
+
         default:
             return Platform::Unknown;
     }
@@ -354,6 +358,8 @@ DiskFormat DiskImageFactory::getFormatFromExtension(const std::string& extension
     if (ext == ".woz") return DiskFormat::AppleWOZ2;  // Default to v2
     if (ext == ".dmk") return DiskFormat::MSXDMK;
     if (ext == ".xsa") return DiskFormat::MSXXSA;
+    if (ext == ".xdf") return DiskFormat::X68000XDF;
+    if (ext == ".dim") return DiskFormat::X68000DIM;
     if (ext == ".dsk") return DiskFormat::Unknown;  // Ambiguous
 
     return DiskFormat::Unknown;

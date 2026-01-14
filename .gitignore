@@ -36,3 +36,28 @@ Thumbs.db
 
 # Grok AI assistant files
 .grok/
+
+# Disk image files
+# Apple II
+*.do
+*.DO
+*.po
+*.PO
+*.nib
+*.NIB
+*.nb2
+*.NB2
+*.woz
+*.WOZ
+# MSX
+*.dsk
+*.DSK
+*.dmk
+*.DMK
+*.xsa
+*.XSA
+# X68000
+*.dim
+*.DIM
+*.xdf
+*.XDF
