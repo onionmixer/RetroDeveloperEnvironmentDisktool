@@ -307,6 +307,10 @@ After building, run these commands to verify:
 
 # Run a simple test (if you have a test disk image)
 ./rdedisktool info testdisk.dsk
+
+# X68000 Human68k create/detect check
+./rdedisktool create x68k_test.xdf -f xdf --fs human68k --force
+./rdedisktool info x68k_test.xdf | rg -q "File System: Human68k"
 ```
 
 ## Development

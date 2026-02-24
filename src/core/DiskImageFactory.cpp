@@ -258,6 +258,22 @@ DiskGeometry DiskImageFactory::getDefaultGeometry(DiskFormat format) {
             geom.bytesPerSector = 512;
             break;
 
+        // X68000 formats
+        case DiskFormat::X68000XDF:
+            geom.tracks = 154;
+            geom.sides = 2;
+            geom.sectorsPerTrack = 8;
+            geom.bytesPerSector = 1024;
+            break;
+
+        case DiskFormat::X68000DIM:
+            // Default DIM type is 2HD in this project.
+            geom.tracks = 154;
+            geom.sides = 2;
+            geom.sectorsPerTrack = 8;
+            geom.bytesPerSector = 1024;
+            break;
+
         default:
             // Return empty geometry for unknown formats
             break;
@@ -285,6 +301,10 @@ std::vector<std::string> DiskImageFactory::getExtensions(DiskFormat format) {
             return {".dmk"};
         case DiskFormat::MSXXSA:
             return {".xsa"};
+        case DiskFormat::X68000XDF:
+            return {".xdf"};
+        case DiskFormat::X68000DIM:
+            return {".dim"};
         default:
             return {};
     }

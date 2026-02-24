@@ -535,16 +535,22 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "\nSupported Formats:\n";
         std::cout << "  Apple II: do, po, nib, nb2, woz, woz1, woz2\n";
         std::cout << "  MSX:      msxdsk, dmk\n";
+        std::cout << "  X68000:   xdf, dim\n";
         std::cout << "\nSupported Filesystems:\n";
         std::cout << "  Apple II: dos33, prodos\n";
         std::cout << "  MSX:      msxdos, fat12\n";
+        std::cout << "  X68000:   human68k\n";
         std::cout << "\nDefault Geometry:\n";
         std::cout << "  Apple II: 35 tracks, 1 side, 16 sectors/track, 256 bytes/sector (140 KB)\n";
         std::cout << "  MSX:      80 tracks, 2 sides, 9 sectors/track, 512 bytes/sector (720 KB)\n";
+        std::cout << "  X68000:   XDF=154 tracks, 2 sides, 8 sectors/track, 1024 bytes/sector\n";
+        std::cout << "             DIM=154 tracks, 2 sides, 8 sectors/track, 1024 bytes/sector (2HD default)\n";
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool create disk.do -f do --fs dos33\n";
         std::cout << "  rdedisktool create game.po -f po --fs prodos -n MYGAME\n";
         std::cout << "  rdedisktool create msx.dsk -f msxdsk --fs msxdos -n MSXDISK\n";
+        std::cout << "  rdedisktool create x68k.xdf -f xdf --fs human68k -n X68KDISK\n";
+        std::cout << "  rdedisktool create x68k.dim -f dim --fs human68k -n X68KDIM\n";
         std::cout << "  rdedisktool create custom.do -f do -g 40:1:16:256\n";
         std::cout << "  rdedisktool create blank.po -f po\n";
         std::cout << "\nNote: Created disks are not bootable (no boot code included).\n";
@@ -1619,7 +1625,7 @@ int CLI::cmdCreate(const std::vector<std::string>& args) {
         fsType = fileSystemFromString(filesystemStr);
         if (fsType == FileSystemType::Unknown) {
             printError("Unknown filesystem: " + filesystemStr);
-            printError("Supported filesystems: dos33, prodos, msxdos, fat12");
+            printError("Supported filesystems: dos33, prodos, msxdos, fat12, human68k");
             return 1;
         }
         if (!isFileSystemCompatible(format, fsType)) {
@@ -1627,6 +1633,7 @@ int CLI::cmdCreate(const std::vector<std::string>& args) {
                        formatToString(format) + "'");
             printError("Apple II formats support: dos33, prodos");
             printError("MSX formats support: msxdos, fat12");
+            printError("X68000 formats support: human68k");
             return 1;
         }
     }

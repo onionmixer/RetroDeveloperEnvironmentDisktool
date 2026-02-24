@@ -18,19 +18,52 @@ FileSystemType X68000DiskImage::getFileSystemType() const {
 
     m_cachedFileSystem = FileSystemType::Unknown;
 
-    // Check for Human68k file system
-    // Human68k uses a specific boot sector format
+    // Check for Human68k file system.
+    // Accept both legacy IPL signatures and FAT-like BPB layouts used by
+    // newly formatted Human68k disks.
     if (m_data.size() >= 1024) {
-        // Check for X68000 IPL signature or Human68k boot sector
-        // Human68k boot sector typically starts with JMP instruction (0x60)
+        // Legacy/bootable patterns.
         if (m_data[0] == 0x60) {
             m_cachedFileSystem = FileSystemType::Human68k;
-        }
-        // Also check for "X68IPL" signature
-        else if (m_data.size() >= 10 &&
+        } else if (m_data.size() >= 10 &&
                  m_data[3] == 'X' && m_data[4] == '6' && m_data[5] == '8' &&
                  m_data[6] == 'I' && m_data[7] == 'P' && m_data[8] == 'L') {
             m_cachedFileSystem = FileSystemType::Human68k;
+        } else if (m_data.size() >= 32) {
+            // Human68k formatter used by this project writes:
+            // - JMP EB xx 90
+            // - OEM "HUMAN68K" at offset 3
+            // - FAT-like BPB at 0x0B
+            const bool hasJump = (m_data[0] == 0xEB && m_data[2] == 0x90) || (m_data[0] == 0xE9);
+            const bool hasHumanOem =
+                m_data[3] == 'H' && m_data[4] == 'U' && m_data[5] == 'M' && m_data[6] == 'A' &&
+                m_data[7] == 'N' && m_data[8] == '6' && m_data[9] == '8' && m_data[10] == 'K';
+
+            const uint16_t bytesPerSector = static_cast<uint16_t>(m_data[0x0B] | (m_data[0x0C] << 8));
+            const uint8_t sectorsPerCluster = m_data[0x0D];
+            const uint16_t reservedSectors = static_cast<uint16_t>(m_data[0x0E] | (m_data[0x0F] << 8));
+            const uint8_t numberOfFATs = m_data[0x10];
+            const uint16_t rootEntries = static_cast<uint16_t>(m_data[0x11] | (m_data[0x12] << 8));
+            const uint16_t totalSectors = static_cast<uint16_t>(m_data[0x13] | (m_data[0x14] << 8));
+            const uint16_t sectorsPerFAT = static_cast<uint16_t>(m_data[0x16] | (m_data[0x17] << 8));
+            const uint16_t sectorsPerTrack = static_cast<uint16_t>(m_data[0x18] | (m_data[0x19] << 8));
+            const uint16_t numberOfHeads = static_cast<uint16_t>(m_data[0x1A] | (m_data[0x1B] << 8));
+
+            const bool bpbLooksValid =
+                (bytesPerSector == 256 || bytesPerSector == 512 ||
+                 bytesPerSector == 1024 || bytesPerSector == 2048) &&
+                sectorsPerCluster > 0 &&
+                reservedSectors > 0 &&
+                numberOfFATs >= 1 &&
+                rootEntries > 0 &&
+                totalSectors > 0 &&
+                sectorsPerFAT > 0 &&
+                sectorsPerTrack > 0 &&
+                numberOfHeads > 0;
+
+            if (hasJump && hasHumanOem && bpbLooksValid) {
+                m_cachedFileSystem = FileSystemType::Human68k;
+            }
         }
     }
 

@@ -382,6 +382,24 @@ rdedisktool create blank.po -f po
 
 > **Note**: Created disks are not bootable (no boot code included).
 
+생성 검증(스크립트 권장):
+```bash
+# 1) create 종료코드 확인 (실패 시 즉시 처리)
+rdedisktool create x68k.xdf -f xdf --fs human68k --force
+
+# 2) info 결과에서 파일시스템 식별 문자열 확인
+rdedisktool info x68k.xdf | rg -q "File System: Human68k"
+```
+
+두 검사는 모두 필수입니다. 즉, `create`가 성공(exit code 0)하고
+`info` 출력의 파일시스템 문자열이 기대값과 일치해야 정상 생성/인식으로 판단합니다.
+
+플랫폼별 문자열 예시:
+- Apple DOS 3.3: `File System: DOS 3.3`
+- Apple ProDOS: `File System: ProDOS`
+- MSX: `File System: MSX-DOS` (MSX-DOS 1/2 공통 부분 문자열)
+- X68000: `File System: Human68k`
+
 #### convert - Convert disk image format
 ```bash
 rdedisktool convert <input_file> <output_file> [-f <format>]

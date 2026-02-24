@@ -675,6 +675,39 @@ bool Human68kHandler::fileExists(const std::string& filename) const {
 }
 
 bool Human68kHandler::format(const std::string& volumeName) {
+    if (!m_disk) {
+        return false;
+    }
+
+    // When formatting a brand-new image via setDisk(), BPB cache values may still
+    // be defaults (or zero). Recompute key fields from image geometry.
+    const DiskGeometry geom = m_disk->getGeometry();
+    if (geom.bytesPerSector > 0) {
+        m_bytesPerSector = static_cast<uint16_t>(geom.bytesPerSector);
+    }
+    if (geom.sectorsPerTrack > 0) {
+        m_sectorsPerTrack = static_cast<uint16_t>(geom.sectorsPerTrack);
+    }
+    if (geom.sides > 0) {
+        m_numberOfHeads = static_cast<uint16_t>(geom.sides);
+    }
+
+    const size_t totalSectors = geom.totalSectors();
+    if (totalSectors > 0) {
+        m_totalSectors = static_cast<uint16_t>(std::min<size_t>(totalSectors, 0xFFFF));
+    }
+
+    m_rootDirSectors = static_cast<uint16_t>(((m_rootEntryCount * 32) + (m_bytesPerSector - 1)) / m_bytesPerSector);
+    m_firstDataSector = static_cast<uint16_t>(m_reservedSectors + (m_numberOfFATs * m_sectorsPerFAT) + m_rootDirSectors);
+    if (m_firstDataSector >= m_totalSectors) {
+        return false;
+    }
+    m_dataSectors = static_cast<uint16_t>(m_totalSectors - m_firstDataSector);
+    m_totalClusters = static_cast<uint16_t>(m_dataSectors / m_sectorsPerCluster);
+    if (m_totalClusters == 0) {
+        return false;
+    }
+
     // Initialize boot sector
     std::vector<uint8_t> bootSector(m_bytesPerSector, 0);
 

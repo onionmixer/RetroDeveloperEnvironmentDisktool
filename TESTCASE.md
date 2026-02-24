@@ -65,16 +65,17 @@ README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이
 
 | 단계 | 절차 | 기대 결과 |
 |------|------|------------|
-|1|`rdedisktool create x68k.xdf -f xdf --fs human68k -n X68KDISK`|약 1.2MB 크기의 Human68k XDF 이미지가 생성되고 성공 메시지가 출력된다.|
-|2|`rdedisktool info x68k.xdf`|Format: X68000 XDF, Platform: X68000, Geometry: 154 tracks, 2 sides, 8 sectors/track, 1024 bytes/sector로 표기된다.|
-|3|`rdedisktool list x68k.xdf`|빈 디스크로 파일 수 0, Free space가 약 1.3MB로 표시된다. Volume: X68KDISK 확인.|
-|4|`rdedisktool add x68k.xdf tests/fixtures/GAME.X GAME.X`|파일이 루트에 추가되며 여유 공간 감소량이 파일 크기(클러스터 단위)와 일치한다.|
-|5|`rdedisktool add x68k.xdf tests/fixtures/long_filename_test.dat`|긴 파일명이 8.3 형식으로 변환됨(예: LONG_FIL.DAT)을 확인.|
-|6|`rdedisktool list x68k.xdf`|루트 목록에 GAME.X, LONG_FIL.DAT가 보이고 속성/크기가 기대와 일치한다.|
-|7|`rdedisktool extract x68k.xdf GAME.X ./GAME_out.X && cmp tests/fixtures/GAME.X ./GAME_out.X`|호스트에 복사되고 내용이 완전히 동일하다.|
-|8|`rdedisktool delete x68k.xdf GAME.X`|루트에서 파일이 제거되고 `list` 시 항목이 사라진다.|
-|9|`rdedisktool list x68k.xdf`|GAME.X가 삭제되어 LONG_FIL.DAT만 남아 있고 Free space가 증가함을 확인.|
-|10|`rdedisktool validate x68k.xdf`|삭제 후에도 디스크 무결성이 유지됨을 확인한다.|
+|1|`rdedisktool create x68k.xdf -f xdf --fs human68k -n X68KDISK`|약 1.2MB 크기의 Human68k XDF 이미지가 생성되고 성공 메시지가 출력된다. 종료 코드는 0이어야 한다.|
+|2|`rdedisktool info x68k.xdf`|Format: X68000 XDF, Platform: X68000, Geometry: 154 tracks, 2 sides, 8 sectors/track, 1024 bytes/sector와 `File System: Human68k`가 표기된다.|
+|3|`rdedisktool info x68k.xdf | rg -q "File System: Human68k"`|종료 코드 0이어야 하며, 문자열 미검출 시 인식 실패로 판단한다.|
+|4|`rdedisktool list x68k.xdf`|빈 디스크로 파일 수 0, Free space가 약 1.3MB로 표시된다. Volume: X68KDISK 확인.|
+|5|`rdedisktool add x68k.xdf tests/fixtures/GAME.X GAME.X`|파일이 루트에 추가되며 여유 공간 감소량이 파일 크기(클러스터 단위)와 일치한다.|
+|6|`rdedisktool add x68k.xdf tests/fixtures/long_filename_test.dat`|긴 파일명이 8.3 형식으로 변환됨(예: LONG_FIL.DAT)을 확인.|
+|7|`rdedisktool list x68k.xdf`|루트 목록에 GAME.X, LONG_FIL.DAT가 보이고 속성/크기가 기대와 일치한다.|
+|8|`rdedisktool extract x68k.xdf GAME.X ./GAME_out.X && cmp tests/fixtures/GAME.X ./GAME_out.X`|호스트에 복사되고 내용이 완전히 동일하다.|
+|9|`rdedisktool delete x68k.xdf GAME.X`|루트에서 파일이 제거되고 `list` 시 항목이 사라진다.|
+|10|`rdedisktool list x68k.xdf`|GAME.X가 삭제되어 LONG_FIL.DAT만 남아 있고 Free space가 증가함을 확인.|
+|11|`rdedisktool validate x68k.xdf`|삭제 후에도 디스크 무결성이 유지됨을 확인한다.|
 
 ## 시나리오 5. X68000 DIM 이미지에서 서브디렉터리 작업
 - **목적**: X68000 DIM 이미지 생성 후 Human68k 파일시스템에서 디렉터리 생성/삭제, 파일 추가/삭제, 추출, `rmdir` 제약을 검증하고, DIM 헤더 구조가 올바르게 처리되는지 확인한다.
@@ -83,7 +84,7 @@ README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이
 
 | 단계 | 절차 | 기대 결과 |
 |------|------|------------|
-|1|`rdedisktool info x68k.dim`|Format: X68000 DIM, Platform: X68000이 표시되고 DIM 타입(2HD 등)이 표기된다.|
+|1|`rdedisktool info x68k.dim`|Format: X68000 DIM, Platform: X68000, `File System: Human68k`가 표시되고 DIM 타입(2HD 등)이 표기된다.|
 |2|`rdedisktool mkdir x68k.dim GAMES`|루트에 GAMES 디렉터리가 생성되고 `list x68k.dim`에서 DIR로 표기된다.|
 |3|`rdedisktool mkdir x68k.dim GAMES/ACTION`|중첩 디렉터리가 생성되고 `rdedisktool list x68k.dim GAMES` 결과에 ACTION 표시.|
 |4|`rdedisktool add x68k.dim tests/fixtures/GAME.X GAMES/ACTION/SHOOTER.X`|파일이 GAMES/ACTION 하위에 생성되고 `rdedisktool list x68k.dim GAMES/ACTION`에서 확인.|
