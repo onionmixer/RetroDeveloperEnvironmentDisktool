@@ -1,4 +1,5 @@
 #include "rdedisktool/CLI.h"
+#include "rdedisktool/BootDiskPolicy.h"
 #include "rdedisktool/DiskImage.h"
 #include "rdedisktool/DiskImageFactory.h"
 #include "rdedisktool/FileSystemHandler.h"
@@ -12,9 +13,13 @@
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
+#include <cctype>
 #include <fstream>
 #include <sstream>
 #include <filesystem>
+#include <unordered_map>
+#include <unordered_set>
+#include <set>
 
 namespace {
 
@@ -104,6 +109,186 @@ bool parseGeometry(const std::string& spec, rde::DiskGeometry& geom) {
     return true;
 }
 
+std::string toUpper(const std::string& s) {
+    std::string out = s;
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return out;
+}
+
+std::string normalizePathKey(const std::string& p) {
+    std::string n = p;
+    std::replace(n.begin(), n.end(), '\\', '/');
+    while (!n.empty() && n.front() == '/') {
+        n.erase(n.begin());
+    }
+    return toUpper(n);
+}
+
+std::string baseNameUpper(const std::string& p) {
+    std::string n = p;
+    std::replace(n.begin(), n.end(), '\\', '/');
+    const size_t pos = n.find_last_of('/');
+    std::string base = (pos == std::string::npos) ? n : n.substr(pos + 1);
+    return toUpper(base);
+}
+
+bool isCriticalBootFile(rde::BootDiskProfile profile, const std::string& filename) {
+    const std::string f = baseNameUpper(filename);
+    switch (profile) {
+        case rde::BootDiskProfile::DOS33: {
+            static const std::set<std::string> s = {"INTBASIC", "FPBASIC", "MASTER", "BOOT13"};
+            return s.count(f) > 0;
+        }
+        case rde::BootDiskProfile::ProDOS: {
+            static const std::set<std::string> s = {"PRODOS", "BASIC.SYSTEM"};
+            return s.count(f) > 0;
+        }
+        case rde::BootDiskProfile::MSXDOS: {
+            static const std::set<std::string> s = {"MSXDOS2.SYS", "COMMAND2.COM", "MSXDOS.SYS", "COMMAND.COM"};
+            return s.count(f) > 0;
+        }
+        case rde::BootDiskProfile::Human68k: {
+            static const std::set<std::string> s = {"HUMAN.SYS", "COMMAND.X"};
+            return s.count(f) > 0;
+        }
+        default:
+            return false;
+    }
+}
+
+bool confirmCriticalDelete(const std::string& filename,
+                          rde::BootDiskProfile profile) {
+    std::cerr << "Warning: '" << filename << "' is a boot-critical file (profile="
+              << rde::BootDiskPolicy::profileToString(profile) << "). Delete? [y/N]: ";
+    std::string line;
+    if (!std::getline(std::cin, line) || line.empty()) {
+        return false;
+    }
+    char c = static_cast<char>(std::tolower(static_cast<unsigned char>(line[0])));
+    if (c != 'y') {
+        return false;
+    }
+    return true;
+}
+
+uint64_t fnv1a64(const std::vector<uint8_t>& data) {
+    uint64_t h = 1469598103934665603ULL;
+    for (uint8_t b : data) {
+        h ^= static_cast<uint64_t>(b);
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+bool readSectorLinear(rde::DiskImage& image,
+                      rde::DiskFormat format,
+                      uint32_t linearSector,
+                      std::vector<uint8_t>& out) {
+    const rde::DiskGeometry geom = image.getGeometry();
+    if (geom.sides == 0 || geom.sectorsPerTrack == 0) {
+        return false;
+    }
+    const uint32_t sectorsPerTrackAllSides =
+        static_cast<uint32_t>(geom.sides * geom.sectorsPerTrack);
+    if (sectorsPerTrackAllSides == 0) {
+        return false;
+    }
+    const uint32_t track = linearSector / sectorsPerTrackAllSides;
+    const uint32_t rem = linearSector % sectorsPerTrackAllSides;
+    const uint32_t side = rem / geom.sectorsPerTrack;
+    uint32_t sector = rem % geom.sectorsPerTrack;
+
+    if (format == rde::DiskFormat::X68000XDF || format == rde::DiskFormat::X68000DIM) {
+        sector += 1; // X68000 DiskImage sector is 1-indexed.
+    }
+
+    try {
+        out = image.readSector(track, side, sector);
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::vector<std::pair<uint32_t, uint32_t>> protectedLinearRanges(const rde::DiskGeometry& geom,
+                                                                  rde::BootDiskProfile profile) {
+    std::vector<std::pair<uint32_t, uint32_t>> ranges;
+    const uint32_t totalSectors = static_cast<uint32_t>(geom.totalSectors());
+    if (totalSectors == 0) {
+        return ranges;
+    }
+
+    auto addRange = [&](uint32_t start, uint32_t end) {
+        if (start >= totalSectors) {
+            return;
+        }
+        end = std::min(end, totalSectors - 1);
+        if (start <= end) {
+            ranges.push_back({start, end});
+        }
+    };
+
+    const uint32_t spt = static_cast<uint32_t>(geom.sectorsPerTrack);
+    switch (profile) {
+        case rde::BootDiskProfile::DOS33:
+            // Boot protection only: Track 0 bootstrap sectors.
+            addRange(0, spt > 0 ? (spt - 1) : 0);
+            break;
+        case rde::BootDiskProfile::ProDOS:
+            // ProDOS boot blocks 0..1 (4 x 256-byte sectors on Apple II).
+            addRange(0, 3);
+            break;
+        case rde::BootDiskProfile::MSXDOS:
+            // MSX boot sector only; FAT/root updates are required for normal file add.
+            addRange(0, 0);
+            break;
+        case rde::BootDiskProfile::Human68k:
+            // Human68k boot/IPL sector only.
+            addRange(0, 0);
+            break;
+        default:
+            break;
+    }
+
+    return ranges;
+}
+
+bool collectFileDigestsRecursive(rde::FileSystemHandler& handler,
+                                 const std::string& path,
+                                 std::unordered_map<std::string, rde::CLI::FileDigest>& out,
+                                 std::string& error) {
+    std::vector<rde::FileEntry> entries;
+    try {
+        entries = handler.listFiles(path);
+    } catch (const std::exception& e) {
+        error = std::string("listFiles failed at path '") + path + "': " + e.what();
+        return false;
+    }
+
+    for (const auto& e : entries) {
+        std::string child = path.empty() ? e.name : (path + "/" + e.name);
+        if (e.isDirectory) {
+            if (!collectFileDigestsRecursive(handler, child, out, error)) {
+                return false;
+            }
+            continue;
+        }
+        try {
+            const auto data = handler.readFile(child);
+            rde::CLI::FileDigest d;
+            d.size = data.size();
+            d.hash = fnv1a64(data);
+            out[normalizePathKey(child)] = d;
+        } catch (const std::exception& ex) {
+            error = std::string("readFile failed for '") + child + "': " + ex.what();
+            return false;
+        }
+    }
+
+    return true;
+}
+
 } // anonymous namespace
 
 namespace rde {
@@ -188,6 +373,10 @@ int CLI::run(int argc, char* argv[]) {
 
     // Parse global options
     args = parseGlobalOptions(args);
+    if (!m_globalOptionError.empty()) {
+        printError(m_globalOptionError);
+        return 1;
+    }
 
     if (args.empty()) {
         printHelp();
@@ -250,6 +439,34 @@ std::vector<std::string> CLI::parseGlobalOptions(const std::vector<std::string>&
             m_verbose = true;
         } else if (arg == "-q" || arg == "--quiet") {
             m_quiet = true;
+        } else if (arg == "--force-bootdisk") {
+            m_forceBootDisk = true;
+        } else if (arg == "--force-system-file") {
+            m_forceSystemFile = true;
+        } else if (arg == "--keep-backup") {
+            m_keepBackup = true;
+        } else if (arg == "--bootdisk-mode") {
+            if (i + 1 >= args.size()) {
+                m_globalOptionError = "Missing value for --bootdisk-mode";
+                break;
+            }
+            auto mode = BootDiskPolicy::modeFromString(args[++i]);
+            if (!mode.has_value()) {
+                m_globalOptionError = "Invalid --bootdisk-mode value (use strict|warn|off)";
+                break;
+            }
+            m_bootDiskMode = mode.value();
+        } else if (arg == "--bootdisk-profile") {
+            if (i + 1 >= args.size()) {
+                m_globalOptionError = "Missing value for --bootdisk-profile";
+                break;
+            }
+            auto profile = BootDiskPolicy::profileFromString(args[++i]);
+            if (!profile.has_value()) {
+                m_globalOptionError = "Invalid --bootdisk-profile value (use dos33|prodos|msxdos|human68k|unknown)";
+                break;
+            }
+            m_forcedBootProfile = profile;
         } else {
             remaining.push_back(arg);
         }
@@ -270,6 +487,11 @@ void CLI::printHelp() const {
     std::cout << "Global Options:\n";
     std::cout << "  -v, --verbose    Enable verbose output\n";
     std::cout << "  -q, --quiet      Suppress non-essential output\n";
+    std::cout << "  --bootdisk-mode <m>  Boot disk protection mode: strict|warn|off\n";
+    std::cout << "  --force-bootdisk     Override boot disk mutation block\n";
+    std::cout << "  --force-system-file  Force delete of boot-critical files without prompt\n";
+    std::cout << "  --bootdisk-profile <p>  Force boot profile: dos33|prodos|msxdos|human68k|unknown\n";
+    std::cout << "  --keep-backup        Keep .bak file when saving changes\n";
     std::cout << "  -h, --help       Show help message\n";
     std::cout << "  -V, --version    Show version information\n";
     std::cout << "\n";
@@ -333,6 +555,13 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  rdedisktool add disk.po myfile.txt\n";
         std::cout << "  rdedisktool add disk.po myfile.txt TARGETNAME.TXT\n";
         std::cout << "  rdedisktool add --force disk.po myfile.txt\n";
+    } else if (command == "delete") {
+        std::cout << "\nNotes:\n";
+        std::cout << "  Deleting boot-critical system files asks for [y/N] confirmation.\n";
+        std::cout << "  Use --force-system-file to bypass the prompt intentionally.\n";
+        std::cout << "\nExamples:\n";
+        std::cout << "  rdedisktool delete disk.dsk OLD.BIN\n";
+        std::cout << "  rdedisktool --force-system-file delete boot.dsk COMMAND2.COM\n";
     } else if (command == "dump") {
         std::cout << "\nOptions:\n";
         std::cout << "  -t, --track <n>    Track number (0-based, required)\n";
@@ -447,7 +676,15 @@ LoadedDisk CLI::loadDiskImage(const std::string& imagePath) {
     // Create filesystem handler
     result.handler = FileSystemHandler::create(result.image.get());
     if (!result.handler) {
-        printError("File system not supported for this disk format");
+        FileSystemType fsType = result.image->getFileSystemType();
+        if (result.format == DiskFormat::MSXDSK || result.format == DiskFormat::MSXDMK ||
+            result.format == DiskFormat::X68000XDF || result.format == DiskFormat::X68000DIM ||
+            fsType == FileSystemType::MSXDOS1 || fsType == FileSystemType::MSXDOS2 ||
+            fsType == FileSystemType::FAT12 || fsType == FileSystemType::Human68k) {
+            printError("Failed to initialize filesystem (possible invalid BPB/metadata)");
+        } else {
+            printError("File system not supported for this disk format");
+        }
         return result;
     }
 
@@ -490,12 +727,139 @@ bool CLI::saveDiskImage(DiskImage* image, const std::string& operation) {
     }
 
     try {
-        image->save();
+        const std::filesystem::path originalPath = image->getFilePath();
+        if (originalPath.empty()) {
+            image->save();
+            return true;
+        }
+
+        const std::filesystem::path tmpPath = originalPath.string() + ".tmp.rdedisktool";
+        const std::filesystem::path bakPath = originalPath.string() + ".bak";
+
+        std::error_code ec;
+        if (std::filesystem::exists(tmpPath, ec)) {
+            std::filesystem::remove(tmpPath, ec);
+        }
+
+        // Write to temporary path first to avoid partial overwrite on failure.
+        image->save(tmpPath);
+
+        if (m_keepBackup) {
+            if (std::filesystem::exists(bakPath, ec)) {
+                std::filesystem::remove(bakPath, ec);
+            }
+            std::filesystem::copy_file(originalPath, bakPath, std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) {
+                printWarning("Failed to create backup file: " + bakPath.string());
+            }
+        }
+
+        std::filesystem::rename(tmpPath, originalPath, ec);
+        if (ec) {
+            // Retry by removing original first on platforms that don't allow overwrite rename.
+            std::filesystem::remove(originalPath, ec);
+            ec.clear();
+            std::filesystem::rename(tmpPath, originalPath, ec);
+        }
+
+        if (ec) {
+            printError("Failed to replace original file after " + operation + ": " + ec.message());
+            std::filesystem::remove(tmpPath, ec);
+            return false;
+        }
+
+        // Refresh in-memory image state to the final path.
+        image->load(originalPath);
         return true;
     } catch (const std::exception& e) {
         printError("Error saving disk image after " + operation + ": " + std::string(e.what()));
         return false;
     }
+}
+
+bool CLI::captureSafeAddSnapshot(const LoadedDisk& disk,
+                                 BootDiskProfile profile,
+                                 SafeAddSnapshot& snapshot,
+                                 std::string& error) const {
+    if (!disk.image || !disk.handler) {
+        error = "disk image/handler is not initialized";
+        return false;
+    }
+
+    snapshot.existingFiles.clear();
+    snapshot.protectedSectors.clear();
+
+    if (!collectFileDigestsRecursive(*disk.handler, "", snapshot.existingFiles, error)) {
+        if (error.empty()) {
+            error = "failed to snapshot existing files";
+        }
+        return false;
+    }
+
+    const auto ranges = protectedLinearRanges(disk.image->getGeometry(), profile);
+    for (const auto& r : ranges) {
+        for (uint32_t s = r.first; s <= r.second; ++s) {
+            std::vector<uint8_t> data;
+            if (!readSectorLinear(*disk.image, disk.format, s, data)) {
+                error = "failed to read protected sector during snapshot";
+                return false;
+            }
+            snapshot.protectedSectors[s] = std::move(data);
+        }
+    }
+
+    return true;
+}
+
+bool CLI::verifySafeAddSnapshot(const LoadedDisk& disk,
+                                BootDiskProfile profile,
+                                const SafeAddSnapshot& snapshot,
+                                const std::string& addedTarget,
+                                std::string& error) const {
+    if (!disk.image || !disk.handler) {
+        error = "disk image/handler is not initialized";
+        return false;
+    }
+
+    std::unordered_map<std::string, FileDigest> afterFiles;
+    if (!collectFileDigestsRecursive(*disk.handler, "", afterFiles, error)) {
+        if (error.empty()) {
+            error = "failed to verify existing files";
+        }
+        return false;
+    }
+
+    const std::string addedUpper = normalizePathKey(addedTarget);
+    for (const auto& kv : snapshot.existingFiles) {
+        const std::string& name = kv.first;
+        if (name == addedUpper) {
+            continue;
+        }
+        auto it = afterFiles.find(name);
+        if (it == afterFiles.end()) {
+            error = "existing file disappeared after add: " + name;
+            return false;
+        }
+        if (it->second.size != kv.second.size || it->second.hash != kv.second.hash) {
+            error = "existing file was modified after add: " + name;
+            return false;
+        }
+    }
+
+    for (const auto& kv : snapshot.protectedSectors) {
+        std::vector<uint8_t> now;
+        if (!readSectorLinear(*disk.image, disk.format, kv.first, now)) {
+            error = "failed to re-read protected sector during verification";
+            return false;
+        }
+        if (now != kv.second) {
+            error = "protected sector changed by add operation (linear sector " + std::to_string(kv.first) + ")";
+            return false;
+        }
+    }
+
+    (void)profile;
+    return true;
 }
 
 //=============================================================================
@@ -536,9 +900,10 @@ int CLI::cmdInfo(const std::vector<std::string>& args) {
             FileSystemType fsType = image->getFileSystemType();
             std::cout << "\nFile System: " << fileSystemTypeToString(fsType) << "\n";
 
+            auto handler = FileSystemHandler::create(image.get());
+
             // Show additional filesystem info if detected
             if (fsType != FileSystemType::Unknown) {
-                auto handler = FileSystemHandler::create(image.get());
                 if (handler) {
                     std::string volumeName = handler->getVolumeName();
                     if (!volumeName.empty()) {
@@ -592,6 +957,19 @@ int CLI::cmdInfo(const std::vector<std::string>& args) {
                             }
                         }
                     }
+                }
+            }
+
+            if (m_verbose) {
+                auto det = BootDiskPolicy::detect(imagePath, *image, handler.get(), m_forcedBootProfile);
+                std::cout << "\nBootDisk Detection:\n";
+                std::cout << "  BootDisk: " << (det.isBootDisk ? "yes" : "no") << "\n";
+                std::cout << "  Profile: " << BootDiskPolicy::profileToString(det.profile) << "\n";
+                std::cout << "  Confidence: " << BootDiskPolicy::confidenceToString(det.confidence) << "\n";
+                std::cout << "  ProtectionMode: " << BootDiskPolicy::modeToString(m_bootDiskMode) << "\n";
+                std::cout << "  Reason: " << det.reason << "\n";
+                if (!handler) {
+                    std::cout << "  Note: filesystem handler init failed\n";
                 }
             }
 
@@ -861,8 +1239,31 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
             return 1;
         }
 
+        auto det = BootDiskPolicy::detect(imagePath, *disk.image, disk.handler.get(), m_forcedBootProfile);
+        auto policy = BootDiskPolicy::canMutate(det, m_bootDiskMode, MutationOp::Add, targetName, m_forceBootDisk);
+        const bool safeBootAddMode = (!policy.allowed &&
+                                      det.isBootDisk &&
+                                      !m_forceBootDisk &&
+                                      m_bootDiskMode != BootDiskMode::Off);
+        if (!policy.allowed && !safeBootAddMode) {
+            printError(policy.reason);
+            if (policy.needsForce) {
+                printError("Hint: use --force-bootdisk to override intentionally.");
+            }
+            return 1;
+        }
+        if (safeBootAddMode && !m_quiet) {
+            std::cout << "Bootdisk safe-add verification enabled (profile="
+                      << BootDiskPolicy::profileToString(det.profile) << ")\n";
+        }
+
         // Check if file already exists
         if (disk.handler->fileExists(targetName)) {
+            if (safeBootAddMode) {
+                printError("Safe-add on bootdisk does not allow overwrite: " + targetName);
+                printError("Hint: choose a new file name or use --force-bootdisk for manual override.");
+                return 1;
+            }
             if (!forceOverwrite) {
                 printError("File already exists: " + targetName + "\nUse --force to overwrite");
                 return 1;
@@ -883,6 +1284,15 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
             return 1;
         }
 
+        SafeAddSnapshot snapshot;
+        if (safeBootAddMode) {
+            std::string snapErr;
+            if (!captureSafeAddSnapshot(disk, det.profile, snapshot, snapErr)) {
+                printError("Failed to start bootdisk safe-add: " + snapErr);
+                return 1;
+            }
+        }
+
         // Write file
         FileMetadata metadata;
         metadata.targetName = targetName;
@@ -892,6 +1302,15 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
         if (!disk.handler->writeFile(targetName, data, metadata)) {
             printError("Failed to write file to disk image");
             return 1;
+        }
+
+        if (safeBootAddMode) {
+            std::string verifyErr;
+            if (!verifySafeAddSnapshot(disk, det.profile, snapshot, targetName, verifyErr)) {
+                printError("Bootdisk safe-add verification failed: " + verifyErr);
+                printError("Hint: use --force-bootdisk if you intentionally need this mutation.");
+                return 1;
+            }
         }
 
         // Save disk image
@@ -948,9 +1367,26 @@ int CLI::cmdDelete(const std::vector<std::string>& args) {
             return 1;
         }
 
+        auto det = BootDiskPolicy::detect(imagePath, *disk.image, disk.handler.get(), m_forcedBootProfile);
+        auto policy = BootDiskPolicy::canMutate(det, m_bootDiskMode, MutationOp::Delete, filename, m_forceBootDisk);
+        if (!policy.allowed) {
+            printError(policy.reason);
+            if (policy.needsForce) {
+                printError("Hint: use --force-bootdisk to override intentionally.");
+            }
+            return 1;
+        }
+
         if (!disk.handler->fileExists(filename)) {
             printError("File not found: " + filename);
             return 1;
+        }
+
+        if (det.isBootDisk && isCriticalBootFile(det.profile, filename) && !m_forceSystemFile) {
+            if (!confirmCriticalDelete(filename, det.profile)) {
+                printError("Delete cancelled for boot-critical file.");
+                return 1;
+            }
         }
 
         if (!disk.handler->deleteFile(filename)) {
@@ -998,6 +1434,16 @@ int CLI::cmdMkdir(const std::vector<std::string>& args) {
     try {
         auto disk = loadDiskImage(imagePath);
         if (!disk) {
+            return 1;
+        }
+
+        auto det = BootDiskPolicy::detect(imagePath, *disk.image, disk.handler.get(), m_forcedBootProfile);
+        auto policy = BootDiskPolicy::canMutate(det, m_bootDiskMode, MutationOp::Mkdir, dirPath, m_forceBootDisk);
+        if (!policy.allowed) {
+            printError(policy.reason);
+            if (policy.needsForce) {
+                printError("Hint: use --force-bootdisk to override intentionally.");
+            }
             return 1;
         }
 
@@ -1051,6 +1497,16 @@ int CLI::cmdRmdir(const std::vector<std::string>& args) {
     try {
         auto disk = loadDiskImage(imagePath);
         if (!disk) {
+            return 1;
+        }
+
+        auto det = BootDiskPolicy::detect(imagePath, *disk.image, disk.handler.get(), m_forcedBootProfile);
+        auto policy = BootDiskPolicy::canMutate(det, m_bootDiskMode, MutationOp::Rmdir, dirPath, m_forceBootDisk);
+        if (!policy.allowed) {
+            printError(policy.reason);
+            if (policy.needsForce) {
+                printError("Hint: use --force-bootdisk to override intentionally.");
+            }
             return 1;
         }
 

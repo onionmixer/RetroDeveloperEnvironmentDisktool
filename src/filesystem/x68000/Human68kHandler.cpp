@@ -78,30 +78,41 @@ bool Human68kHandler::parseBPB() {
     m_sectorsPerTrack = bootSector[0x18] | (bootSector[0x19] << 8);
     m_numberOfHeads = bootSector[0x1A] | (bootSector[0x1B] << 8);
 
-    // Validate BPB for X68000
-    // X68000 2HD uses 1024-byte sectors typically
-    if (m_bytesPerSector != 256 && m_bytesPerSector != 512 &&
-        m_bytesPerSector != 1024 && m_bytesPerSector != 2048) {
-        // Use default X68000 2HD values
-        m_bytesPerSector = 1024;
-        m_sectorsPerCluster = 1;
-        m_reservedSectors = 1;
-        m_numberOfFATs = 2;
-        m_rootEntryCount = 192;
-        m_sectorsPerFAT = 2;
-        m_sectorsPerTrack = 8;
-        m_numberOfHeads = 2;
-
-        // Calculate total sectors from disk geometry
-        auto geom = m_disk->getGeometry();
-        m_totalSectors = geom.tracks * geom.sectorsPerTrack;
+    if (m_totalSectors == 0 && bootSector.size() >= 0x24) {
+        uint32_t totalSectors32 = static_cast<uint32_t>(bootSector[0x20]) |
+                                  (static_cast<uint32_t>(bootSector[0x21]) << 8) |
+                                  (static_cast<uint32_t>(bootSector[0x22]) << 16) |
+                                  (static_cast<uint32_t>(bootSector[0x23]) << 24);
+        if (totalSectors32 > 0 && totalSectors32 <= 0xFFFFu) {
+            m_totalSectors = static_cast<uint16_t>(totalSectors32);
+        }
     }
 
-    // Calculate derived values
+    // Strict BPB validation: refuse mutation if BPB is invalid.
+    const bool bytesPerSectorValid = (m_bytesPerSector == 256 || m_bytesPerSector == 512 ||
+                                      m_bytesPerSector == 1024 || m_bytesPerSector == 2048);
+    const bool sectorsPerClusterValid = (m_sectorsPerCluster != 0) &&
+                                        ((m_sectorsPerCluster & (m_sectorsPerCluster - 1)) == 0);
+    const bool fatsValid = (m_numberOfFATs >= 1 && m_numberOfFATs <= 4);
+
+    if (!bytesPerSectorValid || !sectorsPerClusterValid || m_reservedSectors == 0 ||
+        !fatsValid || m_rootEntryCount == 0 || m_totalSectors == 0 ||
+        m_sectorsPerFAT == 0 || m_sectorsPerTrack == 0 || m_numberOfHeads == 0) {
+        return false;
+    }
+
     m_rootDirSectors = ((m_rootEntryCount * 32) + (m_bytesPerSector - 1)) / m_bytesPerSector;
     m_firstDataSector = m_reservedSectors + (m_numberOfFATs * m_sectorsPerFAT) + m_rootDirSectors;
+
+    if (m_firstDataSector >= m_totalSectors) {
+        return false;
+    }
+
     m_dataSectors = m_totalSectors - m_firstDataSector;
     m_totalClusters = m_dataSectors / m_sectorsPerCluster;
+    if (m_totalClusters == 0) {
+        return false;
+    }
 
     return true;
 }

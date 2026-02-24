@@ -16,6 +16,23 @@
 
 ---
 
+## Recent Update Summary (2026-02-24)
+
+| Category | Status | Notes |
+|----------|--------|-------|
+| **Bootdisk Mutation Guard** | ✅ Complete | `--bootdisk-mode strict|warn|off`, `--force-bootdisk`, safe-add verification |
+| **Boot-Critical File Delete Guard** | ✅ Complete | yes/no prompt by default, `--force-system-file` bypasses prompt |
+| **Invalid BPB Fail-Fast (MSX/Human68k)** | ✅ Complete | corrupt BPB/filesystem init failure blocks mutate ops |
+| **Verbose Detection Reason** | ✅ Complete | `info -v` reason includes `invalid_bpb_or_filesystem_init_failed` |
+| **Emulator Boot Smoke (disk add)** | ✅ Complete | DOS33/ProDOS/MSX-DOS2/Human68k `*_diskaddtest.sh` 4/4 pass |
+
+Operational policy now enforced:
+- Boot area must remain untouched while allowing file add when safe verification passes.
+- Existing non-target files must remain unchanged during safe add.
+- Diskadd smoke scripts use copied boot disks to preserve originals.
+
+---
+
 ## 1. Project Overview
 
 ### 1.1 Purpose
@@ -749,14 +766,14 @@ public:
 ## 10. References
 
 ### 10.1 AppleWin Source Code
-- `AppleWin/source/DiskDefs.h` - Core constants
-- `AppleWin/source/DiskImageHelper.h/cpp` - Format implementations
-- `AppleWin/source/Disk.h/cpp` - Drive emulation
+- `Emulator/AppleWin/source/DiskDefs.h` - Core constants
+- `Emulator/AppleWin/source/DiskImageHelper.h/cpp` - Format implementations
+- `Emulator/AppleWin/source/Disk.h/cpp` - Drive emulation
 
 ### 10.2 openMSX Source Code
-- `openMSX/src/fdc/Disk.hh/cc` - Disk abstraction
-- `openMSX/src/fdc/DMKDiskImage.hh/cc` - DMK format
-- `openMSX/src/fdc/XSAExtractor.hh/cc` - XSA decompression
+- `Emulator/openMSX/src/fdc/Disk.hh/cc` - Disk abstraction
+- `Emulator/openMSX/src/fdc/DMKDiskImage.hh/cc` - DMK format
+- `Emulator/openMSX/src/fdc/XSAExtractor.hh/cc` - XSA decompression
 
 ### 10.3 Format Specifications
 - [WOZ 2.0 Disk Image Reference](https://applesaucefdc.com/woz/reference2/)

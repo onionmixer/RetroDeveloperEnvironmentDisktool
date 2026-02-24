@@ -82,32 +82,43 @@ bool AppleDiskImage::isDOS33() const {
 }
 
 bool AppleDiskImage::isProDOS() const {
-    // ProDOS boot block at block 0 (track 0, sectors 0-1)
-    // Volume directory header at block 2 (track 0, sectors 4-5)
+    auto looksLikeProDOSBlock2 = [](const uint8_t* blk) -> bool {
+        uint8_t storageType = (blk[0x04] >> 4) & 0x0F;
+        uint8_t nameLen = blk[0x04] & 0x0F;
+        uint8_t entryLength = blk[0x23];
+        uint8_t entriesPerBlock = blk[0x24];
+        uint16_t bitmapPtr = static_cast<uint16_t>(blk[0x27] | (blk[0x28] << 8));
+        uint16_t totalBlocks = static_cast<uint16_t>(blk[0x29] | (blk[0x2A] << 8));
 
-    // Check for ProDOS signature
-    // Block 2, byte 0 should be 0x00 or storage type (0xF for volume header)
-    // Block 2, byte 4 should contain the volume name length (1-15)
+        return storageType == 0x0F &&
+               nameLen >= 1 && nameLen <= 15 &&
+               entryLength == 0x27 &&
+               entriesPerBlock > 0 &&
+               bitmapPtr > 0 && bitmapPtr < 280 &&
+               totalBlocks > 0 && totalBlocks <= 280;
+    };
 
-    // For .po files, block 2 is at offset 1024
-    // For .do files, we need to account for sector interleaving
-
-    size_t blockOffset = 2 * 512;  // Block 2
-
-    if (blockOffset + 0x28 >= m_data.size()) {
-        return false;
+    // First try direct contiguous block mapping (PO style).
+    size_t blockOffset = 2 * 512;
+    if (blockOffset + 512 <= m_data.size() &&
+        looksLikeProDOSBlock2(m_data.data() + blockOffset)) {
+        return true;
     }
 
-    // Check storage type and name length
-    uint8_t storageType = (m_data[blockOffset + 0x04] & 0xF0) >> 4;
-    uint8_t nameLength = m_data[blockOffset + 0x04] & 0x0F;
-
-    // Storage type 0xF indicates volume directory header
-    if (storageType == 0x0F && nameLength >= 1 && nameLength <= 15) {
-        // Additional check: entry length should be 0x27
-        uint8_t entryLength = m_data[blockOffset + 0x23];
-        if (entryLength == 0x27) {
-            return true;
+    // For DOS-order images (.do/.dsk), ProDOS block2 maps to DOS logical
+    // sectors 11 and 10 on track 0.
+    if (getSectorOrder() == SectorOrder::DOS) {
+        constexpr size_t s1 = 11;
+        constexpr size_t s2 = 10;
+        size_t off1 = s1 * 256;
+        size_t off2 = s2 * 256;
+        if (off1 + 256 <= m_data.size() && off2 + 256 <= m_data.size()) {
+            uint8_t blk2[512];
+            std::copy(m_data.begin() + off1, m_data.begin() + off1 + 256, blk2);
+            std::copy(m_data.begin() + off2, m_data.begin() + off2 + 256, blk2 + 256);
+            if (looksLikeProDOSBlock2(blk2)) {
+                return true;
+            }
         }
     }
 
@@ -156,10 +167,20 @@ SectorBuffer AppleDiskImage::readBlock(size_t block) {
     SectorBuffer result;
     result.reserve(512);
 
-    // The sector mapping differs between DO and PO formats
-    // This base implementation works for PO format
-    size_t sector1 = blockInTrack * 2;
-    size_t sector2 = blockInTrack * 2 + 1;
+    // ProDOS logical sectors in this track.
+    size_t logical1 = blockInTrack * 2;
+    size_t logical2 = blockInTrack * 2 + 1;
+    size_t sector1 = logical1;
+    size_t sector2 = logical2;
+
+    if (getSectorOrder() == SectorOrder::DOS) {
+        // DO images store DOS logical sectors. Convert ProDOS logical -> physical
+        // then physical -> DOS logical.
+        size_t phys1 = AppleInterleave::PRODOS_INTERLEAVE[logical1];
+        size_t phys2 = AppleInterleave::PRODOS_INTERLEAVE[logical2];
+        sector1 = AppleInterleave::DOS33_DEINTERLEAVE[phys1];
+        sector2 = AppleInterleave::DOS33_DEINTERLEAVE[phys2];
+    }
 
     auto s1 = readSector(track, 0, sector1);
     auto s2 = readSector(track, 0, sector2);
@@ -182,8 +203,17 @@ void AppleDiskImage::writeBlock(size_t block, const SectorBuffer& data) {
 
     size_t track = block / 8;
     size_t blockInTrack = block % 8;
-    size_t sector1 = blockInTrack * 2;
-    size_t sector2 = blockInTrack * 2 + 1;
+    size_t logical1 = blockInTrack * 2;
+    size_t logical2 = blockInTrack * 2 + 1;
+    size_t sector1 = logical1;
+    size_t sector2 = logical2;
+
+    if (getSectorOrder() == SectorOrder::DOS) {
+        size_t phys1 = AppleInterleave::PRODOS_INTERLEAVE[logical1];
+        size_t phys2 = AppleInterleave::PRODOS_INTERLEAVE[logical2];
+        sector1 = AppleInterleave::DOS33_DEINTERLEAVE[phys1];
+        sector2 = AppleInterleave::DOS33_DEINTERLEAVE[phys2];
+    }
 
     SectorBuffer s1(data.begin(), data.begin() + 256);
     SectorBuffer s2(data.begin() + 256, data.begin() + 512);

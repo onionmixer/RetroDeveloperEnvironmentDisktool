@@ -34,6 +34,7 @@ set(CORE_SOURCES
     src/core/DiskImageFactory.cpp
     src/core/FormatDetector.cpp
     src/core/CRC.cpp
+    src/core/BootDiskPolicy.cpp
 )
 
 # Apple II format sources

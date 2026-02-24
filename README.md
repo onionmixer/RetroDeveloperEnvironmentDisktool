@@ -114,6 +114,11 @@ rdedisktool [options] <command> [arguments]
 |--------|-------------|
 | `-v, --verbose` | Enable verbose output |
 | `-q, --quiet` | Suppress non-essential output |
+| `--bootdisk-mode <strict|warn|off>` | Boot disk mutation protection mode (default: `strict`, safe add verification enabled) |
+| `--force-bootdisk` | Override boot disk mutation block intentionally |
+| `--force-system-file` | Force delete of boot-critical system files without prompt |
+| `--bootdisk-profile <dos33|prodos|msxdos|human68k|unknown>` | Force bootdisk profile for detection |
+| `--keep-backup` | Keep `.bak` file when saving modified image |
 | `-h, --help` | Show help message |
 | `-V, --version` | Show version information |
 
@@ -130,9 +135,29 @@ Examples:
 # Basic disk information
 rdedisktool info game.dsk
 
-# Verbose mode - includes FAT/cluster details for MSX-DOS
+# Verbose mode - includes bootdisk detection and FAT/cluster details for MSX-DOS
 rdedisktool info game.dsk -v
 ```
+
+Bootdisk safety examples:
+```bash
+# Default strict mode: safe add verification runs automatically
+rdedisktool add diskwork/bootdisk/msx/msxdos23.dsk ./PATCH.BIN PATCH.BIN
+
+# Intentional override
+rdedisktool --force-bootdisk add diskwork/bootdisk/msx/msxdos23.dsk ./PATCH.BIN PATCH.BIN
+```
+
+`strict` mode behavior on bootdisks:
+- `delete/mkdir/rmdir` are blocked by default.
+- `add` is allowed only when safe-add verification passes:
+  - protected boot sectors unchanged
+  - existing files unchanged (recursive, including subdirectories)
+
+In verbose mode, `info -v` includes:
+- `BootDisk` / `Profile` / `Confidence`
+- `ProtectionMode`
+- `Reason` (for example `invalid_bpb_or_filesystem_init_failed`)
 
 Verbose output for MSX-DOS disks includes:
 ```
@@ -268,6 +293,10 @@ rdedisktool delete mydisk.dsk OLDFILE.TXT
 # Delete file from subdirectory
 rdedisktool delete mydisk.dsk GAMES/OLD.COM
 ```
+
+Bootdisk safety on delete:
+- If the target is a boot-critical system file, `rdedisktool` asks `yes/no` before deletion.
+- `--force-system-file` skips the prompt and deletes immediately (no extra confirmation step).
 
 #### mkdir - Create directory (ProDOS, MSX-DOS, Human68k)
 ```bash
@@ -429,6 +458,22 @@ rdedisktool dump disk.dsk --track 0 --sector 0 --side 1
 # Dump with explicit format
 rdedisktool dump disk.dsk -t 0 -s 0 -f msxdsk
 ```
+
+## Bootdisk Disk-Add Smoke Tests
+
+Project-root scripts for bootdisk copy -> file add -> emulator boot:
+
+```bash
+./run_applewin_dos33_diskaddtest.sh
+./run_applewin_prodos_diskaddtest.sh
+./run_openmsx_msxdos2_diskaddtest.sh
+./run_px68k_humanos_diskaddtest.sh
+```
+
+Notes:
+- Each script uses a single emulated drive for bootdisk file-control verification.
+- DOS 3.3 diskaddtest includes a pre-step that removes non-essential files from the copied bootdisk before add tests.
+- Current status: all four scripts pass boot smoke (`4/4`).
 
 ## Examples
 

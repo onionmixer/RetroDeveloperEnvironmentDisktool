@@ -2,11 +2,15 @@
 #define RDEDISKTOOL_CLI_H
 
 #include "rdedisktool/Types.h"
+#include "rdedisktool/BootDiskPolicy.h"
 #include <string>
 #include <vector>
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
+#include <cstdint>
+#include <unordered_map>
 
 namespace rde {
 
@@ -105,6 +109,18 @@ public:
     bool isQuiet() const { return m_quiet; }
 
 private:
+public:
+    struct FileDigest {
+        size_t size = 0;
+        uint64_t hash = 0;
+    };
+
+    struct SafeAddSnapshot {
+        std::unordered_map<std::string, FileDigest> existingFiles;
+        std::unordered_map<uint32_t, std::vector<uint8_t>> protectedSectors;
+    };
+
+private:
     // Command information structure
     struct CommandInfo {
         CommandHandler handler;
@@ -118,6 +134,12 @@ private:
     // Global options
     bool m_verbose = false;
     bool m_quiet = false;
+    BootDiskMode m_bootDiskMode = BootDiskMode::Strict;
+    bool m_forceBootDisk = false;
+    bool m_forceSystemFile = false;
+    bool m_keepBackup = false;
+    std::optional<BootDiskProfile> m_forcedBootProfile;
+    std::string m_globalOptionError;
 
     // Built-in command handlers
     int cmdInfo(const std::vector<std::string>& args);
@@ -147,6 +169,15 @@ private:
     LoadedDisk loadDiskImage(const std::string& imagePath);
     LoadedDisk loadDiskImageOnly(const std::string& imagePath);
     bool saveDiskImage(DiskImage* image, const std::string& operation);
+    bool captureSafeAddSnapshot(const LoadedDisk& disk,
+                                BootDiskProfile profile,
+                                SafeAddSnapshot& snapshot,
+                                std::string& error) const;
+    bool verifySafeAddSnapshot(const LoadedDisk& disk,
+                               BootDiskProfile profile,
+                               const SafeAddSnapshot& snapshot,
+                               const std::string& addedTarget,
+                               std::string& error) const;
 };
 
 } // namespace rde

@@ -8,6 +8,50 @@
 
 namespace rdedisktool {
 
+namespace {
+
+bool looksLikeProDOSBlock2(const uint8_t* blk) {
+    // Volume header at block2 offset 4:
+    // high nibble storage type 0xF, low nibble name length 1..15.
+    uint8_t storageType = (blk[4] >> 4) & 0x0F;
+    uint8_t nameLen = blk[4] & 0x0F;
+    uint8_t entryLength = blk[0x23];
+    uint8_t entriesPerBlock = blk[0x24];
+    uint16_t bitmapPtr = static_cast<uint16_t>(blk[0x27] | (blk[0x28] << 8));
+    uint16_t totalBlocks = static_cast<uint16_t>(blk[0x29] | (blk[0x2A] << 8));
+
+    if (storageType != 0x0F) return false;
+    if (nameLen == 0 || nameLen > 15) return false;
+    if (entryLength != 0x27) return false;
+    if (entriesPerBlock == 0) return false;
+    if (bitmapPtr == 0 || bitmapPtr >= 280) return false;
+    if (totalBlocks == 0 || totalBlocks > 280) return false;
+    return true;
+}
+
+bool hasProDOSHeaderPO(const std::vector<uint8_t>& data) {
+    size_t blockOffset = 2 * 512;
+    return data.size() >= blockOffset + 512 &&
+           looksLikeProDOSBlock2(data.data() + blockOffset);
+}
+
+bool hasProDOSHeaderDO(const std::vector<uint8_t>& data) {
+    // For DOS-order images, ProDOS block2 is composed from DOS logical sectors 11 and 10.
+    constexpr size_t s1 = 11;
+    constexpr size_t s2 = 10;
+    size_t off1 = s1 * 256;
+    size_t off2 = s2 * 256;
+    if (data.size() < off1 + 256 || data.size() < off2 + 256) {
+        return false;
+    }
+    uint8_t blk2[512];
+    std::copy(data.begin() + off1, data.begin() + off1 + 256, blk2);
+    std::copy(data.begin() + off2, data.begin() + off2 + 256, blk2 + 256);
+    return looksLikeProDOSBlock2(blk2);
+}
+
+} // namespace
+
 //=============================================================================
 // Main Detection Entry Points
 //=============================================================================
@@ -247,9 +291,12 @@ rde::DiskFormat FormatDetector::detectAppleFormat(const std::vector<uint8_t>& da
         return rde::DiskFormat::ApplePO;
     }
 
-    // For .dsk, check for ProDOS signature
-    if (isValidProDOSHeader(data, data.size())) {
+    // For .dsk, determine actual sector order from header location.
+    if (hasProDOSHeaderPO(data)) {
         return rde::DiskFormat::ApplePO;
+    }
+    if (hasProDOSHeaderDO(data)) {
+        return rde::DiskFormat::AppleDO;
     }
 
     // Default to DOS order
@@ -285,9 +332,12 @@ rde::DiskFormat FormatDetector::detectDSKByContent(const std::vector<uint8_t>& d
         return rde::DiskFormat::AppleDO;
     }
 
-    // Check for ProDOS
-    if (isValidProDOSHeader(data, data.size())) {
+    // Check for ProDOS headers in both possible sector orders.
+    if (hasProDOSHeaderPO(data)) {
         return rde::DiskFormat::ApplePO;
+    }
+    if (hasProDOSHeaderDO(data)) {
+        return rde::DiskFormat::AppleDO;
     }
 
     // Default: if size matches Apple II, assume Apple format
@@ -351,16 +401,7 @@ bool FormatDetector::isValidProDOSHeader(const std::vector<uint8_t>& data, size_
     if (fileSize < APPLE_140K) {
         return false;
     }
-
-    // Volume directory at block 2 (offset 1024)
-    size_t blockOffset = 2 * 512;
-    if (data.size() <= blockOffset + 4) {
-        return false;
-    }
-
-    // Check for volume header storage type (0xF in high nibble)
-    uint8_t storageType = (data[blockOffset + 4] >> 4) & 0x0F;
-    return storageType == 0x0F;
+    return hasProDOSHeaderPO(data) || hasProDOSHeaderDO(data);
 }
 
 bool FormatDetector::isMSXDiskSize(size_t size) {

@@ -131,7 +131,7 @@ cmake --build . --verbose
 Expected output:
 ```
 Retro Developer Environment Disk Tool v1.0.0
-Supported platforms: Apple II, MSX
+Supported platforms: Apple II, MSX, X68000
 ```
 
 ### Building on Windows
@@ -190,12 +190,37 @@ make
 |--------------|---------|-------------|
 | `CMAKE_BUILD_TYPE` | Debug | Build type: Debug, Release, RelWithDebInfo |
 | `CMAKE_INSTALL_PREFIX` | /usr/local | Installation directory |
-| `BUILD_TESTING` | ON | Build unit tests |
+| `BUILD_TESTS` | ON | Build test suite |
 
 Example:
 ```bash
-cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF ..
+cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF ..
 ```
+
+## Post-Build Verification
+
+After building, run core regressions:
+
+```bash
+cd /path/to/RetroDeveloperEnvironmentDisktool
+
+# Bootdisk protection regression
+tests/test_bootdisk_guard_all.sh
+
+# System-file delete prompt regression
+tests/test_system_file_delete_prompt.sh
+```
+
+Bootdisk add-and-boot smoke scripts (project root):
+
+```bash
+./run_applewin_dos33_diskaddtest.sh
+./run_applewin_prodos_diskaddtest.sh
+./run_openmsx_msxdos2_diskaddtest.sh
+./run_px68k_humanos_diskaddtest.sh
+```
+
+These scripts copy boot disks, add files via `rdedisktool`, and boot each emulator with a single drive to verify boot safety.
 
 ## Installation
 

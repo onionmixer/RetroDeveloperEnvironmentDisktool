@@ -181,3 +181,55 @@ README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이
 ---
 
 각 시나리오는 Apple II(DOS/ProDOS), MSX(DSK/DMK/XSA), X68000(XDF/DIM/Human68k)의 수정 가능·불가능 흐름 전체를 아우르며, 특히 XSA(read-only) 시나리오에서는 쓰기 작업이 실패하는지도 함께 검증한다. 필요 시 각 시나리오 종료 후 생성한 임시 파일을 삭제하여 깨끗한 상태를 유지한다. 모든 작업은 결과 상태를 재차 검증해 실제 사용 환경에서도 안전하게 도구를 활용할 수 있음을 입증해야 한다.
+
+---
+
+## 시나리오 11. Bootdisk 보호 자동 회귀 테스트
+- **목적**: bootdisk 보호 정책(`strict` + `--force-bootdisk`)이 Apple II/MSX/X68000에서 공통적으로 동작하는지 자동 검증한다.
+- **커버리지**: `info -v`의 bootdisk 인식, `strict` safe-add 검증, 기존 시스템 파일 보존, `--force-bootdisk` 우회 가능 여부(정책 차단 해제 확인).
+- **준비**:
+  - `RetroDeveloperEnvironmentDisktool/build_local/rdedisktool` 또는 `build/rdedisktool` 빌드 완료
+  - `diskwork/bootdisk/*` 원본 이미지 존재
+
+| 단계 | 절차 | 기대 결과 |
+|------|------|------------|
+|1|`cd RetroDeveloperEnvironmentDisktool`|테스트 루트 진입.|
+|2|`tests/test_bootdisk_guard_apple.sh`|Apple II bootdisk에서 strict safe-add 동작과 시스템 파일(`INTBASIC`, `PRODOS`) 보존을 검증한다.|
+|3|`tests/test_bootdisk_guard_msx.sh`|MSX bootdisk에서 strict safe-add 동작과 시스템 파일(`COMMAND2.COM`) 보존을 검증한다.|
+|4|`tests/test_bootdisk_guard_x68000.sh`|X68000 bootdisk에서 strict safe-add 동작과 시스템 파일(`COMMAND.X`) 보존을 검증한다.|
+|5|`tests/test_invalid_bpb_guard.sh`|MSX/X68000 BPB 손상 이미지에서 `info -v` reason(`invalid_bpb_or_filesystem_init_failed`)과 mutate 차단 에러를 검증한다.|
+|6|`tests/test_system_file_delete_prompt.sh`|플랫폼별 최소 부팅 파일 삭제 시 yes/no 프롬프트(기본 No 취소)와 `--force-system-file` 강제 삭제(추가 확인 없음)를 검증한다.|
+|7|`tests/test_bootdisk_guard_all.sh`|전체 테스트 연속 실행 후 `[PASS] all bootdisk guard tests` 출력.|
+
+- **참고**:
+  - force override 단계는 \"정책 차단이 해제되는지\"가 핵심이다.
+  - 디스크 실제 여유공간 부족 등 파일시스템 레벨 실패는 별도 이슈로 분리해 해석한다.
+
+---
+
+## 시나리오 12. 실환경 에뮬레이터 부트 스모크 로그 수집 (4개 환경)
+- **목적**: safe-add 적용 이미지가 실제 에뮬레이터에서 정상 부팅되는지 확인하고 실행 로그를 남긴다.
+- **커버리지**: Apple II DOS 3.3, Apple II ProDOS, MSX-DOS2, X68000 Human68k 부팅 확인.
+- **준비**:
+  - 루트 프로젝트 경로에서 실행
+  - 에뮬레이터 바이너리 및 ROM/BIOS 준비 완료
+  - bootdisk 복제본 준비 (`/tmp/rdedisktool_guard`)
+
+| 단계 | 절차 | 기대 결과 |
+|------|------|------------|
+|1|`mkdir -p /tmp/rdedisktool_guard && cp diskwork/bootdisk/AppleII/dos33.dsk /tmp/rdedisktool_guard/ && cp diskwork/bootdisk/AppleII/prodos242.dsk /tmp/rdedisktool_guard/ && cp diskwork/bootdisk/msx/msxdos23.dsk /tmp/rdedisktool_guard/ && cp diskwork/bootdisk/x68000/HUMAN302.XDF /tmp/rdedisktool_guard/`|원본 보존 상태에서 테스트용 복제본 준비.|
+|2|`cd RetroDeveloperEnvironmentDisktool && ./build_local/rdedisktool --bootdisk-mode strict add /tmp/rdedisktool_guard/msxdos23.dsk ./tests/fixtures/README.TXT README.TXT`|safe-add 검증 메시지와 함께 추가 성공(또는 명확한 실패 사유) 확인.|
+|3|`BOOT_DISK=/tmp/rdedisktool_guard/dos33.dsk ./run_applewin_dos33.sh`|Apple DOS 3.3 부팅 화면/프롬프트 확인, 로그 기록.|
+|4|`BOOT_DISK=/tmp/rdedisktool_guard/prodos242.dsk ./run_applewin_prodos.sh`|Apple ProDOS 부팅 화면/프롬프트 확인, 로그 기록.|
+|5|`BOOT_DISK=/tmp/rdedisktool_guard/msxdos23.dsk ./run_openmsx_msxdos2.sh`|MSX-DOS2 부팅 및 명령 프롬프트 확인, 로그 기록.|
+|6|`BOOT_DISK=/tmp/rdedisktool_guard/HUMAN302.XDF ./run_px68k_humanos.sh`|Human68k 부팅 및 명령 프롬프트 확인, 로그 기록.|
+|7|각 실행 로그/스크린샷을 결과 문서에 수집|4개 환경 모두 부트 성공 여부와 관찰 결과를 남긴다.|
+
+- **최근 실행 상태 (2026-02-24)**:
+  - `run_applewin_dos33_diskaddtest.sh`: 성공
+  - `run_applewin_prodos_diskaddtest.sh`: 성공
+  - `run_openmsx_msxdos2_diskaddtest.sh`: 성공
+  - `run_px68k_humanos_diskaddtest.sh`: 성공
+  - `run_applewin_dos33_diskaddtest.sh`는 복사 bootdisk에서 비필수 파일 삭제 후 add/boot 검증
+  - 각 `*_diskaddtest.sh`는 단일 드라이브로만 부팅 검증
+  - 종합: diskaddtest 기반 부트 검증 4/4 통과
