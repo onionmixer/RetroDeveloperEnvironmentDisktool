@@ -319,7 +319,7 @@ void CLI::initCommands() {
         "add [options] <image_file> <host_file> [target_name]\n"
         "    Options:\n"
         "      -f, --force         Overwrite existing file\n"
-        "      -t, --type <type>   File type for DOS 3.3 (T/I/A/B/S/R)\n"
+        "      -t, --type <type>   File type (T/I/A/B/S/R, SYS/BIN/TXT/BAS/CMD/INT/REL, or 0xFF/$FF)\n"
         "      -a, --addr <addr>   Load address for binary files (hex: 0x0803 or $0803)");
 
     registerCommand("delete",
@@ -556,11 +556,23 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "\nNote: Created disks are not bootable (no boot code included).\n";
     } else if (command == "add") {
         std::cout << "\nOptions:\n";
-        std::cout << "  -f, --force        Overwrite existing file without prompting\n";
+        std::cout << "  -f, --force         Overwrite existing file without prompting\n";
+        std::cout << "  -t, --type <type>   File type for Apple II disks:\n";
+        std::cout << "                        DOS 3.3 codes: T/I/A/B/S/R\n";
+        std::cout << "                        ProDOS names:  SYS/BIN/TXT/BAS/CMD/INT/REL\n";
+        std::cout << "                        Hex values:    0xFF or $FF\n";
+        std::cout << "  -a, --addr <addr>   Load address for binary files (hex: 0x0803 or $0803)\n";
+        std::cout << "\nFile Type Reference:\n";
+        std::cout << "  DOS 3.3:  T=Text  I=IntBASIC  A=Applesoft  B=Binary  S=S-type  R=Reloc\n";
+        std::cout << "  ProDOS:   TXT=0x04  INT=0xFA  BAS=0xFC  BIN=0x06  SYS=0xFF  CMD=0xF0  REL=0xFE\n";
+        std::cout << "  DOS 3.3 codes are auto-converted to ProDOS equivalents on ProDOS disks.\n";
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool add disk.po myfile.txt\n";
         std::cout << "  rdedisktool add disk.po myfile.txt TARGETNAME.TXT\n";
         std::cout << "  rdedisktool add --force disk.po myfile.txt\n";
+        std::cout << "  rdedisktool add disk.do ./HELLO HELLO --type B --addr 0x0803\n";
+        std::cout << "  rdedisktool add disk.po ./HELLO HELLO --type BIN --addr 0x0803\n";
+        std::cout << "  rdedisktool add disk.po ./SYSTEM SYSTEM --type SYS --addr 0x2000\n";
     } else if (command == "delete") {
         std::cout << "\nNotes:\n";
         std::cout << "  Deleting boot-critical system files asks for [y/N] confirmation.\n";
@@ -1124,22 +1136,57 @@ int CLI::cmdExtract(const std::vector<std::string>& args) {
     }
 }
 
-// Helper function to parse DOS 3.3 file type from string
+// Helper function to parse file type from string.
+// Accepts DOS 3.3 single-character codes (T, I, A, B, S, R),
+// ProDOS type names (SYS, CMD, BIN, TXT, BAS, INT, REL),
+// or hex values (0xFF, $FF).
 static uint8_t parseFileTypeString(const std::string& typeStr) {
     if (typeStr.empty()) return 0;
 
-    char c = std::toupper(static_cast<unsigned char>(typeStr[0]));
-    switch (c) {
-        case 'T': return AppleConstants::DOS33::FILETYPE_TEXT;
-        case 'I': return AppleConstants::DOS33::FILETYPE_INTEGER;
-        case 'A': return AppleConstants::DOS33::FILETYPE_APPLESOFT;
-        case 'B': return AppleConstants::DOS33::FILETYPE_BINARY;
-        case 'S': return AppleConstants::DOS33::FILETYPE_STYPE;
-        case 'R': return AppleConstants::DOS33::FILETYPE_RELOCATABLE;
-        default:
-            throw std::invalid_argument("Invalid file type: " + typeStr +
-                " (use T, I, A, B, S, or R)");
+    // Try ProDOS type names first (multi-character)
+    if (typeStr.size() >= 2) {
+        std::string upper;
+        upper.reserve(typeStr.size());
+        for (char c : typeStr)
+            upper += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+
+        if (upper == "SYS") return AppleConstants::ProDOS::FILETYPE_SYS;   // 0xFF
+        if (upper == "CMD") return AppleConstants::ProDOS::FILETYPE_CMD;   // 0xF0
+        if (upper == "BIN") return AppleConstants::ProDOS::FILETYPE_BIN;   // 0x06
+        if (upper == "TXT") return AppleConstants::ProDOS::FILETYPE_TXT;   // 0x04
+        if (upper == "BAS") return AppleConstants::ProDOS::FILETYPE_BAS;   // 0xFC
+        if (upper == "INT") return AppleConstants::ProDOS::FILETYPE_INT;   // 0xFA
+        if (upper == "REL") return AppleConstants::ProDOS::FILETYPE_REL;   // 0xFE
+
+        // Try hex value (0xFF or $FF)
+        if ((upper.size() > 2 && upper.substr(0, 2) == "0X") || upper[0] == '$') {
+            std::string numStr = (upper[0] == '$') ? upper.substr(1) : upper.substr(2);
+            try {
+                size_t pos = 0;
+                unsigned long val = std::stoul(numStr, &pos, 16);
+                if (pos == numStr.size() && val <= 0xFF) {
+                    return static_cast<uint8_t>(val);
+                }
+            } catch (...) {}
+        }
     }
+
+    // Fall back to DOS 3.3 single-character codes
+    if (typeStr.size() == 1) {
+        char c = std::toupper(static_cast<unsigned char>(typeStr[0]));
+        switch (c) {
+            case 'T': return AppleConstants::DOS33::FILETYPE_TEXT;
+            case 'I': return AppleConstants::DOS33::FILETYPE_INTEGER;
+            case 'A': return AppleConstants::DOS33::FILETYPE_APPLESOFT;
+            case 'B': return AppleConstants::DOS33::FILETYPE_BINARY;
+            case 'S': return AppleConstants::DOS33::FILETYPE_STYPE;
+            case 'R': return AppleConstants::DOS33::FILETYPE_RELOCATABLE;
+            default: break;
+        }
+    }
+
+    throw std::invalid_argument("Invalid file type: " + typeStr +
+        " (use T/I/A/B/S/R, SYS/BIN/TXT/BAS/CMD/INT/REL, or hex 0xFF/$FF)");
 }
 
 // Helper function to parse address string (supports 0x, $, or decimal)

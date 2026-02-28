@@ -234,8 +234,13 @@ rdedisktool add [options] <image_file> <host_file> [target_name]
 | Option | Description |
 |--------|-------------|
 | `-f, --force` | Overwrite existing file without prompting |
-| `-t, --type <type>` | File type for Apple II disks (see table below) |
+| `-t, --type <type>` | File type for Apple II disks (see tables below) |
 | `-a, --addr <addr>` | Load address for binary files (hex: 0x0803 or $0803) |
+
+The `--type` option accepts three formats:
+- **DOS 3.3 single-character codes**: `T`, `I`, `A`, `B`, `S`, `R`
+- **ProDOS type names**: `SYS`, `BIN`, `TXT`, `BAS`, `CMD`, `INT`, `REL`
+- **Hex values**: `0xFF` or `$FF` (any ProDOS file type code)
 
 **DOS 3.3 File Types:**
 | Type | Code | Description |
@@ -246,6 +251,17 @@ rdedisktool add [options] <image_file> <host_file> [target_name]
 | B | 0x04 | Binary file (machine code) |
 | S | 0x08 | S-type file |
 | R | 0x10 | Relocatable object code |
+
+**ProDOS File Types (can be used directly with `--type`):**
+| Name | Code | Description |
+|------|------|-------------|
+| TXT | 0x04 | Text file |
+| BIN | 0x06 | Binary file (machine code) |
+| INT | 0xFA | Integer BASIC program |
+| BAS | 0xFC | Applesoft BASIC program |
+| REL | 0xFE | Relocatable object code |
+| SYS | 0xFF | ProDOS system file (loaded at $2000 by ProDOS) |
+| CMD | 0xF0 | ProDOS command file |
 
 > **Note**: When adding files to **ProDOS** disks, DOS 3.3 file type codes are automatically converted to their ProDOS equivalents:
 > | DOS 3.3 | ProDOS | ProDOS Code |
@@ -278,6 +294,15 @@ rdedisktool add disk.do ./PICTURE.BIN MYPIC -t B -a $4000
 
 # Add Applesoft BASIC program
 rdedisktool add disk.do ./HELLO.BAS HELLO --type A
+
+# Add ProDOS binary using type name directly
+rdedisktool add disk.po ./HELLO HELLO --type BIN --addr 0x0803
+
+# Add ProDOS system file
+rdedisktool add disk.po ./MYSYS MYSYS --type SYS --addr 0x2000
+
+# Add file using hex type code
+rdedisktool add disk.po ./DATA DATA --type 0x04
 ```
 
 #### delete - Delete file from disk image
@@ -614,6 +639,28 @@ rdedisktool add disk.do ./HELLO.BAS HELLO --type A
 
 # Add text file
 rdedisktool add disk.do ./README.TXT README --type T
+```
+
+#### Adding ProDOS Files with Type Names
+
+ProDOS disks accept type names directly via `--type`, in addition to the DOS 3.3 single-character codes and hex values:
+
+```bash
+# Add ProDOS binary with type name
+rdedisktool add disk.po ./HELLO HELLO --type BIN --addr 0x0803
+
+# Add ProDOS system file (loaded at $2000 by ProDOS kernel)
+rdedisktool add disk.po ./MYSYS MYSYS --type SYS --addr 0x2000
+
+# Add text file using ProDOS type name
+rdedisktool add disk.po ./README.TXT README --type TXT
+
+# Using hex type code for any ProDOS file type
+rdedisktool add disk.po ./DATA DATA --type 0x06 --addr 0x4000
+rdedisktool add disk.po ./DATA DATA --type $06 --addr $4000
+
+# DOS 3.3 codes also work on ProDOS disks (auto-converted)
+rdedisktool add disk.po ./HELLO HELLO --type B --addr 0x0803
 ```
 
 **Common Load Addresses:**
