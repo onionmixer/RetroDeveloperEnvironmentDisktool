@@ -924,9 +924,8 @@ bool MSXDOSHandler::format(const std::string& volumeName) {
     writer.writeU16LE(0x18, m_sectorsPerTrack);
     writer.writeU16LE(0x1A, m_numberOfHeads);
 
-    // Boot signature
-    writer.writeU8(0x1FE, 0x55);
-    writer.writeU8(0x1FF, 0xAA);
+    // No boot signature — MSX-DOS disks do not use the PC-style 0x55AA
+    // marker at offset 0x1FE. Real MSX-DOS disks leave this as 0x0000.
 
     m_disk->writeSector(0, 0, 0, bootSector);
 
