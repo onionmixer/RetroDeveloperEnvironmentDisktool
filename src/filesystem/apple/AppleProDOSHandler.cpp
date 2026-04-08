@@ -1210,9 +1210,13 @@ bool AppleProDOSHandler::deleteFile(const std::string& filename) {
     // Free file blocks
     freeFileBlocks(entry);
 
-    // Mark directory entry as deleted
-    DirectoryEntry deletedEntry = entry;
+    // Mark directory entry as deleted — zero the entire entry
+    // ProDOS expects the first byte (storageType|nameLength) to be 0x00 for deleted entries.
+    // Keeping nameLength non-zero can confuse ProDOS 2.4.3's startup file search.
+    DirectoryEntry deletedEntry;
+    std::memset(&deletedEntry, 0, sizeof(deletedEntry));
     deletedEntry.storageType = STORAGE_DELETED;
+    deletedEntry.nameLength = 0;
 
     if (!writeDirectoryEntry(dirBlock, entryIndex, deletedEntry)) {
         return false;
