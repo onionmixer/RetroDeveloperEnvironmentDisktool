@@ -337,6 +337,11 @@ void CLI::initCommands() {
         "Remove empty directory from disk image",
         "rmdir <image_file> <directory> [-f <format>]");
 
+    registerCommand("rename",
+        [this](const std::vector<std::string>& args) { return cmdRename(args); },
+        "Rename file or directory in disk image",
+        "rename <image_file> <old_name> <new_name>");
+
     registerCommand("create",
         [this](const std::vector<std::string>& args) { return cmdCreate(args); },
         "Create new disk image",
@@ -633,6 +638,14 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool delete mydisk.dsk OLDFILE.TXT\n";
         std::cout << "  rdedisktool delete mydisk.dsk GAMES/OLD.COM\n";
+    } else if (command == "rename") {
+        std::cout << "\nRenames a file or directory within the same directory.\n";
+        std::cout << "Cross-directory move is not supported.\n";
+        std::cout << "\nExamples:\n";
+        std::cout << "  rdedisktool rename disk.po OLD.TXT NEW.TXT\n";
+        std::cout << "  rdedisktool rename disk.po DIR1/FILE.BIN DIR1/NEWFILE.BIN\n";
+        std::cout << "  rdedisktool rename disk.dsk MYDIR NEWDIR\n";
+        std::cout << "  rdedisktool rename disk.xdf SUBDIR/OLD.SYS SUBDIR/NEW.SYS\n";
     } else if (command == "validate") {
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool validate mydisk.dsk\n";
@@ -1454,6 +1467,53 @@ int CLI::cmdDelete(const std::vector<std::string>& args) {
 
         if (!m_quiet) {
             std::cout << "Deleted: " << filename << "\n";
+        }
+
+        return 0;
+    } catch (const DiskException& e) {
+        printError(e.what());
+        return 1;
+    }
+}
+
+int CLI::cmdRename(const std::vector<std::string>& args) {
+    if (args.size() < 3) {
+        printError("Missing arguments");
+        printCommandHelp("rename");
+        return 1;
+    }
+
+    const std::string& imagePath = args[0];
+    const std::string& oldName = args[1];
+    const std::string& newName = args[2];
+
+    try {
+        auto disk = loadDiskImage(imagePath);
+        if (!disk) {
+            return 1;
+        }
+
+        auto det = BootDiskPolicy::detect(imagePath, *disk.image, disk.handler.get(), m_forcedBootProfile);
+        auto policy = BootDiskPolicy::canMutate(det, m_bootDiskMode, MutationOp::Rename, oldName, m_forceBootDisk);
+        if (!policy.allowed) {
+            printError(policy.reason);
+            if (policy.needsForce) {
+                printError("Hint: use --force-bootdisk to override intentionally.");
+            }
+            return 1;
+        }
+
+        if (!disk.handler->renameFile(oldName, newName)) {
+            printError("Failed to rename: " + oldName + " -> " + newName);
+            return 1;
+        }
+
+        if (!saveDiskImage(disk.image.get(), "rename")) {
+            return 1;
+        }
+
+        if (!m_quiet) {
+            std::cout << "Renamed: " << oldName << " -> " << newName << "\n";
         }
 
         return 0;

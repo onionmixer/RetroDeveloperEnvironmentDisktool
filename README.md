@@ -361,6 +361,26 @@ rdedisktool rmdir mydisk.dsk GAMES
 
 > **Note**: Directories must be empty before they can be removed.
 
+#### rename - Rename file or directory
+
+```bash
+rdedisktool rename <image_file> <old_name> <new_name>
+```
+
+Examples:
+```bash
+# Rename a file
+rdedisktool rename disk.po OLD.TXT NEW.TXT
+
+# Rename a file in a subdirectory
+rdedisktool rename disk.po DIR1/FILE.BIN DIR1/NEWFILE.BIN
+
+# Rename a directory
+rdedisktool rename disk.dsk MYDIR NEWDIR
+```
+
+> **Note**: Renames within the same directory only. Cross-directory move is not supported. ProDOS directory renames also update the subdirectory header to keep names consistent.
+
 #### create - Create new disk image
 ```bash
 rdedisktool create <file> -f <format> [--fs <filesystem>] [-n <volume>] [-g <geometry>] [--force]

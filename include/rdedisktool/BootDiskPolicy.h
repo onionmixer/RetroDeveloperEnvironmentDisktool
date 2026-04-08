@@ -20,7 +20,8 @@ enum class MutationOp {
     Add,
     Delete,
     Mkdir,
-    Rmdir
+    Rmdir,
+    Rename
 };
 
 enum class BootDiskProfile {

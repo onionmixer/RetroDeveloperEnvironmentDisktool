@@ -152,6 +152,7 @@ private:
     int cmdCreate(const std::vector<std::string>& args);
     int cmdConvert(const std::vector<std::string>& args);
     int cmdDump(const std::vector<std::string>& args);
+    int cmdRename(const std::vector<std::string>& args);
     int cmdValidate(const std::vector<std::string>& args);
 
     // Initialize built-in commands

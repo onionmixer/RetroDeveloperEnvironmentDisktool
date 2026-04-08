@@ -642,21 +642,82 @@ bool Human68kHandler::deleteFile(const std::string& filename) {
 }
 
 bool Human68kHandler::renameFile(const std::string& oldName, const std::string& newName) {
-    auto entries = readRootDirectory();
-    int idx = findDirectoryEntry(entries, oldName);
+    // Find last path separator (handles mixed / and \ separators)
+    auto findLastSeparator = [](const std::string& path) -> size_t {
+        size_t fwd = path.rfind('/');
+        size_t back = path.rfind('\\');
+        if (fwd == std::string::npos) return back;
+        if (back == std::string::npos) return fwd;
+        return std::max(fwd, back);
+    };
 
-    if (idx < 0) {
-        return false;  // File not found
+    // Split oldName into parent directory and baseName
+    size_t oldLastSlash = findLastSeparator(oldName);
+
+    uint16_t parentCluster = 0;
+    std::string oldBaseName;
+
+    if (oldLastSlash != std::string::npos && oldLastSlash > 0) {
+        std::string parentPath = oldName.substr(0, oldLastSlash);
+        oldBaseName = oldName.substr(oldLastSlash + 1);
+        auto [pCluster, pName] = resolvePath(parentPath);
+        if (pCluster == 0) {
+            return false;  // Parent directory not found
+        }
+        parentCluster = pCluster;
+    } else {
+        oldBaseName = (oldLastSlash == 0) ? oldName.substr(1) : oldName;
     }
 
-    // Check if new name already exists
-    if (findDirectoryEntry(entries, newName) >= 0) {
-        return false;  // Name collision
+    if (oldBaseName.empty()) {
+        return false;
     }
 
-    // Update the entry
-    parseFilename(newName, entries[idx].name, entries[idx].ext);
-    writeRootDirectory(entries);
+    // Split newName into parent directory and baseName
+    size_t newLastSlash = findLastSeparator(newName);
+
+    uint16_t newParentCluster = 0;
+    std::string newBaseName;
+
+    if (newLastSlash != std::string::npos && newLastSlash > 0) {
+        std::string newParentPath = newName.substr(0, newLastSlash);
+        newBaseName = newName.substr(newLastSlash + 1);
+        auto [pCluster, pName] = resolvePath(newParentPath);
+        if (pCluster == 0) {
+            return false;  // Parent directory not found
+        }
+        newParentCluster = pCluster;
+    } else {
+        newBaseName = (newLastSlash == 0) ? newName.substr(1) : newName;
+    }
+
+    if (newBaseName.empty()) {
+        return false;
+    }
+
+    // Cross-directory rename not supported
+    if (parentCluster != newParentCluster) {
+        return false;
+    }
+
+    // Read parent directory entries
+    auto entries = getDirectoryEntries(parentCluster);
+
+    int oldIndex = findDirectoryEntry(entries, oldBaseName);
+    if (oldIndex < 0) {
+        return false;  // Source not found
+    }
+
+    int newIndex = findDirectoryEntry(entries, newBaseName);
+    if (newIndex >= 0 && newIndex != oldIndex) {
+        return false;  // Destination name collision
+    }
+
+    // Update the entry name (baseName only — parseFilename doesn't handle path separators)
+    parseFilename(newBaseName, entries[oldIndex].name, entries[oldIndex].ext);
+
+    // Write back to parent directory
+    setDirectoryEntries(parentCluster, entries);
 
     return true;
 }

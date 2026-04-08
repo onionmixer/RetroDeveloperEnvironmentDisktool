@@ -591,6 +591,7 @@ Commands:
   ls        List files (DOS 3.3, ProDOS, MSX-DOS)
   extract   Extract file from disk image
   insert    Insert file into disk image
+  rename    Rename file or directory
   compare   Compare two disk images
   verify    Verify disk image integrity
   format    Format disk with filesystem

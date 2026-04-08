@@ -185,6 +185,29 @@ README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이
 
 ---
 
+## 시나리오 10-1. 파일/디렉터리 이름 변경(`rename`)
+- **목적**: 모든 플랫폼에서 `rename` 커맨드로 파일·디렉터리 이름 변경이 정상 동작하고, ProDOS 서브디렉터리 헤더 동기화, 에러 처리(중복·미존재·cross-directory)가 올바르게 수행되는지 확인한다.
+- **커버리지**: 루트 파일 rename, 서브디렉터리 내 rename, 디렉터리 자체 rename, cross-directory 거부, 존재하지 않는 파일 거부, 중복 이름 거부.
+- **준비**: ProDOS·MSX-DOS·Human68k 이미지 각 1개 생성. 더미 파일과 디렉터리 추가.
+
+| 단계 | 절차 | 기대 결과 |
+|------|------|------------|
+|1|`rdedisktool create ren_prodos.po -f po --fs prodos -n RENTEST`|ProDOS 이미지 생성.|
+|2|`printf 'test' > tmp.bin && rdedisktool --bootdisk-mode off add ren_prodos.po tmp.bin`|루트에 TMP.BIN 추가.|
+|3|`rdedisktool --bootdisk-mode off rename ren_prodos.po TMP.BIN HELLO.BIN`|`Renamed:` 메시지 출력. `list`에서 HELLO.BIN 확인, TMP.BIN 사라짐.|
+|4|`rdedisktool --bootdisk-mode off mkdir ren_prodos.po MYDIR`|서브디렉터리 MYDIR 생성.|
+|5|`rdedisktool --bootdisk-mode off rename ren_prodos.po MYDIR NEWDIR`|디렉터리 rename 성공. `list`에서 NEWDIR 확인.|
+|6|서브디렉터리 헤더 검증: `xxd` 로 NEWDIR의 keyBlock offset 0x04-0x13 확인|block[0x04]의 nameLength=6, block[0x05-0x0A]="NEWDIR" 확인.|
+|7|`rdedisktool --bootdisk-mode off rename ren_prodos.po HELLO.BIN NEWDIR/HELLO.BIN`|cross-directory rename 거부: "Failed to rename" 메시지와 exit 1.|
+|8|`rdedisktool --bootdisk-mode off rename ren_prodos.po NOFILE.TXT NEW.TXT`|존재하지 않는 파일: "Failed to rename" 메시지와 exit 1.|
+|9|`rdedisktool create ren_msx.dsk -f msxdsk --fs msxdos -n MSXREN && printf 'x' > m.bin && rdedisktool --bootdisk-mode off add ren_msx.dsk m.bin`|MSX-DOS 이미지 생성 및 파일 추가.|
+|10|`rdedisktool --bootdisk-mode off rename ren_msx.dsk M.BIN RENAMED.BIN`|MSX-DOS 파일 rename 성공. `list`에서 RENAMED.BIN 확인.|
+|11|`rdedisktool create ren_x68k.xdf -f xdf --fs human68k -n X68REN && printf 'y' > h.bin && rdedisktool --bootdisk-mode off add ren_x68k.xdf h.bin`|Human68k 이미지 생성 및 파일 추가.|
+|12|`rdedisktool --bootdisk-mode off rename ren_x68k.xdf H.BIN RENAMED.BIN`|Human68k 파일 rename 성공. `list`에서 RENAMED.BIN 확인.|
+|13|`rdedisktool validate ren_prodos.po && rdedisktool validate ren_msx.dsk`|모든 rename 후 디스크 무결성 유지 확인.|
+
+---
+
 ## 시나리오 11. Bootdisk 보호 자동 회귀 테스트
 - **목적**: bootdisk 보호 정책(`strict` + `--force-bootdisk`)이 Apple II/MSX/X68000에서 공통적으로 동작하는지 자동 검증한다.
 - **커버리지**: `info -v`의 bootdisk 인식, `strict` safe-add 검증, 기존 시스템 파일 보존, `--force-bootdisk` 우회 가능 여부(정책 차단 해제 확인).

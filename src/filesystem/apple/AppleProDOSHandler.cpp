@@ -1250,8 +1250,13 @@ bool AppleProDOSHandler::renameFile(const std::string& oldName, const std::strin
         name = oldName;
     }
 
-    // Check if new name already exists (newDirBlock and newFileName already resolved above)
-    if (findDirectoryEntry(newDirBlock, newFileName) >= 0) {
+    // Cross-directory rename not supported
+    if (dirBlock != newDirBlock) {
+        return false;
+    }
+
+    // Check if new name already exists in the same directory
+    if (findDirectoryEntry(dirBlock, newFileName) >= 0) {
         return false;  // New name already exists
     }
 
@@ -1270,7 +1275,27 @@ bool AppleProDOSHandler::renameFile(const std::string& oldName, const std::strin
     parseFilename(newFileName, entry.filename, entry.nameLength);
     entry.lastModDateTime = packDateTime(std::time(nullptr));
 
-    return writeDirectoryEntry(dirBlock, entryIndex, entry);
+    if (!writeDirectoryEntry(dirBlock, entryIndex, entry)) {
+        return false;
+    }
+
+    // Sync subdirectory header name if renaming a directory.
+    // ProDOS subdirectories store their own name in the header entry at the
+    // start of the key block.  Without this update the parent entry and the
+    // header would disagree, which can confuse ProDOS utilities.
+    if (entry.storageType == STORAGE_SUBDIRECTORY) {
+        auto block = readBlock(entry.keyPointer);
+        if (block.size() >= BLOCK_SIZE) {
+            block[0x04] = (STORAGE_SUBDIR_HEADER << 4) | (entry.nameLength & 0x0F);
+            std::memcpy(&block[0x05], entry.filename, entry.nameLength);
+            for (size_t i = entry.nameLength; i < MAX_FILENAME_LENGTH; ++i) {
+                block[0x05 + i] = 0;
+            }
+            writeBlock(entry.keyPointer, block);
+        }
+    }
+
+    return true;
 }
 
 size_t AppleProDOSHandler::getFreeSpace() const {
@@ -1561,9 +1586,12 @@ bool AppleProDOSHandler::deleteDirectory(const std::string& path) {
     // Free the directory block
     markBlockFree(entry.keyPointer);
 
-    // Mark directory entry as deleted
-    DirectoryEntry deletedEntry = entry;
+    // Mark directory entry as deleted — zero the entire entry
+    // ProDOS expects the first byte (storageType|nameLength) to be 0x00 for deleted entries.
+    DirectoryEntry deletedEntry;
+    std::memset(&deletedEntry, 0, sizeof(deletedEntry));
     deletedEntry.storageType = STORAGE_DELETED;
+    deletedEntry.nameLength = 0;
 
     if (!writeDirectoryEntry(parentBlock, entryIndex, deletedEntry)) {
         return false;
