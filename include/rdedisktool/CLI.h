@@ -154,6 +154,7 @@ private:
     int cmdDump(const std::vector<std::string>& args);
     int cmdRename(const std::vector<std::string>& args);
     int cmdValidate(const std::vector<std::string>& args);
+    int cmdListFormats(const std::vector<std::string>& args);
 
     // Initialize built-in commands
     void initCommands();

@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <filesystem>
@@ -362,6 +363,11 @@ void CLI::initCommands() {
         [this](const std::vector<std::string>& args) { return cmdValidate(args); },
         "Validate disk image integrity",
         "validate <image_file>");
+
+    registerCommand("list-formats",
+        [this](const std::vector<std::string>& args) { return cmdListFormats(args); },
+        "List registered disk image formats",
+        "list-formats");
 }
 
 void CLI::registerCommand(const std::string& command,
@@ -2193,6 +2199,30 @@ int CLI::cmdValidate(const std::vector<std::string>& args) {
         printError(e.what());
         return 1;
     }
+}
+
+int CLI::cmdListFormats(const std::vector<std::string>& /*args*/) {
+    // Stable, columnar text output for both human inspection and CI grep.
+    // Format per row:  <Identifier>\t<extensions, comma-joined>\t<DisplayName>
+    std::cout << "Format\tExtensions\tDisplayName\n";
+    auto formats = rde::DiskImageFactory::getSupportedFormats();
+    std::sort(formats.begin(), formats.end(),
+              [](rde::DiskFormat a, rde::DiskFormat b) {
+                  return std::strcmp(rde::formatToIdentifier(a),
+                                     rde::formatToIdentifier(b)) < 0;
+              });
+    for (auto fmt : formats) {
+        const auto exts = rde::DiskImageFactory::getExtensions(fmt);
+        std::string joined;
+        for (size_t i = 0; i < exts.size(); ++i) {
+            if (i > 0) joined += ",";
+            joined += exts[i];
+        }
+        std::cout << rde::formatToIdentifier(fmt) << "\t"
+                  << joined << "\t"
+                  << rde::formatToString(fmt) << "\n";
+    }
+    return 0;
 }
 
 } // namespace rde
