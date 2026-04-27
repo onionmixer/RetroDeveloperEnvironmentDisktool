@@ -29,7 +29,8 @@ enum class BootDiskProfile {
     DOS33,
     ProDOS,
     MSXDOS,
-    Human68k
+    Human68k,
+    Macintosh
 };
 
 enum class Confidence {
