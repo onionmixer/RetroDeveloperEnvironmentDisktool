@@ -82,6 +82,7 @@ set(FILESYSTEM_SOURCES
     src/filesystem/msx/MSXDOSHandler.cpp
     src/filesystem/msx/MSXFATUtils.cpp
     src/filesystem/x68000/Human68kHandler.cpp
+    src/filesystem/macintosh/MacintoshHFSHandler.cpp
 )
 
 # Utility sources
@@ -90,6 +91,7 @@ set(UTILS_SOURCES
     src/utils/CommandOptions.cpp
     src/utils/FileUtils.cpp
     src/utils/FilenameConverter.cpp
+    src/utils/MacRoman.cpp
     src/utils/TimestampUtils.cpp
 )
 

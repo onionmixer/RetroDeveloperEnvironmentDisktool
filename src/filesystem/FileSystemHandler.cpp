@@ -9,6 +9,7 @@
 #include "rdedisktool/filesystem/AppleDOS33Handler.h"
 #include "rdedisktool/filesystem/AppleProDOSHandler.h"
 #include "rdedisktool/filesystem/x68000/Human68kHandler.h"
+#include "rdedisktool/filesystem/MacintoshHFSHandler.h"
 #include "rdedisktool/DiskImage.h"
 
 namespace rde {
@@ -61,6 +62,19 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::create(DiskImage* disk) {
         return nullptr;
     }
 
+    // Macintosh disk formats. The actual filesystem (HFS or MFS) is decided by
+    // the MDB signature at sector 2 (offset 0x400) — see MacintoshDiskImage.
+    if (format == DiskFormat::MacIMG || format == DiskFormat::MacDC42) {
+        const FileSystemType fs = disk->getFileSystemType();
+        if (fs == FileSystemType::HFS) {
+            auto h = std::make_unique<MacintoshHFSHandler>();
+            if (h->initialize(disk)) return h;
+        }
+        // MFS handler arrives at M4. Until then we explicitly return nullptr
+        // so the CLI surfaces "unsupported FS" rather than crashing.
+        return nullptr;
+    }
+
     return nullptr;
 }
 
@@ -86,10 +100,12 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::createForType(FileSystemTy
         case FileSystemType::Human68k:
             return std::make_unique<Human68kHandler>();
 
+        case FileSystemType::HFS:
+            return std::make_unique<MacintoshHFSHandler>();
+
         case FileSystemType::Unknown:
         case FileSystemType::FAT16:
-        case FileSystemType::HFS:    // Macintosh handlers wired in M3/M4
-        case FileSystemType::MFS:    // Macintosh handlers wired in M3/M4
+        case FileSystemType::MFS:    // Macintosh MFS handler wired in M4
             return nullptr;
     }
     return nullptr;
