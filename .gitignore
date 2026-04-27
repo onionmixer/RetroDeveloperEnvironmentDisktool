@@ -37,6 +37,9 @@ Thumbs.db
 # Grok AI assistant files
 .grok/
 
+# Planning documents (local working drafts)
+PLAN_*
+
 # Disk image files
 # Apple II
 *.do
