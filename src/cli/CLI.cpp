@@ -501,7 +501,7 @@ std::vector<std::string> CLI::parseGlobalOptions(const std::vector<std::string>&
 
 void CLI::printVersion() const {
     std::cout << RDEDISKTOOL_FULL_NAME << " v" << RDEDISKTOOL_VERSION << "\n";
-    std::cout << "Supported platforms: Apple II, MSX, X68000\n";
+    std::cout << "Supported platforms: Apple II, MSX, X68000, Macintosh\n";
 }
 
 void CLI::printHelp() const {
@@ -528,10 +528,12 @@ void CLI::printHelp() const {
     std::cout << "\n";
 
     std::cout << "Supported Formats:\n";
-    std::cout << "  Apple II: .do, .dsk (DOS order), .po (ProDOS order),\n";
-    std::cout << "            .nib (Nibble), .woz (WOZ v1/v2)\n";
-    std::cout << "  MSX:      .dsk (Raw sector), .dmk (DMK), .xsa (XSA compressed)\n";
-    std::cout << "  X68000:   .xdf (XDF), .dim (DIM)\n";
+    std::cout << "  Apple II:   .do, .dsk (DOS order), .po (ProDOS order),\n";
+    std::cout << "              .nib (Nibble), .woz (WOZ v1/v2)\n";
+    std::cout << "  MSX:        .dsk (Raw sector), .dmk (DMK), .xsa (XSA compressed)\n";
+    std::cout << "  X68000:     .xdf (XDF), .dim (DIM)\n";
+    std::cout << "  Macintosh:  .img / .dsk (Raw 512B sectors, HFS / MFS),\n";
+    std::cout << "              .image / .dc42 (Apple Disk Copy 4.2 container)\n";
     std::cout << "\n";
 
     std::cout << "Run 'rdedisktool help <command>' for detailed command help.\n";

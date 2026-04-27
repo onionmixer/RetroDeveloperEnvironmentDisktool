@@ -40,6 +40,14 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 
 > **Note**: X68000 uses 1024-byte sectors (for 2HD disks), different from the standard PC 512-byte sectors. Both XDF and DIM formats are fully read-write supported.
 
+### Macintosh
+| Format | Extension | Description |
+|--------|-----------|-------------|
+| Raw Image | .img, .dsk | Raw 512-byte-sector stream (400K / 720K / 800K / 1.44M) |
+| Apple Disk Copy 4.2 | .image, .dc42 | 0x54-byte header + raw payload + optional tag bytes, validated by data/tag checksum |
+
+> **Note**: Macintosh support is **read-only** in Phase 1 (`info`, `list`, `extract`, `validate`). Adding / deleting files, formatting, and container conversion (`MacIMG ↔ MacDC42`) are scoped for later phases. Both HFS and MFS are detected automatically by the MDB signature at sector 2.
+
 ## Supported File Systems
 
 | File System | Platform | Subdirectories | Notes |
@@ -48,6 +56,8 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 | ProDOS | Apple II | Yes | Block-based allocation, up to 32MB |
 | MSX-DOS | MSX | Yes | FAT12, MSX-DOS 1/2 compatible |
 | Human68k | X68000 | Yes | FAT12-based, 1024-byte sectors, 8.3 filenames |
+| HFS | Macintosh | Yes | Hierarchical File System with catalog B-tree + extents overflow (read-only) |
+| MFS | Macintosh | No | Flat directory + 12-bit allocation map (read-only) |
 
 ## Build & Installation
 
