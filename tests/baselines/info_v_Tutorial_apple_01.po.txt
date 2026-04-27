@@ -1,0 +1,35 @@
+File: Examples/Tutorial_apple_01/Tutorial_apple_01.po
+Format: Apple II ProDOS Order
+Platform: Apple II
+
+Geometry:
+  Tracks: 35
+  Sides: 1
+  Sectors/Track: 16
+  Bytes/Sector: 256
+  Total Size: 143360 bytes
+
+File System: ProDOS
+Volume: /TUTORIAL
+Free Space: 136192 bytes
+Total Space: 138240 bytes
+
+BootDisk Detection:
+  BootDisk: no
+  Profile: prodos
+  Confidence: medium
+  ProtectionMode: strict
+  Reason: filesystem profile detected
+Write Protected: No
+
+Diagnostics:
+Format: Apple II ProDOS Order (.po)
+Size: 143360 bytes
+Tracks: 35
+Sectors/Track: 16
+Bytes/Sector: 256
+Blocks: 280
+File System: ProDOS
+Write Protected: No
+Modified: No
+

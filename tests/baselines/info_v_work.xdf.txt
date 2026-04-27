@@ -1,0 +1,35 @@
+File: Emulator/x68000/work.xdf
+Format: X68000 XDF
+Platform: X68000
+
+Geometry:
+  Tracks: 154
+  Sides: 2
+  Sectors/Track: 8
+  Bytes/Sector: 1024
+  Total Size: 2523136 bytes
+
+File System: Unknown
+
+BootDisk Detection:
+  BootDisk: no
+  Profile: human68k
+  Confidence: medium
+  ProtectionMode: strict
+  Reason: invalid_bpb_or_filesystem_init_failed
+  Note: filesystem handler init failed
+Write Protected: No
+
+Diagnostics:
+Format: X68000 XDF (.xdf)
+Size: 1261568 bytes
+Cylinders: 77
+Heads: 2
+Total Tracks: 154
+Sectors/Track: 8
+Bytes/Sector: 1024
+Total Capacity: 1261568 bytes
+File System: Unknown
+Write Protected: No
+Modified: No
+
