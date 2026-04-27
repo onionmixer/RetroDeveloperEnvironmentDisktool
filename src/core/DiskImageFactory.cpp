@@ -135,9 +135,10 @@ Platform DiskImageFactory::getPlatformForFormat(DiskFormat format) {
         case DiskFormat::X68000DIM:
             return Platform::X68000;
 
-        default:
+        case DiskFormat::Unknown:
             return Platform::Unknown;
     }
+    return Platform::Unknown;
 }
 
 //=============================================================================
@@ -274,7 +275,7 @@ DiskGeometry DiskImageFactory::getDefaultGeometry(DiskFormat format) {
             geom.bytesPerSector = 1024;
             break;
 
-        default:
+        case DiskFormat::Unknown:
             // Return empty geometry for unknown formats
             break;
     }
@@ -305,9 +306,10 @@ std::vector<std::string> DiskImageFactory::getExtensions(DiskFormat format) {
             return {".xdf"};
         case DiskFormat::X68000DIM:
             return {".dim"};
-        default:
+        case DiskFormat::Unknown:
             return {};
     }
+    return {};
 }
 
 std::vector<DiskFormat> DiskImageFactory::getSupportedFormats() {
@@ -341,7 +343,14 @@ std::vector<DiskFormat> DiskImageFactory::getFormatsForPlatform(Platform platfor
             };
             break;
 
-        default:
+        case Platform::X68000:
+            formats = {
+                DiskFormat::X68000XDF,
+                DiskFormat::X68000DIM
+            };
+            break;
+
+        case Platform::Unknown:
             break;
     }
 

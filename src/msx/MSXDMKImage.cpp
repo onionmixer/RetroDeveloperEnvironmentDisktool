@@ -523,9 +523,20 @@ bool MSXDMKImage::canConvertTo(DiskFormat format) const {
     switch (format) {
         case DiskFormat::MSXDSK:
             return true;
-        default:
+        case DiskFormat::Unknown:
+        case DiskFormat::AppleDO:
+        case DiskFormat::ApplePO:
+        case DiskFormat::AppleNIB:
+        case DiskFormat::AppleNIB2:
+        case DiskFormat::AppleWOZ1:
+        case DiskFormat::AppleWOZ2:
+        case DiskFormat::MSXDMK:
+        case DiskFormat::MSXXSA:
+        case DiskFormat::X68000XDF:
+        case DiskFormat::X68000DIM:
             return false;
     }
+    return false;
 }
 
 std::unique_ptr<DiskImage> MSXDMKImage::convertTo(DiskFormat format) const {

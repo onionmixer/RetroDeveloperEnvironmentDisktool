@@ -45,7 +45,9 @@ BootDiskProfile profileFromFS(FileSystemType fsType, DiskFormat format) {
         case FileSystemType::MSXDOS2:
         case FileSystemType::FAT12: return BootDiskProfile::MSXDOS;
         case FileSystemType::Human68k: return BootDiskProfile::Human68k;
-        default: break;
+        case FileSystemType::Unknown:
+        case FileSystemType::FAT16:
+            break;
     }
 
     if (format == DiskFormat::X68000XDF || format == DiskFormat::X68000DIM) {
@@ -88,12 +90,13 @@ const char* BootDiskPolicy::modeToString(BootDiskMode mode) {
 
 const char* BootDiskPolicy::profileToString(BootDiskProfile profile) {
     switch (profile) {
+        case BootDiskProfile::Unknown: return "unknown";
         case BootDiskProfile::DOS33: return "dos33";
         case BootDiskProfile::ProDOS: return "prodos";
         case BootDiskProfile::MSXDOS: return "msxdos";
         case BootDiskProfile::Human68k: return "human68k";
-        default: return "unknown";
     }
+    return "unknown";
 }
 
 const char* BootDiskPolicy::confidenceToString(Confidence confidence) {
@@ -148,7 +151,7 @@ BootDiskDetection BootDiskPolicy::detect(const std::string& imagePath,
         case BootDiskProfile::Human68k:
             hasSystemFiles = hasAny(rootNames, {"HUMAN.SYS", "COMMAND.X", "CONFIG.SYS", "AUTOEXEC.BAT"});
             break;
-        default:
+        case BootDiskProfile::Unknown:
             break;
     }
 

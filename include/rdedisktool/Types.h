@@ -193,15 +193,17 @@ struct ValidationResult {
 // Helper functions
 inline const char* platformToString(Platform p) {
     switch (p) {
+        case Platform::Unknown: return "Unknown";
         case Platform::AppleII: return "Apple II";
         case Platform::MSX: return "MSX";
         case Platform::X68000: return "X68000";
-        default: return "Unknown";
     }
+    return "Unknown";
 }
 
 inline const char* formatToString(DiskFormat f) {
     switch (f) {
+        case DiskFormat::Unknown: return "Unknown";
         case DiskFormat::AppleDO: return "Apple II DOS Order";
         case DiskFormat::ApplePO: return "Apple II ProDOS Order";
         case DiskFormat::AppleNIB: return "Apple II Nibble";
@@ -213,12 +215,13 @@ inline const char* formatToString(DiskFormat f) {
         case DiskFormat::MSXXSA: return "MSX XSA";
         case DiskFormat::X68000XDF: return "X68000 XDF";
         case DiskFormat::X68000DIM: return "X68000 DIM";
-        default: return "Unknown";
     }
+    return "Unknown";
 }
 
 inline const char* formatToExtension(DiskFormat f) {
     switch (f) {
+        case DiskFormat::Unknown: return "";
         case DiskFormat::AppleDO: return ".dsk";
         case DiskFormat::ApplePO: return ".po";
         case DiskFormat::AppleNIB: return ".nib";
@@ -230,8 +233,8 @@ inline const char* formatToExtension(DiskFormat f) {
         case DiskFormat::MSXXSA: return ".xsa";
         case DiskFormat::X68000XDF: return ".xdf";
         case DiskFormat::X68000DIM: return ".dim";
-        default: return "";
     }
+    return "";
 }
 
 inline DiskFormat stringToFormat(const std::string& s) {
@@ -254,6 +257,7 @@ inline DiskFormat stringToFormat(const std::string& s) {
 
 inline const char* fileSystemTypeToString(FileSystemType f) {
     switch (f) {
+        case FileSystemType::Unknown: return "Unknown";
         case FileSystemType::DOS33: return "DOS 3.3";
         case FileSystemType::ProDOS: return "ProDOS";
         case FileSystemType::MSXDOS1: return "MSX-DOS 1";
@@ -261,8 +265,8 @@ inline const char* fileSystemTypeToString(FileSystemType f) {
         case FileSystemType::FAT12: return "FAT12";
         case FileSystemType::FAT16: return "FAT16";
         case FileSystemType::Human68k: return "Human68k";
-        default: return "Unknown";
     }
+    return "Unknown";
 }
 
 } // namespace rde

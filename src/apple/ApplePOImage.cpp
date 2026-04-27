@@ -226,9 +226,18 @@ bool ApplePOImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::AppleNIB:
         case DiskFormat::AppleWOZ2:
             return true;
-        default:
+        case DiskFormat::Unknown:
+        case DiskFormat::ApplePO:
+        case DiskFormat::AppleNIB2:
+        case DiskFormat::AppleWOZ1:
+        case DiskFormat::MSXDSK:
+        case DiskFormat::MSXDMK:
+        case DiskFormat::MSXXSA:
+        case DiskFormat::X68000XDF:
+        case DiskFormat::X68000DIM:
             return false;
     }
+    return false;
 }
 
 std::unique_ptr<DiskImage> ApplePOImage::convertTo(DiskFormat format) const {
@@ -295,7 +304,12 @@ std::string ApplePOImage::getDiagnostics() const {
         case FileSystemType::ProDOS:
             oss << "ProDOS\n";
             break;
-        default:
+        case FileSystemType::Unknown:
+        case FileSystemType::MSXDOS1:
+        case FileSystemType::MSXDOS2:
+        case FileSystemType::FAT12:
+        case FileSystemType::FAT16:
+        case FileSystemType::Human68k:
             oss << "Unknown\n";
             break;
     }
