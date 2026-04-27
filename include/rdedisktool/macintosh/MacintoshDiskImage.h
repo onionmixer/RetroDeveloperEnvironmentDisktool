@@ -53,6 +53,17 @@ public:
     const std::vector<uint8_t>& getRawData() const override { return m_data; }
     void setRawData(const std::vector<uint8_t>& data) override;
 
+    // Common 512B-sector I/O. Concrete subclasses must guarantee that m_data
+    // contains the raw sector stream with the container header (if any)
+    // already stripped, so that linear addressing
+    //   offset = (track * sides + side) * sectorsPerTrack * 512 + sector * 512
+    // resolves directly into m_data.
+    SectorBuffer readSector(size_t track, size_t side, size_t sector) override;
+    void writeSector(size_t track, size_t side, size_t sector,
+                     const SectorBuffer& data) override;
+    TrackBuffer readTrack(size_t track, size_t side) override;
+    void writeTrack(size_t track, size_t side, const TrackBuffer& data) override;
+
 protected:
     MacintoshDiskImage();
 

@@ -26,12 +26,8 @@ public:
 
     DiskFormat getFormat() const override { return DiskFormat::MacIMG; }
 
-    SectorBuffer readSector(size_t track, size_t side, size_t sector) override;
-    void writeSector(size_t track, size_t side, size_t sector,
-                     const SectorBuffer& data) override;
-
-    TrackBuffer readTrack(size_t track, size_t side) override;
-    void writeTrack(size_t track, size_t side, const TrackBuffer& data) override;
+    // readSector / writeSector / readTrack / writeTrack inherited from
+    // MacintoshDiskImage (raw 512B sector stream — no header offset).
 
     bool canConvertTo(DiskFormat format) const override;
     std::unique_ptr<DiskImage> convertTo(DiskFormat format) const override;

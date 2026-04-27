@@ -2,6 +2,10 @@
 #include "rdedisktool/DiskImageFactory.h"
 #include "rdedisktool/Exceptions.h"
 
+#include <fstream>
+#include <iterator>
+#include <sstream>
+
 namespace rde {
 
 namespace {
@@ -12,12 +16,44 @@ struct MacIMGRegistrar {
     }
 };
 static MacIMGRegistrar s_registrar;
+
+// Helpful but informational: known logical sizes warned only when the loader
+// observes something else.
+bool isKnownMacRawSize(size_t s) {
+    return s == MacintoshDiskImage::SIZE_400K  ||
+           s == MacintoshDiskImage::SIZE_720K  ||
+           s == MacintoshDiskImage::SIZE_800K  ||
+           s == MacintoshDiskImage::SIZE_1440K;
+}
 } // namespace
 
 MacintoshIMGImage::MacintoshIMGImage() = default;
 
-void MacintoshIMGImage::load(const std::filesystem::path& /*path*/) {
-    throw NotImplementedException("Macintosh IMG load (M2)");
+void MacintoshIMGImage::load(const std::filesystem::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) {
+        throw InvalidFormatException("Cannot open: " + path.string());
+    }
+    in.seekg(0, std::ios::end);
+    const auto sz = static_cast<size_t>(in.tellg());
+    in.seekg(0, std::ios::beg);
+
+    if (sz == 0 || (sz % SECTOR_SIZE) != 0) {
+        throw InvalidFormatException(
+            "Macintosh raw image must be a non-zero multiple of 512 bytes (got " +
+            std::to_string(sz) + ")");
+    }
+
+    m_data.resize(sz);
+    if (!in.read(reinterpret_cast<char*>(m_data.data()), static_cast<std::streamsize>(sz))) {
+        throw InvalidFormatException("Read failed: " + path.string());
+    }
+
+    m_filePath = path;
+    m_modified = false;
+    m_writeProtected = false;
+    m_fileSystemDetected = false;
+    initGeometryFromSize(sz);
 }
 
 void MacintoshIMGImage::save(const std::filesystem::path& /*path*/) {
@@ -28,28 +64,10 @@ void MacintoshIMGImage::create(const DiskGeometry& /*geometry*/) {
     throw NotImplementedException("Macintosh IMG create (Phase 2)");
 }
 
-SectorBuffer MacintoshIMGImage::readSector(size_t /*track*/, size_t /*side*/, size_t /*sector*/) {
-    throw NotImplementedException("Macintosh IMG readSector (M2)");
-}
-
-void MacintoshIMGImage::writeSector(size_t /*track*/, size_t /*side*/, size_t /*sector*/,
-                                    const SectorBuffer& /*data*/) {
-    throw NotImplementedException("Macintosh IMG writeSector (Phase 2)");
-}
-
-TrackBuffer MacintoshIMGImage::readTrack(size_t /*track*/, size_t /*side*/) {
-    throw NotImplementedException("Macintosh IMG readTrack (M2)");
-}
-
-void MacintoshIMGImage::writeTrack(size_t /*track*/, size_t /*side*/, const TrackBuffer& /*data*/) {
-    throw NotImplementedException("Macintosh IMG writeTrack (Phase 2)");
-}
-
 bool MacintoshIMGImage::canConvertTo(DiskFormat format) const {
     switch (format) {
         case DiskFormat::MacDC42:
-            // Phase 3: MacIMG -> MacDC42 will become true. Stays false in M1/M2.
-            return false;
+            return false;  // Phase 3
         case DiskFormat::Unknown:
         case DiskFormat::AppleDO:
         case DiskFormat::ApplePO:
@@ -74,11 +92,24 @@ std::unique_ptr<DiskImage> MacintoshIMGImage::convertTo(DiskFormat format) const
 }
 
 bool MacintoshIMGImage::validate() const {
-    return false;  // Skeleton: no payload to validate yet.
+    if (m_data.empty() || (m_data.size() % SECTOR_SIZE) != 0) {
+        return false;
+    }
+    return true;
 }
 
 std::string MacintoshIMGImage::getDiagnostics() const {
-    return "Format: Macintosh Raw Image (.img / .dsk)\nNote: M1 skeleton, full support pending.\n";
+    std::ostringstream oss;
+    oss << "Format: Macintosh Raw Image (.img / .dsk)\n";
+    oss << "Size: " << m_data.size() << " bytes\n";
+    oss << "Sectors: " << (m_data.size() / SECTOR_SIZE) << " (logical 512B)\n";
+    if (!isKnownMacRawSize(m_data.size())) {
+        oss << "Note: non-standard size (expected 400K/720K/800K/1440K)\n";
+    }
+    oss << "File System: " << fileSystemTypeToString(getFileSystemType()) << "\n";
+    oss << "Write Protected: " << (m_writeProtected ? "Yes" : "No") << "\n";
+    oss << "Modified: " << (m_modified ? "Yes" : "No") << "\n";
+    return oss.str();
 }
 
 } // namespace rde

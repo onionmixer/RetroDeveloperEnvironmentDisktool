@@ -130,6 +130,23 @@ public:
      */
     static rde::DiskFormat detectDIMFormat(const std::vector<uint8_t>& data);
 
+    /**
+     * Detect Apple Disk Copy 4.2 container by header inspection only.
+     * Per SPEC §285, the 7-of-8 detection rules excluding the payload checksum
+     * are evaluated here (the checksum requires reading the full file, which
+     * the detect() top-level limits to 64KB and so cannot be enforced upstream
+     * of MacintoshDC42Image::load()).
+     */
+    static rde::DiskFormat detectMacDC42Format(const std::vector<uint8_t>& data,
+                                                size_t fileSize);
+
+    /**
+     * Detect Macintosh raw image (HFS / MFS signature at offset 0x400).
+     * Logical-512B-sector stream — no container header.
+     */
+    static rde::DiskFormat detectMacRawFormat(const std::vector<uint8_t>& data,
+                                                size_t fileSize);
+
     //=========================================================================
     // Utility Methods
     //=========================================================================
