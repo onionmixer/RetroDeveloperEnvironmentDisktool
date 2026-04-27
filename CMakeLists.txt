@@ -71,6 +71,7 @@ set(MAC_SOURCES
     src/macintosh/MacintoshDiskImage.cpp
     src/macintosh/MacintoshIMGImage.cpp
     src/macintosh/MacintoshDC42Image.cpp
+    src/macintosh/DC42Checksum.cpp
 )
 
 # Filesystem sources

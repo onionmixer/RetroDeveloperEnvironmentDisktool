@@ -1,5 +1,6 @@
 #include "rdedisktool/FormatDetector.h"
 #include "rdedisktool/DiskImage.h"
+#include "rdedisktool/macintosh/MacintoshDiskImage.h"
 #include "rdedisktool/msx/XSAHeader.h"
 #include "rdedisktool/utils/BinaryReader.h"
 #include <fstream>
@@ -138,6 +139,14 @@ rde::DiskFormat FormatDetector::detectByMagic(const std::vector<uint8_t>& data) 
         return dimFormat;
     }
 
+    // Try Apple Disk Copy 4.2. The 0x52 magic alone is too weak (raw images can
+    // hit 0x0100 by chance), so the 7-condition header check guards against
+    // false positives. Payload checksum is enforced later by the loader.
+    rde::DiskFormat dc42Format = detectMacDC42Format(data, data.size());
+    if (dc42Format != rde::DiskFormat::Unknown) {
+        return dc42Format;
+    }
+
     return rde::DiskFormat::Unknown;
 }
 
@@ -181,17 +190,28 @@ rde::DiskFormat FormatDetector::detectByExtension(const std::string& ext, size_t
         return rde::DiskFormat::X68000DIM;
     }
 
+    // Macintosh DC42 container. .img / .dsk are intentionally NOT mapped here
+    // (they are ambiguous between Apple/MSX/Mac); content stage decides them.
+    if (ext == ".image" || ext == ".dc42") {
+        return rde::DiskFormat::MacDC42;
+    }
+
     return rde::DiskFormat::Unknown;
 }
 
 rde::DiskFormat FormatDetector::detectByContent(const std::vector<uint8_t>& data,
                                                  const std::string& ext,
                                                  size_t fileSize) {
-    // For .dsk extension (or empty), need to determine platform
-    if (ext == ".dsk" || ext.empty()) {
+    // .dsk and .img are both ambiguous container-less raw streams; route them
+    // (and extensionless files) through size-based and content-based checks.
+    if (ext == ".dsk" || ext == ".img" || ext.empty()) {
         // Check MSX standard sizes first
         if (isMSXDiskSize(fileSize)) {
-            return detectMSXFormat(data, ext);
+            const rde::DiskFormat msx = detectMSXFormat(data, ext);
+            if (msx != rde::DiskFormat::Unknown) {
+                return msx;
+            }
+            // MSXDSK rejected (not a real BPB) — fall through to other checks.
         }
 
         // Apple II standard sizes
@@ -205,6 +225,14 @@ rde::DiskFormat FormatDetector::detectByContent(const std::vector<uint8_t>& data
         // Check X68000 XDF size
         if (fileSize == X68000_XDF) {
             return detectXDFFormat(data, fileSize);
+        }
+
+        // Last fallback: Macintosh raw image (HFS / MFS signature at 0x400).
+        // Run after the platform-specific size and content checks so we never
+        // reclassify a known-Apple/MSX/X68000 disk as Macintosh.
+        const rde::DiskFormat mac = detectMacRawFormat(data, fileSize);
+        if (mac != rde::DiskFormat::Unknown) {
+            return mac;
         }
 
         // Non-standard sizes: analyze content
@@ -537,6 +565,60 @@ std::string FormatDetector::toLower(const std::string& str) {
     std::transform(result.begin(), result.end(), result.begin(),
                    [](unsigned char c) { return std::tolower(c); });
     return result;
+}
+
+rde::DiskFormat FormatDetector::detectMacDC42Format(const std::vector<uint8_t>& data,
+                                                     size_t fileSize) {
+    // Per SPEC §285, evaluate the 7 of 8 detection conditions excluding the
+    // payload checksum (which requires reading the entire file; detect()'s
+    // 64KB read window cannot satisfy it for typical Mac floppies).
+    constexpr size_t HEADER = 0x54;
+    if (fileSize < HEADER) return rde::DiskFormat::Unknown;
+    if (data.size() < HEADER) return rde::DiskFormat::Unknown;
+
+    const uint8_t nameLen = data[0x00];
+    if (nameLen > 63) return rde::DiskFormat::Unknown;
+
+    const uint16_t magic = static_cast<uint16_t>(
+        (static_cast<uint16_t>(data[0x52]) << 8) | data[0x53]);
+    if (magic != 0x0100) return rde::DiskFormat::Unknown;
+
+    const uint32_t dataSize =
+        (static_cast<uint32_t>(data[0x40]) << 24) |
+        (static_cast<uint32_t>(data[0x41]) << 16) |
+        (static_cast<uint32_t>(data[0x42]) << 8)  |
+         static_cast<uint32_t>(data[0x43]);
+    if (dataSize == 0) return rde::DiskFormat::Unknown;
+    if ((dataSize % 2) != 0) return rde::DiskFormat::Unknown;
+    if ((dataSize % 512) != 0) return rde::DiskFormat::Unknown;
+
+    const uint32_t tagSize =
+        (static_cast<uint32_t>(data[0x44]) << 24) |
+        (static_cast<uint32_t>(data[0x45]) << 16) |
+        (static_cast<uint32_t>(data[0x46]) << 8)  |
+         static_cast<uint32_t>(data[0x47]);
+
+    const size_t expectedFileSize = HEADER + dataSize + tagSize;
+    if (fileSize != expectedFileSize) return rde::DiskFormat::Unknown;
+
+    return rde::DiskFormat::MacDC42;
+}
+
+rde::DiskFormat FormatDetector::detectMacRawFormat(const std::vector<uint8_t>& data,
+                                                     size_t fileSize) {
+    // Logical 512B-sector stream, no container. Identified by HFS or MFS
+    // signature at offset 0x400 (sector 2). Run as the last fallback so
+    // non-Mac raw disks of the same size never reach this branch.
+    if ((fileSize % 512) != 0 || fileSize < 0x400 + 2) return rde::DiskFormat::Unknown;
+    if (data.size() < 0x400 + 2) return rde::DiskFormat::Unknown;
+
+    const uint16_t sig = static_cast<uint16_t>(
+        (static_cast<uint16_t>(data[0x400]) << 8) | data[0x401]);
+    if (sig == rde::MacintoshDiskImage::HFS_MDB_SIGNATURE ||
+        sig == rde::MacintoshDiskImage::MFS_MDB_SIGNATURE) {
+        return rde::DiskFormat::MacIMG;
+    }
+    return rde::DiskFormat::Unknown;
 }
 
 } // namespace rdedisktool

@@ -37,18 +37,34 @@ public:
 
     DiskFormat getFormat() const override { return DiskFormat::MacDC42; }
 
-    SectorBuffer readSector(size_t track, size_t side, size_t sector) override;
-    void writeSector(size_t track, size_t side, size_t sector,
-                     const SectorBuffer& data) override;
-
-    TrackBuffer readTrack(size_t track, size_t side) override;
-    void writeTrack(size_t track, size_t side, const TrackBuffer& data) override;
+    // readSector / writeSector / readTrack / writeTrack inherited from
+    // MacintoshDiskImage. m_data stores the raw sector stream after the
+    // 0x54-byte container header has been stripped.
 
     bool canConvertTo(DiskFormat format) const override;
     std::unique_ptr<DiskImage> convertTo(DiskFormat format) const override;
 
     bool validate() const override;
     std::string getDiagnostics() const override;
+
+    // Container metadata extracted from the 0x54-byte header.
+    // Populated after a successful load(); zero-initialized otherwise.
+    const std::string& imageName() const { return m_imageName; }
+    uint32_t dataSize() const     { return m_dataSize; }
+    uint32_t tagSize() const      { return m_tagSize; }
+    uint32_t dataChecksum() const { return m_dataChecksum; }
+    uint32_t tagChecksum() const  { return m_tagChecksum; }
+    uint8_t  diskEncoding() const { return m_diskEncoding; }
+    uint8_t  formatByte() const   { return m_formatByte; }
+
+private:
+    std::string m_imageName;
+    uint32_t m_dataSize = 0;
+    uint32_t m_tagSize = 0;
+    uint32_t m_dataChecksum = 0;     // expected (from header)
+    uint32_t m_tagChecksum = 0;      // expected (from header)
+    uint8_t  m_diskEncoding = 0;
+    uint8_t  m_formatByte = 0;
 };
 
 } // namespace rde
