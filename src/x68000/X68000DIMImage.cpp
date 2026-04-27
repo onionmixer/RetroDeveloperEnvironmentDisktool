@@ -398,9 +398,20 @@ bool X68000DIMImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::X68000XDF:
             // Can convert to XDF only if 2HD type (same layout)
             return m_dimType == X68000DIMType::DIM_2HD;
-        default:
+        case DiskFormat::Unknown:
+        case DiskFormat::AppleDO:
+        case DiskFormat::ApplePO:
+        case DiskFormat::AppleNIB:
+        case DiskFormat::AppleNIB2:
+        case DiskFormat::AppleWOZ1:
+        case DiskFormat::AppleWOZ2:
+        case DiskFormat::MSXDSK:
+        case DiskFormat::MSXDMK:
+        case DiskFormat::MSXXSA:
+        case DiskFormat::X68000DIM:
             return false;
     }
+    return false;
 }
 
 std::unique_ptr<DiskImage> X68000DIMImage::convertTo(DiskFormat format) const {
@@ -474,7 +485,14 @@ std::string X68000DIMImage::getDiagnostics() const {
     oss << "File System: ";
     switch (getFileSystemType()) {
         case FileSystemType::Human68k: oss << "Human68k"; break;
-        default: oss << "Unknown"; break;
+        case FileSystemType::Unknown:
+        case FileSystemType::DOS33:
+        case FileSystemType::ProDOS:
+        case FileSystemType::MSXDOS1:
+        case FileSystemType::MSXDOS2:
+        case FileSystemType::FAT12:
+        case FileSystemType::FAT16:
+            oss << "Unknown"; break;
     }
     oss << "\n";
 

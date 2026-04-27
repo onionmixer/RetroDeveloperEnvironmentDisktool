@@ -86,9 +86,11 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::createForType(FileSystemTy
         case FileSystemType::Human68k:
             return std::make_unique<Human68kHandler>();
 
-        default:
+        case FileSystemType::Unknown:
+        case FileSystemType::FAT16:
             return nullptr;
     }
+    return nullptr;
 }
 
 } // namespace rde

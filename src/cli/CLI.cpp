@@ -152,9 +152,10 @@ bool isCriticalBootFile(rde::BootDiskProfile profile, const std::string& filenam
             static const std::set<std::string> s = {"HUMAN.SYS", "COMMAND.X"};
             return s.count(f) > 0;
         }
-        default:
+        case rde::BootDiskProfile::Unknown:
             return false;
     }
+    return false;
 }
 
 bool confirmCriticalDelete(const std::string& filename,
@@ -247,7 +248,7 @@ std::vector<std::pair<uint32_t, uint32_t>> protectedLinearRanges(const rde::Disk
             // Human68k boot/IPL sector only.
             addRange(0, 0);
             break;
-        default:
+        case rde::BootDiskProfile::Unknown:
             break;
     }
 

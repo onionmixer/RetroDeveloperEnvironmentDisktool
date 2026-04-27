@@ -637,9 +637,18 @@ bool AppleWozImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::ApplePO:
         case DiskFormat::AppleNIB:
             return true;
-        default:
+        case DiskFormat::Unknown:
+        case DiskFormat::AppleNIB2:
+        case DiskFormat::AppleWOZ1:
+        case DiskFormat::AppleWOZ2:
+        case DiskFormat::MSXDSK:
+        case DiskFormat::MSXDMK:
+        case DiskFormat::MSXXSA:
+        case DiskFormat::X68000XDF:
+        case DiskFormat::X68000DIM:
             return false;
     }
+    return false;
 }
 
 std::unique_ptr<DiskImage> AppleWozImage::convertTo(DiskFormat format) const {

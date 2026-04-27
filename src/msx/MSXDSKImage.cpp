@@ -287,9 +287,20 @@ bool MSXDSKImage::canConvertTo(DiskFormat format) const {
     switch (format) {
         case DiskFormat::MSXDMK:
             return true;
-        default:
+        case DiskFormat::Unknown:
+        case DiskFormat::AppleDO:
+        case DiskFormat::ApplePO:
+        case DiskFormat::AppleNIB:
+        case DiskFormat::AppleNIB2:
+        case DiskFormat::AppleWOZ1:
+        case DiskFormat::AppleWOZ2:
+        case DiskFormat::MSXDSK:
+        case DiskFormat::MSXXSA:
+        case DiskFormat::X68000XDF:
+        case DiskFormat::X68000DIM:
             return false;
     }
+    return false;
 }
 
 std::unique_ptr<DiskImage> MSXDSKImage::convertTo(DiskFormat format) const {
@@ -360,7 +371,11 @@ std::string MSXDSKImage::getDiagnostics() const {
         case FileSystemType::MSXDOS2: oss << "MSX-DOS 2"; break;
         case FileSystemType::FAT12: oss << "FAT12"; break;
         case FileSystemType::FAT16: oss << "FAT16"; break;
-        default: oss << "Unknown"; break;
+        case FileSystemType::Unknown:
+        case FileSystemType::DOS33:
+        case FileSystemType::ProDOS:
+        case FileSystemType::Human68k:
+            oss << "Unknown"; break;
     }
     oss << "\n";
 
