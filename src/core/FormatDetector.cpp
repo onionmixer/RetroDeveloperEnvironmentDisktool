@@ -307,14 +307,14 @@ rde::DiskFormat FormatDetector::detectMSXFormat(const std::vector<uint8_t>& data
                                                  const std::string& ext) {
     (void)ext;  // Currently unused, but kept for future extension
 
-    // Check for MSX boot sector signature
-    if (data.size() >= 512) {
-        if (data[0] == 0xEB || data[0] == 0xE9) {
-            return rde::DiskFormat::MSXDSK;
-        }
+    // Require a valid BPB. Size match alone is not enough — Mac 720K MFM (737280)
+    // collides with MSX 720K, and other plain raw images can also share these sizes.
+    // Returning MSXDSK as a default for any matching size mis-classifies non-MSX disks.
+    if (isValidMSXBPB(data)) {
+        return rde::DiskFormat::MSXDSK;
     }
 
-    return rde::DiskFormat::MSXDSK;
+    return rde::DiskFormat::Unknown;
 }
 
 rde::DiskFormat FormatDetector::detectDSKByContent(const std::vector<uint8_t>& data) {
