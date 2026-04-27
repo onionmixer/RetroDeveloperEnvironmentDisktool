@@ -55,7 +55,12 @@ public:
         uint32_t rsrcLogical = 0;
         uint32_t createDate = 0;
         uint32_t modifyDate = 0;
-        std::string name;     // UTF-8
+        std::string name;          // UTF-8
+        std::string macRomanName;  // raw MacRoman (AppleDouble entry-id 3)
+        // MFS flUsrWds: 16 bytes Finder info at directory entry offset 0x02.
+        // First 4 = type, next 4 = creator (already mirrored in fileType /
+        // creator); the remaining 8 bytes carry Finder flags + location.
+        uint8_t flUsrWds[16] = {0};
     };
 
     MacintoshMFSHandler() = default;
@@ -87,6 +92,9 @@ public:
 
     // Extract a fork by start-block / logical size, following the 12-bit map.
     std::vector<uint8_t> extractFork(uint16_t startBlock, uint32_t logical) const;
+
+    // Public lookup used by CLI exporters (AppleDouble / MacBinary).
+    const DirEntry* lookupByName(const std::string& name) const;
 
 private:
     Mdb m_mdb{};

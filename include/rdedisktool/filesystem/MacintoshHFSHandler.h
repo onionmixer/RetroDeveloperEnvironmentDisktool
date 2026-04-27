@@ -88,15 +88,13 @@ public:
      */
     std::vector<uint8_t> extractFork(uint32_t fileCNID, uint8_t forkType) const;
 
-private:
-    Mdb m_mdb{};
-    BootBlock m_bootBlock{};
-
-    // Catalog leaf records keyed by parent CNID -> child entries.
-    // Built once at initialize() time and reused for every listFiles() call.
+    // Catalog leaf records keyed by parent CNID -> child entries. Public so
+    // that CLI exporters (AppleDouble / MacBinary) can read the cached
+    // metadata directly. Built once at initialize() and reused thereafter.
     struct CatalogChild {
         uint32_t cnid = 0;
-        std::string name;       // UTF-8 (decoded from MacRoman)
+        std::string name;          // UTF-8 (decoded from MacRoman)
+        std::string macRomanName;  // raw MacRoman (for AppleDouble entry-id 3)
         bool isDirectory = false;
         uint32_t dataLogical = 0;
         uint32_t rsrcLogical = 0;
@@ -106,7 +104,21 @@ private:
         std::array<uint16_t, 6> rsrcExtents{};
         uint8_t fileType[4]  = {0,0,0,0};
         uint8_t creator[4]   = {0,0,0,0};
+        // Raw Finder info bytes (catalog file record offsets per SPEC §1648):
+        //   FInfo  : data offset 0x04..0x13 (16 bytes)
+        //   FXInfo : data offset 0x38..0x47 (16 bytes)
+        uint8_t finfo[16]   = {0};
+        uint8_t fxinfo[16]  = {0};
     };
+
+    // Public lookup used by CLI exporters (AppleDouble / MacBinary). Returns
+    // nullptr when the path does not resolve to a file or folder.
+    const CatalogChild* lookupByPath(const std::string& path) const;
+
+private:
+    Mdb m_mdb{};
+    BootBlock m_bootBlock{};
+
     std::unordered_map<uint32_t, std::vector<CatalogChild>> m_childrenByParent;
 
     // CNID -> CatalogChild lookup for fast path resolution / extract.

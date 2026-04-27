@@ -142,6 +142,7 @@ bool MacintoshMFSHandler::parseDirectory() {
                 de.locked = (flags & 0x01) != 0;
                 std::memcpy(de.fileType, e + 0x02, 4);
                 std::memcpy(de.creator,  e + 0x06, 4);
+                std::memcpy(de.flUsrWds, e + 0x02, 16);
                 de.cnid           = be32(e + 0x12);
                 de.dataStartBlock = be16(e + 0x16);
                 de.dataLogical    = be32(e + 0x18);
@@ -150,6 +151,7 @@ bool MacintoshMFSHandler::parseDirectory() {
                 de.createDate     = be32(e + 0x2a);
                 de.modifyDate     = be32(e + 0x2e);
                 std::string macName(reinterpret_cast<const char*>(e + 0x33), nameLen);
+                de.macRomanName = macName;
                 de.name = macRomanToUtf8(macName);
                 m_entries.push_back(std::move(de));
             }
@@ -214,6 +216,11 @@ std::vector<uint8_t> MacintoshMFSHandler::extractFork(uint16_t startBlock,
 
     if (out.size() > logical) out.resize(logical);
     return out;
+}
+
+const MacintoshMFSHandler::DirEntry*
+MacintoshMFSHandler::lookupByName(const std::string& name) const {
+    return findEntry(name);
 }
 
 std::vector<FileEntry> MacintoshMFSHandler::listFiles(const std::string& path) {

@@ -5,6 +5,9 @@
 #include "rdedisktool/FileSystemHandler.h"
 #include "rdedisktool/filesystem/MSXDOSHandler.h"
 #include "rdedisktool/filesystem/AppleProDOSHandler.h"
+#include "rdedisktool/filesystem/MacintoshHFSHandler.h"
+#include "rdedisktool/filesystem/MacintoshMFSHandler.h"
+#include "rdedisktool/macintosh/MacFileExporters.h"
 #include "rdedisktool/apple/AppleConstants.h"
 #include "rdedisktool/msx/MSXXSAImage.h"
 #include "rdedisktool/msx/MSXDiskImage.h"
@@ -1114,19 +1117,40 @@ int CLI::cmdList(const std::vector<std::string>& args) {
 }
 
 int CLI::cmdExtract(const std::vector<std::string>& args) {
-    if (args.size() < 2) {
+    // Parse Mac-specific extraction modes (only one of these may be set):
+    //   --apple-double  : write data fork as the host file + ._<basename>
+    //                     sidecar containing real-name + Finder-info + rsrc fork
+    //   --macbinary     : write a single MacBinary v1 .bin file
+    bool modeAppleDouble = false;
+    bool modeMacBinary   = false;
+    std::vector<std::string> positional;
+    for (const auto& a : args) {
+        if (a == "--apple-double") {
+            modeAppleDouble = true;
+        } else if (a == "--macbinary") {
+            modeMacBinary = true;
+        } else {
+            positional.push_back(a);
+        }
+    }
+    if (modeAppleDouble && modeMacBinary) {
+        printError("--apple-double and --macbinary are mutually exclusive");
+        return 1;
+    }
+
+    if (positional.size() < 2) {
         printError("Missing arguments");
         printCommandHelp("extract");
         return 1;
     }
 
-    const std::string& imagePath = args[0];
-    const std::string& filename = args[1];
+    const std::string& imagePath = positional[0];
+    const std::string& filename = positional[1];
 
     // Determine output path
     std::string outputPath;
-    if (args.size() > 2) {
-        outputPath = args[2];
+    if (positional.size() > 2) {
+        outputPath = positional[2];
     } else {
         // Extract just the filename from the path (remove directory components)
         size_t lastSlash = filename.find_last_of("/\\");
@@ -1146,6 +1170,11 @@ int CLI::cmdExtract(const std::vector<std::string>& args) {
         if (!disk.handler->fileExists(filename)) {
             printError("File not found: " + filename);
             return 1;
+        }
+
+        if (modeAppleDouble || modeMacBinary) {
+            return extractMacintoshSpecial(disk, filename, outputPath,
+                                           modeAppleDouble, modeMacBinary);
         }
 
         auto data = disk.handler->readFile(filename);
@@ -2213,6 +2242,226 @@ int CLI::cmdValidate(const std::vector<std::string>& args) {
     } catch (const DiskException& e) {
         printError(e.what());
         return 1;
+    }
+}
+
+int CLI::extractMacintoshSpecial(LoadedDisk& disk,
+                                   const std::string& filename,
+                                   const std::string& outputPath,
+                                   bool modeAppleDouble,
+                                   bool modeMacBinary) {
+    auto* hfs = dynamic_cast<rde::MacintoshHFSHandler*>(disk.handler.get());
+    auto* mfs = dynamic_cast<rde::MacintoshMFSHandler*>(disk.handler.get());
+    if (!hfs && !mfs) {
+        printError("--apple-double / --macbinary are Macintosh-only options");
+        return 1;
+    }
+
+    // Pull metadata + forks from whichever handler matches.
+    rde::AppleDoubleInput ad;
+    rde::MacBinaryInput   mb;
+
+    if (hfs) {
+        // Resolve path and look up the cached CatalogChild.
+        auto pickByName = [&](const std::string& path)
+            -> const rde::MacintoshHFSHandler::CatalogChild* {
+            // resolvePath is private; use listFiles + name match in current dir.
+            // For Phase 2 we look for the file under its parent: split and walk.
+            // Simpler: leverage findEntry-style search via listFiles tree.
+            // Implemented via listFiles + manual search.
+            auto root = hfs->listFiles("");
+            (void)root;
+            // Walk path components and resolve via listFiles per dir.
+            std::string p = path;
+            while (!p.empty() && p.front() == '/') p.erase(p.begin());
+            std::vector<std::string> parts;
+            std::string cur;
+            for (char c : p) {
+                if (c == '/') { if (!cur.empty()) parts.push_back(cur); cur.clear(); }
+                else cur.push_back(c);
+            }
+            if (!cur.empty()) parts.push_back(cur);
+            if (parts.empty()) return nullptr;
+            const std::string leaf = parts.back();
+            // Build parent path string.
+            std::string parentPath;
+            for (size_t i = 0; i + 1 < parts.size(); ++i) {
+                if (i > 0) parentPath += "/";
+                parentPath += parts[i];
+            }
+            auto entries = hfs->listFiles(parentPath);
+            (void)entries;  // we only needed the side-effect of validation
+            // We can't reach the underlying CatalogChild via listFiles alone,
+            // so fall through to a direct lookup helper exposed on the handler.
+            return nullptr;
+        };
+        (void)pickByName;
+
+        // The handler does not expose a public path→CatalogChild API. We add
+        // a simple lookup by walking m_byCNID; to do that without reaching
+        // into private state we instead require the caller to fetch the
+        // record via an exposed method. For Phase 2 simplicity we expose
+        // it via a tiny lambda that reads through the existing public APIs:
+        // findEntry on the CNID space, since extractFork already does so.
+        //
+        // Workaround: we duplicate the lookup using listFiles parent/leaf.
+        // It's enough to find the matching CatalogChild as long as we keep
+        // the search shallow.
+        std::string leafName;
+        std::string parentPath;
+        {
+            std::string p = filename;
+            while (!p.empty() && p.front() == '/') p.erase(p.begin());
+            const size_t pos = p.find_last_of('/');
+            if (pos == std::string::npos) {
+                leafName = p;
+            } else {
+                parentPath = p.substr(0, pos);
+                leafName = p.substr(pos + 1);
+            }
+        }
+        // Iterate the parent's listing and re-fetch the child via byCNID.
+        auto entries = hfs->listFiles(parentPath);
+        // Match by name to find CNID; then look up the full record.
+        const rde::MacintoshHFSHandler::CatalogChild* match = nullptr;
+        // Add a public lookup to MacintoshHFSHandler for this — done below.
+        match = hfs->lookupByPath(filename);
+        if (!match) {
+            printError("Macintosh AppleDouble/MacBinary: file not found: " + filename);
+            return 1;
+        }
+
+        std::vector<uint8_t> dataFork = hfs->extractFork(match->cnid, 0x00);
+        std::vector<uint8_t> rsrcFork = hfs->extractFork(match->cnid, 0xFF);
+
+        if (modeAppleDouble) {
+            ad.macRomanName = match->macRomanName;
+            ad.finderInfo.assign(match->finfo, match->finfo + 16);
+            ad.finderInfo.insert(ad.finderInfo.end(),
+                                 match->fxinfo, match->fxinfo + 16);
+            ad.resourceFork = rsrcFork;
+
+            // Write data fork to outputPath, sidecar to ._<basename>.
+            std::ofstream df(outputPath, std::ios::binary);
+            if (!df) { printError("Cannot create: " + outputPath); return 1; }
+            if (!dataFork.empty()) {
+                df.write(reinterpret_cast<const char*>(dataFork.data()),
+                         static_cast<std::streamsize>(dataFork.size()));
+            }
+            df.close();
+
+            // Sidecar path: prefix the leaf basename with "._".
+            std::filesystem::path opath = outputPath;
+            std::filesystem::path sidecar = opath.parent_path() / ("._" + opath.filename().string());
+            const auto sidecarBytes = rde::buildAppleDoubleSidecar(ad);
+            std::ofstream sf(sidecar, std::ios::binary);
+            if (!sf) { printError("Cannot create: " + sidecar.string()); return 1; }
+            sf.write(reinterpret_cast<const char*>(sidecarBytes.data()),
+                     static_cast<std::streamsize>(sidecarBytes.size()));
+            sf.close();
+            if (!m_quiet) {
+                std::cout << "Extracted (AppleDouble): " << filename
+                          << " -> " << outputPath
+                          << " + " << sidecar.string() << "\n";
+            }
+            return 0;
+        }
+
+        // MacBinary
+        mb.macRomanName = match->macRomanName;
+        std::memcpy(mb.fileType, match->fileType, 4);
+        std::memcpy(mb.creator,  match->creator,  4);
+        // Finder flags high byte at FInfo offset 8 (per Inside Mac FInfo layout).
+        mb.finderFlagsHi = match->finfo[8];
+        std::memcpy(mb.finderInfoLocation, match->finfo + 10, 6);
+        // Protected flag: HFS uses Finder flags low bit 0 (FInfo[9] bit 0).
+        mb.protectedFlag = static_cast<uint8_t>((match->finfo[9] & 0x01) != 0 ? 1 : 0);
+        mb.dataLength = match->dataLogical;
+        mb.rsrcLength = match->rsrcLogical;
+        mb.createDate = match->createDate;
+        mb.modifyDate = match->modifyDate;
+        mb.dataFork   = std::move(dataFork);
+        mb.resourceFork = std::move(rsrcFork);
+
+        const auto bytes = rde::buildMacBinary(mb);
+        std::ofstream of(outputPath, std::ios::binary);
+        if (!of) { printError("Cannot create: " + outputPath); return 1; }
+        of.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+        of.close();
+        if (!m_quiet) {
+            std::cout << "Extracted (MacBinary): " << filename << " -> "
+                      << outputPath << " (" << bytes.size() << " bytes)\n";
+        }
+        return 0;
+    }
+
+    // MFS path
+    {
+        const auto* m = mfs->lookupByName(filename);
+        if (!m) {
+            printError("Macintosh AppleDouble/MacBinary: file not found: " + filename);
+            return 1;
+        }
+        std::vector<uint8_t> dataFork = mfs->extractFork(m->dataStartBlock, m->dataLogical);
+        std::vector<uint8_t> rsrcFork = mfs->extractFork(m->rsrcStartBlock, m->rsrcLogical);
+
+        if (modeAppleDouble) {
+            ad.macRomanName = m->macRomanName;
+            // MFS Finder info: 16-byte flUsrWds. Pad to 32 with zeros so the
+            // sidecar layout matches the HFS variant exactly.
+            ad.finderInfo.assign(m->flUsrWds, m->flUsrWds + 16);
+            ad.finderInfo.resize(32, 0);
+            ad.resourceFork = rsrcFork;
+
+            std::ofstream df(outputPath, std::ios::binary);
+            if (!df) { printError("Cannot create: " + outputPath); return 1; }
+            if (!dataFork.empty()) {
+                df.write(reinterpret_cast<const char*>(dataFork.data()),
+                         static_cast<std::streamsize>(dataFork.size()));
+            }
+            df.close();
+            std::filesystem::path opath = outputPath;
+            std::filesystem::path sidecar = opath.parent_path() / ("._" + opath.filename().string());
+            const auto sidecarBytes = rde::buildAppleDoubleSidecar(ad);
+            std::ofstream sf(sidecar, std::ios::binary);
+            if (!sf) { printError("Cannot create: " + sidecar.string()); return 1; }
+            sf.write(reinterpret_cast<const char*>(sidecarBytes.data()),
+                     static_cast<std::streamsize>(sidecarBytes.size()));
+            sf.close();
+            if (!m_quiet) {
+                std::cout << "Extracted (AppleDouble): " << filename
+                          << " -> " << outputPath
+                          << " + " << sidecar.string() << "\n";
+            }
+            return 0;
+        }
+
+        // MacBinary
+        mb.macRomanName = m->macRomanName;
+        std::memcpy(mb.fileType, m->fileType, 4);
+        std::memcpy(mb.creator,  m->creator,  4);
+        mb.finderFlagsHi = m->flUsrWds[8];
+        std::memcpy(mb.finderInfoLocation, m->flUsrWds + 10, 6);
+        mb.protectedFlag = static_cast<uint8_t>(m->locked ? 1 : 0);
+        mb.dataLength = m->dataLogical;
+        mb.rsrcLength = m->rsrcLogical;
+        mb.createDate = m->createDate;
+        mb.modifyDate = m->modifyDate;
+        mb.dataFork = std::move(dataFork);
+        mb.resourceFork = std::move(rsrcFork);
+
+        const auto bytes = rde::buildMacBinary(mb);
+        std::ofstream of(outputPath, std::ios::binary);
+        if (!of) { printError("Cannot create: " + outputPath); return 1; }
+        of.write(reinterpret_cast<const char*>(bytes.data()),
+                 static_cast<std::streamsize>(bytes.size()));
+        of.close();
+        if (!m_quiet) {
+            std::cout << "Extracted (MacBinary): " << filename << " -> "
+                      << outputPath << " (" << bytes.size() << " bytes)\n";
+        }
+        return 0;
     }
 }
 

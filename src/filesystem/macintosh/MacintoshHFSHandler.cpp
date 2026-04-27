@@ -255,6 +255,7 @@ void MacintoshHFSHandler::parseCatalogLeafNode(const uint8_t* node, size_t nodeS
 
         CatalogChild child;
         child.name = name;
+        child.macRomanName = macRomanName;
         child.isDirectory = (recType == REC_FOLDER);
 
         if (recType == REC_FOLDER) {
@@ -273,10 +274,15 @@ void MacintoshHFSHandler::parseCatalogLeafNode(const uint8_t* node, size_t nodeS
             child.rsrcLogical  = be32(d + 0x24);
             for (size_t k = 0; k < 6; ++k) child.dataExtents[k] = be16(d + 0x4a + k * 2);
             for (size_t k = 0; k < 6; ++k) child.rsrcExtents[k] = be16(d + 0x56 + k * 2);
-            // Standard HFS file record dates live at offsets 0x2e (create) and
-            // 0x32 (modify).
-            child.createDate = be32(d + 0x2e);
-            child.modifyDate = be32(d + 0x32);
+            // Inside Mac File Manager: HFS file record dates live at offsets
+            // 0x2c (create), 0x30 (modify), 0x34 (backup). Verified against
+            // Python reference macdiskimage.py:5075.
+            child.createDate = be32(d + 0x2c);
+            child.modifyDate = be32(d + 0x30);
+            // SPEC §1648: AppleDouble entry-id 9 takes 16-byte FInfo from
+            // catalog data offset 0x04 followed by 16-byte FXInfo from 0x38.
+            std::memcpy(child.finfo,  d + 0x04, 16);
+            std::memcpy(child.fxinfo, d + 0x38, 16);
         } else {
             continue;  // thread record — skip
         }
@@ -411,6 +417,11 @@ MacintoshHFSHandler::resolvePath(const std::string& path) const {
         found = match;
     }
     return found;
+}
+
+const MacintoshHFSHandler::CatalogChild*
+MacintoshHFSHandler::lookupByPath(const std::string& path) const {
+    return resolvePath(path);
 }
 
 std::vector<FileEntry> MacintoshHFSHandler::listFiles(const std::string& path) {
