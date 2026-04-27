@@ -235,6 +235,8 @@ bool X68000XDFImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::MSXDMK:
         case DiskFormat::MSXXSA:
         case DiskFormat::X68000XDF:
+        case DiskFormat::MacIMG:
+        case DiskFormat::MacDC42:
             return false;
     }
     return false;
@@ -282,6 +284,8 @@ std::string X68000XDFImage::getDiagnostics() const {
         case FileSystemType::MSXDOS2:
         case FileSystemType::FAT12:
         case FileSystemType::FAT16:
+        case FileSystemType::HFS:
+        case FileSystemType::MFS:
             oss << "Unknown"; break;
     }
     oss << "\n";

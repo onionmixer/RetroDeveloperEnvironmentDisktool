@@ -135,6 +135,10 @@ Platform DiskImageFactory::getPlatformForFormat(DiskFormat format) {
         case DiskFormat::X68000DIM:
             return Platform::X68000;
 
+        case DiskFormat::MacIMG:
+        case DiskFormat::MacDC42:
+            return Platform::Macintosh;
+
         case DiskFormat::Unknown:
             return Platform::Unknown;
     }
@@ -275,6 +279,17 @@ DiskGeometry DiskImageFactory::getDefaultGeometry(DiskFormat format) {
             geom.bytesPerSector = 1024;
             break;
 
+        // Macintosh formats: default to 1.44MB (most common modern target).
+        // Logical 512B sectors; physical track/side layout is not preserved
+        // (raw IMG and DC42 store sector streams, not GCR/MFM tracks).
+        case DiskFormat::MacIMG:
+        case DiskFormat::MacDC42:
+            geom.tracks = 80;
+            geom.sides = 2;
+            geom.sectorsPerTrack = 18;
+            geom.bytesPerSector = 512;
+            break;
+
         case DiskFormat::Unknown:
             // Return empty geometry for unknown formats
             break;
@@ -306,6 +321,10 @@ std::vector<std::string> DiskImageFactory::getExtensions(DiskFormat format) {
             return {".xdf"};
         case DiskFormat::X68000DIM:
             return {".dim"};
+        case DiskFormat::MacIMG:
+            return {".img"};
+        case DiskFormat::MacDC42:
+            return {".image", ".dc42"};
         case DiskFormat::Unknown:
             return {};
     }
@@ -350,6 +369,13 @@ std::vector<DiskFormat> DiskImageFactory::getFormatsForPlatform(Platform platfor
             };
             break;
 
+        case Platform::Macintosh:
+            formats = {
+                DiskFormat::MacIMG,
+                DiskFormat::MacDC42
+            };
+            break;
+
         case Platform::Unknown:
             break;
     }
@@ -389,7 +415,10 @@ DiskFormat DiskImageFactory::getFormatFromExtension(const std::string& extension
     if (ext == ".xsa") return DiskFormat::MSXXSA;
     if (ext == ".xdf") return DiskFormat::X68000XDF;
     if (ext == ".dim") return DiskFormat::X68000DIM;
-    if (ext == ".dsk") return DiskFormat::Unknown;  // Ambiguous
+    if (ext == ".image") return DiskFormat::MacDC42;
+    if (ext == ".dc42") return DiskFormat::MacDC42;
+    if (ext == ".dsk") return DiskFormat::Unknown;  // Ambiguous (Apple/MSX/Mac)
+    if (ext == ".img") return DiskFormat::Unknown;  // Ambiguous (Mac vs other raw)
 
     return DiskFormat::Unknown;
 }

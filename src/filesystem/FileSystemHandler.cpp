@@ -88,6 +88,8 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::createForType(FileSystemTy
 
         case FileSystemType::Unknown:
         case FileSystemType::FAT16:
+        case FileSystemType::HFS:    // Macintosh handlers wired in M3/M4
+        case FileSystemType::MFS:    // Macintosh handlers wired in M3/M4
             return nullptr;
     }
     return nullptr;
