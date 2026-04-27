@@ -307,10 +307,13 @@ rde::DiskFormat FormatDetector::detectMSXFormat(const std::vector<uint8_t>& data
                                                  const std::string& ext) {
     (void)ext;  // Currently unused, but kept for future extension
 
-    // Require a valid BPB. Size match alone is not enough — Mac 720K MFM (737280)
-    // collides with MSX 720K, and other plain raw images can also share these sizes.
-    // Returning MSXDSK as a default for any matching size mis-classifies non-MSX disks.
-    if (isValidMSXBPB(data)) {
+    // MSX boot sectors start with an x86 jump opcode (EB short or E9 long).
+    // We use the jump byte alone — not the full BPB — as the filter:
+    //   * Mac 720K MFM disks (first byte 'L' = 0x4C, "LK" boot sig) are excluded.
+    //   * MSX disks with corrupt BPB metadata (e.g. zeroed bytesPerSector) still
+    //     classify as MSXDSK so the filesystem layer can emit the proper
+    //     "invalid_bpb_or_filesystem_init_failed" diagnostic.
+    if (data.size() >= 512 && (data[0] == 0xEB || data[0] == 0xE9)) {
         return rde::DiskFormat::MSXDSK;
     }
 
