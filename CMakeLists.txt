@@ -83,6 +83,7 @@ set(FILESYSTEM_SOURCES
     src/filesystem/msx/MSXFATUtils.cpp
     src/filesystem/x68000/Human68kHandler.cpp
     src/filesystem/macintosh/MacintoshHFSHandler.cpp
+    src/filesystem/macintosh/MacintoshMFSHandler.cpp
 )
 
 # Utility sources

@@ -10,6 +10,7 @@
 #include "rdedisktool/filesystem/AppleProDOSHandler.h"
 #include "rdedisktool/filesystem/x68000/Human68kHandler.h"
 #include "rdedisktool/filesystem/MacintoshHFSHandler.h"
+#include "rdedisktool/filesystem/MacintoshMFSHandler.h"
 #include "rdedisktool/DiskImage.h"
 
 namespace rde {
@@ -70,8 +71,10 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::create(DiskImage* disk) {
             auto h = std::make_unique<MacintoshHFSHandler>();
             if (h->initialize(disk)) return h;
         }
-        // MFS handler arrives at M4. Until then we explicitly return nullptr
-        // so the CLI surfaces "unsupported FS" rather than crashing.
+        if (fs == FileSystemType::MFS) {
+            auto m = std::make_unique<MacintoshMFSHandler>();
+            if (m->initialize(disk)) return m;
+        }
         return nullptr;
     }
 
@@ -102,10 +105,11 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::createForType(FileSystemTy
 
         case FileSystemType::HFS:
             return std::make_unique<MacintoshHFSHandler>();
+        case FileSystemType::MFS:
+            return std::make_unique<MacintoshMFSHandler>();
 
         case FileSystemType::Unknown:
         case FileSystemType::FAT16:
-        case FileSystemType::MFS:    // Macintosh MFS handler wired in M4
             return nullptr;
     }
     return nullptr;
