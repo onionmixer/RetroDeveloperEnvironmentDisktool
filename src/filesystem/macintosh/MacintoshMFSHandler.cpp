@@ -245,11 +245,17 @@ std::vector<uint8_t> MacintoshMFSHandler::readFile(const std::string& filename) 
 
 bool MacintoshMFSHandler::writeFile(const std::string&, const std::vector<uint8_t>&,
                                      const FileMetadata&) {
-    return false;  // Phase 2
+    throw NotImplementedException("Macintosh MFS write support is not yet implemented (Phase 2)");
 }
-bool MacintoshMFSHandler::deleteFile(const std::string&) { return false; }
-bool MacintoshMFSHandler::renameFile(const std::string&, const std::string&) { return false; }
-bool MacintoshMFSHandler::format(const std::string&) { return false; }
+bool MacintoshMFSHandler::deleteFile(const std::string&) {
+    throw NotImplementedException("Macintosh MFS delete support is not yet implemented (Phase 2)");
+}
+bool MacintoshMFSHandler::renameFile(const std::string&, const std::string&) {
+    throw NotImplementedException("Macintosh MFS rename support is not yet implemented (Phase 2)");
+}
+bool MacintoshMFSHandler::format(const std::string&) {
+    throw NotImplementedException("Macintosh MFS format support is not yet implemented (Phase 2)");
+}
 
 size_t MacintoshMFSHandler::getFreeSpace() const {
     return static_cast<size_t>(m_mdb.freeAllocBlocks) *
