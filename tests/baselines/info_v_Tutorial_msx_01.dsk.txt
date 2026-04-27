@@ -1,0 +1,38 @@
+File: Examples/Tutorial_msx_01/Tutorial_msx_01.dsk
+Format: MSX DSK
+Platform: MSX
+
+Geometry:
+  Tracks: 80
+  Sides: 2
+  Sectors/Track: 9
+  Bytes/Sector: 512
+  Total Size: 737280 bytes
+
+File System: FAT12
+Free Space: 727040 bytes
+Total Space: 730112 bytes
+
+BootDisk Detection:
+  BootDisk: no
+  Profile: msxdos
+  Confidence: medium
+  ProtectionMode: strict
+  Reason: filesystem profile detected
+Write Protected: No
+
+Diagnostics:
+Format: MSX DSK (.dsk)
+Size: 737280 bytes
+Tracks: 80
+Sides: 2
+Sectors/Track: 9
+Bytes/Sector: 512
+File System: FAT12
+OEM Name: NMS 2.0P
+Media Descriptor: 0xf9
+Clusters: 713
+Bytes/Cluster: 1024
+Write Protected: No
+Modified: No
+

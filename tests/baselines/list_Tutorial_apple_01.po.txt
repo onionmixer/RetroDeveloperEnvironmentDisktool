@@ -1,0 +1,9 @@
+Directory listing for: Examples/Tutorial_apple_01/Tutorial_apple_01.po
+Volume: /TUTORIAL
+
+Name                                Size  Type  Attr
+----------------------------------------------------
+HELLO                               3058  FILE   RHL
+----------------------------------------------------
+1 file(s), 3058 bytes
+Free space: 136192 bytes

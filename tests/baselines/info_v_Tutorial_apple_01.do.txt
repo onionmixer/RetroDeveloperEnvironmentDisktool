@@ -1,0 +1,34 @@
+File: Examples/Tutorial_apple_01/Tutorial_apple_01.do
+Format: Apple II DOS Order
+Platform: Apple II
+
+Geometry:
+  Tracks: 35
+  Sides: 1
+  Sectors/Track: 16
+  Bytes/Sector: 256
+  Total Size: 143360 bytes
+
+File System: ProDOS
+Volume: DISK VOLUME 0
+Free Space: 0 bytes
+Total Space: 135168 bytes
+
+BootDisk Detection:
+  BootDisk: no
+  Profile: prodos
+  Confidence: medium
+  ProtectionMode: strict
+  Reason: filesystem profile detected
+Write Protected: No
+
+Diagnostics:
+Format: Apple II DOS Order (.do/.dsk)
+Size: 143360 bytes
+Tracks: 35
+Sectors/Track: 16
+Bytes/Sector: 256
+File System: ProDOS
+Write Protected: No
+Modified: No
+

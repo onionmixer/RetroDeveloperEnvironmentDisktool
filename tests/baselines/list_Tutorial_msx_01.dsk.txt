@@ -1,0 +1,9 @@
+Directory listing for: Examples/Tutorial_msx_01/Tutorial_msx_01.dsk
+Volume: 
+
+Name                                Size  Type  Attr
+----------------------------------------------------
+HELLO.COM                           2899  FILE      
+----------------------------------------------------
+1 file(s), 2899 bytes
+Free space: 727040 bytes
