@@ -243,18 +243,343 @@ std::vector<uint8_t> MacintoshMFSHandler::readFile(const std::string& filename) 
     return extractFork(e->dataStartBlock, e->dataLogical);
 }
 
-bool MacintoshMFSHandler::writeFile(const std::string&, const std::vector<uint8_t>&,
-                                     const FileMetadata&) {
-    throw NotImplementedException("Macintosh MFS write support is not yet implemented (Phase 2)");
+// 12-bit BE allocation map writer. Inverse of readAllocEntry.
+void MacintoshMFSHandler::writeAllocEntry(std::vector<uint8_t>& raw,
+                                            size_t index, uint16_t value) const {
+    const size_t mapOffset = MFS_MDB_OFFSET + MFS_MAP_OFFSET_IN_MDB;
+    const size_t byteOffset = mapOffset + (index * 12) / 8;
+    if (byteOffset + 1 >= raw.size()) return;
+    const uint16_t v = value & 0x0FFF;
+    if ((index & 1U) == 0) {
+        // entry occupies high 12 bits of (b0 << 8 | b1):  b0 = v[11..4],
+        // b1 high nibble = v[3..0], b1 low nibble preserves the next entry.
+        raw[byteOffset] = static_cast<uint8_t>((v >> 4) & 0xFF);
+        raw[byteOffset + 1] = static_cast<uint8_t>(
+            (raw[byteOffset + 1] & 0x0F) | ((v & 0x0F) << 4));
+    } else {
+        // entry occupies low 12 bits of (b0 << 8 | b1):  b0 high nibble
+        // preserves the previous entry, b0 low nibble = v[11..8], b1 = v[7..0].
+        raw[byteOffset] = static_cast<uint8_t>(
+            (raw[byteOffset] & 0xF0) | ((v >> 8) & 0x0F));
+        raw[byteOffset + 1] = static_cast<uint8_t>(v & 0xFF);
+    }
 }
-bool MacintoshMFSHandler::deleteFile(const std::string&) {
-    throw NotImplementedException("Macintosh MFS delete support is not yet implemented (Phase 2)");
+
+std::vector<uint16_t> MacintoshMFSHandler::findFreeBlocks(
+        const std::vector<uint8_t>& /*raw*/, size_t need) const {
+    std::vector<uint16_t> out;
+    out.reserve(need);
+    for (size_t idx = 0; idx < m_mdb.numAllocBlocks && out.size() < need; ++idx) {
+        const uint16_t v = readAllocEntry(idx);
+        if (v == MFS_FREE_OR_BAD_0) {
+            // free
+            out.push_back(static_cast<uint16_t>(idx + 2));
+        }
+    }
+    return out;
 }
+
+bool MacintoshMFSHandler::insertDirectoryEntry(std::vector<uint8_t>& raw,
+                                                  const DirEntry& de) const {
+    const uint64_t dirStartByte =
+        static_cast<uint64_t>(m_mdb.directoryStart) * 512ULL;
+    const uint64_t dirEndByte =
+        dirStartByte + static_cast<uint64_t>(m_mdb.directoryLength) * 512ULL;
+    if (dirEndByte > raw.size()) return false;
+
+    // Build the entry buffer.
+    const size_t nameLen = std::min<size_t>(de.name.size(), 255);
+    size_t entryLen = MFS_DIR_ENTRY_HEADER + 1U + nameLen;
+    if (entryLen & 1U) entryLen += 1;
+
+    std::vector<uint8_t> buf(entryLen, 0);
+    buf[0x00] = static_cast<uint8_t>(0x80 | (de.locked ? 0x01 : 0x00));  // flFlags
+    buf[0x01] = 0;                                                         // flTyp
+    std::memcpy(buf.data() + 0x02, de.fileType, 4);
+    std::memcpy(buf.data() + 0x06, de.creator, 4);
+    // 0x0a..0x11 left zero (Finder fdLocation / fdFldr / fdIconID)
+    // flFlNum @ 0x12
+    buf[0x12] = static_cast<uint8_t>((de.cnid >> 24) & 0xFF);
+    buf[0x13] = static_cast<uint8_t>((de.cnid >> 16) & 0xFF);
+    buf[0x14] = static_cast<uint8_t>((de.cnid >> 8) & 0xFF);
+    buf[0x15] = static_cast<uint8_t>(de.cnid & 0xFF);
+    // flStBlk @ 0x16
+    buf[0x16] = static_cast<uint8_t>((de.dataStartBlock >> 8) & 0xFF);
+    buf[0x17] = static_cast<uint8_t>(de.dataStartBlock & 0xFF);
+    // flLgLen @ 0x18
+    buf[0x18] = static_cast<uint8_t>((de.dataLogical >> 24) & 0xFF);
+    buf[0x19] = static_cast<uint8_t>((de.dataLogical >> 16) & 0xFF);
+    buf[0x1a] = static_cast<uint8_t>((de.dataLogical >> 8) & 0xFF);
+    buf[0x1b] = static_cast<uint8_t>(de.dataLogical & 0xFF);
+    // flPyLen @ 0x1c (round logical up to allocBlockSize)
+    const uint32_t physical =
+        m_mdb.allocBlockSize == 0 ? 0 :
+        ((de.dataLogical + m_mdb.allocBlockSize - 1) / m_mdb.allocBlockSize) *
+            m_mdb.allocBlockSize;
+    buf[0x1c] = static_cast<uint8_t>((physical >> 24) & 0xFF);
+    buf[0x1d] = static_cast<uint8_t>((physical >> 16) & 0xFF);
+    buf[0x1e] = static_cast<uint8_t>((physical >> 8) & 0xFF);
+    buf[0x1f] = static_cast<uint8_t>(physical & 0xFF);
+    // flRStBlk @ 0x20, flRLgLen @ 0x22, flRPyLen @ 0x26 — all zero (no rsrc fork)
+    // flCrDat @ 0x2a, flMdDat @ 0x2e
+    auto putBE32 = [&](size_t off, uint32_t v) {
+        buf[off]     = static_cast<uint8_t>((v >> 24) & 0xFF);
+        buf[off + 1] = static_cast<uint8_t>((v >> 16) & 0xFF);
+        buf[off + 2] = static_cast<uint8_t>((v >> 8) & 0xFF);
+        buf[off + 3] = static_cast<uint8_t>(v & 0xFF);
+    };
+    putBE32(0x2a, de.createDate);
+    putBE32(0x2e, de.modifyDate);
+    // flNam @ 0x32
+    buf[0x32] = static_cast<uint8_t>(nameLen);
+    std::memcpy(buf.data() + 0x33, de.name.data(), nameLen);
+
+    // Find a 512-byte directory block with enough trailing free space
+    // (sentinel-zero region must be large enough to fit the new entry +
+    // a final zero terminator byte).
+    for (uint64_t blockBase = dirStartByte; blockBase < dirEndByte;
+         blockBase += MFS_DIR_BLOCK_SIZE) {
+        size_t off = 0;
+        while (off + MFS_DIR_ENTRY_HEADER + 1 <= MFS_DIR_BLOCK_SIZE) {
+            const uint8_t flags = raw[blockBase + off];
+            if (flags == 0) break;
+            const uint8_t nLen = raw[blockBase + off + 0x32];
+            size_t curLen = MFS_DIR_ENTRY_HEADER + 1U + nLen;
+            if (curLen & 1U) curLen += 1;
+            off += curLen;
+        }
+        if (off + entryLen <= MFS_DIR_BLOCK_SIZE) {
+            std::memcpy(raw.data() + blockBase + off, buf.data(), entryLen);
+            return true;
+        }
+    }
+    return false;  // directory full
+}
+
+void MacintoshMFSHandler::updateMdb(std::vector<uint8_t>& raw,
+                                      int delta_files, int delta_freeBlocks,
+                                      uint32_t bumpNxtFNum) const {
+    if (raw.size() < MFS_MDB_OFFSET + 0x40) return;
+    auto getBE16 = [&](size_t off) -> uint16_t {
+        return static_cast<uint16_t>(
+            (static_cast<uint16_t>(raw[off]) << 8) | raw[off + 1]);
+    };
+    auto putBE16 = [&](size_t off, uint16_t v) {
+        raw[off]     = static_cast<uint8_t>((v >> 8) & 0xFF);
+        raw[off + 1] = static_cast<uint8_t>(v & 0xFF);
+    };
+    auto putBE32 = [&](size_t off, uint32_t v) {
+        raw[off]     = static_cast<uint8_t>((v >> 24) & 0xFF);
+        raw[off + 1] = static_cast<uint8_t>((v >> 16) & 0xFF);
+        raw[off + 2] = static_cast<uint8_t>((v >> 8) & 0xFF);
+        raw[off + 3] = static_cast<uint8_t>(v & 0xFF);
+    };
+    const size_t base = MFS_MDB_OFFSET;
+    if (delta_files != 0) {
+        const uint16_t cur = getBE16(base + 0x0c);
+        putBE16(base + 0x0c, static_cast<uint16_t>(static_cast<int>(cur) + delta_files));
+    }
+    if (delta_freeBlocks != 0) {
+        const uint16_t cur = getBE16(base + 0x22);
+        putBE16(base + 0x22, static_cast<uint16_t>(static_cast<int>(cur) + delta_freeBlocks));
+    }
+    if (bumpNxtFNum > 0) {
+        putBE32(base + 0x1e, bumpNxtFNum);
+    }
+}
+
+bool MacintoshMFSHandler::writeFile(const std::string& filename,
+                                      const std::vector<uint8_t>& data,
+                                      const FileMetadata& metadata) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+
+    // Resolve the file name (last path segment).
+    std::string leaf = filename;
+    {
+        const size_t pos = leaf.find_last_of('/');
+        if (pos != std::string::npos) leaf = leaf.substr(pos + 1);
+    }
+    if (leaf.empty() || leaf.size() > 255) return false;
+
+    if (findEntry(leaf) != nullptr) {
+        // Phase 2 simplification: refuse overwrite. Caller is expected to
+        // delete-then-add for replacement (see CLI cmdAdd behavior).
+        return false;
+    }
+
+    if (m_mdb.allocBlockSize == 0) return false;
+
+    // Compute how many allocation blocks are needed.
+    const size_t blockSize = m_mdb.allocBlockSize;
+    const size_t needed =
+        data.empty() ? 0 : ((data.size() + blockSize - 1) / blockSize);
+
+    // Snapshot the disk's raw bytes, mutate locally, then commit via
+    // setRawData() so the container layer (IMG) can save back atomically.
+    std::vector<uint8_t> raw = m_disk->getRawData();
+
+    // Allocate blocks.
+    std::vector<uint16_t> blocks = findFreeBlocks(raw, needed);
+    if (blocks.size() < needed) return false;  // disk full
+
+    // Write the data into the allocation blocks.
+    for (size_t i = 0; i < needed; ++i) {
+        const uint64_t off = blockOffset(blocks[i]);
+        if (off + blockSize > raw.size()) return false;
+        const size_t srcOff = i * blockSize;
+        const size_t take = std::min<size_t>(blockSize, data.size() - srcOff);
+        std::memcpy(raw.data() + off, data.data() + srcOff, take);
+        if (take < blockSize) {
+            std::memset(raw.data() + off + take, 0, blockSize - take);
+        }
+    }
+
+    // Update the allocation map: chain n → n+1, last → MFS_CHAIN_END.
+    for (size_t i = 0; i < needed; ++i) {
+        const uint16_t cur = blocks[i];
+        const uint16_t next = (i + 1 < needed) ? blocks[i + 1] : MFS_CHAIN_END;
+        const size_t mapIdx = static_cast<size_t>(cur) - 2;
+        writeAllocEntry(raw, mapIdx, next);
+    }
+
+    // Build the directory entry.
+    DirEntry de;
+    de.used = true;
+    de.locked = metadata.readOnly;
+    de.cnid = m_mdb.nextFileNumber;
+    de.dataStartBlock = needed > 0 ? blocks[0] : 0;
+    de.dataLogical = static_cast<uint32_t>(data.size());
+    de.rsrcStartBlock = 0;
+    de.rsrcLogical = 0;
+    // Default Finder type/creator: ttxt 'TEXT' if the caller didn't supply
+    // anything via metadata. fileType byte from FileMetadata is Apple-centric;
+    // for Mac fixtures we leave both zeroed if not overridden.
+    de.name = leaf;
+    de.createDate = 0;
+    de.modifyDate = 0;
+
+    if (!insertDirectoryEntry(raw, de)) {
+        // Roll back: free the blocks we just allocated.
+        for (size_t i = 0; i < needed; ++i) {
+            const size_t mapIdx = static_cast<size_t>(blocks[i]) - 2;
+            writeAllocEntry(raw, mapIdx, MFS_FREE_OR_BAD_0);
+        }
+        return false;
+    }
+
+    // Update MDB scalars.
+    updateMdb(raw, +1, -static_cast<int>(needed), m_mdb.nextFileNumber + 1);
+
+    // Commit.
+    m_disk->setRawData(raw);
+
+    // Refresh the cached structures.
+    m_entries.clear();
+    parseMdb();
+    parseDirectory();
+    return true;
+}
+
+bool MacintoshMFSHandler::deleteFile(const std::string& filename) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+    const DirEntry* victim = findEntry(filename);
+    if (!victim) return false;
+    if (victim->rsrcStartBlock != 0) {
+        // Phase 2 simplification: only handle the data fork case for now.
+        // Files with a non-empty resource fork are out of scope here.
+        return false;
+    }
+
+    std::vector<uint8_t> raw = m_disk->getRawData();
+    const uint32_t targetCNID = victim->cnid;
+
+    // Walk the data-fork chain and free every block.
+    const size_t blockSize = m_mdb.allocBlockSize;
+    if (blockSize == 0) return false;
+    int freedBlocks = 0;
+    {
+        uint16_t block = victim->dataStartBlock;
+        std::vector<bool> visited(static_cast<size_t>(m_mdb.numAllocBlocks) + 4, false);
+        while (block >= 2) {
+            const size_t mapIdx = static_cast<size_t>(block) - 2;
+            if (mapIdx >= m_mdb.numAllocBlocks) break;
+            if (visited[mapIdx]) break;
+            visited[mapIdx] = true;
+            const uint16_t next = readAllocEntry(mapIdx);
+            writeAllocEntry(raw, mapIdx, MFS_FREE_OR_BAD_0);
+            freedBlocks++;
+            if (next == MFS_CHAIN_END || next == MFS_FREE_OR_BAD_0 ||
+                next == MFS_FREE_OR_BAD_F) break;
+            block = next;
+        }
+    }
+
+    // Locate the directory entry by CNID and clear its used bit. We sweep
+    // every directory block; entries don't cross block boundaries.
+    const uint64_t dirStartByte =
+        static_cast<uint64_t>(m_mdb.directoryStart) * 512ULL;
+    const uint64_t dirEndByte =
+        dirStartByte + static_cast<uint64_t>(m_mdb.directoryLength) * 512ULL;
+    bool cleared = false;
+    for (uint64_t blockBase = dirStartByte; blockBase < dirEndByte && !cleared;
+         blockBase += MFS_DIR_BLOCK_SIZE) {
+        size_t off = 0;
+        while (off + MFS_DIR_ENTRY_HEADER + 1 <= MFS_DIR_BLOCK_SIZE) {
+            const uint8_t flags = raw[blockBase + off];
+            if (flags == 0) break;
+            const uint8_t nLen = raw[blockBase + off + 0x32];
+            size_t curLen = MFS_DIR_ENTRY_HEADER + 1U + nLen;
+            if (curLen & 1U) curLen += 1;
+
+            // Read the cnid field at offset 0x12.
+            const uint32_t cnid =
+                (static_cast<uint32_t>(raw[blockBase + off + 0x12]) << 24) |
+                (static_cast<uint32_t>(raw[blockBase + off + 0x13]) << 16) |
+                (static_cast<uint32_t>(raw[blockBase + off + 0x14]) << 8)  |
+                 static_cast<uint32_t>(raw[blockBase + off + 0x15]);
+            if (cnid == targetCNID) {
+                // Mark unused — clear flFlags. The entry payload remains as
+                // tombstone; MFS dir scan stops at flFlags == 0 sentinel, so
+                // we also have to keep entries packed. Simplest correct
+                // approach: shift subsequent entries in this block up by
+                // curLen bytes and zero the trailing region.
+                const size_t blockTail = MFS_DIR_BLOCK_SIZE - off - curLen;
+                if (blockTail > 0) {
+                    std::memmove(raw.data() + blockBase + off,
+                                 raw.data() + blockBase + off + curLen,
+                                 blockTail);
+                }
+                std::memset(raw.data() + blockBase + (MFS_DIR_BLOCK_SIZE - curLen),
+                            0, curLen);
+                cleared = true;
+                break;
+            }
+            off += curLen;
+        }
+    }
+    if (!cleared) return false;
+
+    updateMdb(raw, -1, +freedBlocks, /*bumpNxtFNum*/ 0);
+    m_disk->setRawData(raw);
+
+    // Refresh caches.
+    m_entries.clear();
+    parseMdb();
+    parseDirectory();
+    return true;
+}
+
 bool MacintoshMFSHandler::renameFile(const std::string&, const std::string&) {
-    throw NotImplementedException("Macintosh MFS rename support is not yet implemented (Phase 2)");
+    throw NotImplementedException("Macintosh MFS rename support is not yet implemented (Phase 2 — M7+)");
 }
 bool MacintoshMFSHandler::format(const std::string&) {
-    throw NotImplementedException("Macintosh MFS format support is not yet implemented (Phase 2)");
+    throw NotImplementedException("Macintosh MFS format support is not yet implemented (Phase 2 — M7+)");
 }
 
 size_t MacintoshMFSHandler::getFreeSpace() const {

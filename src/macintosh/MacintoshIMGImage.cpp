@@ -56,8 +56,27 @@ void MacintoshIMGImage::load(const std::filesystem::path& path) {
     initGeometryFromSize(sz);
 }
 
-void MacintoshIMGImage::save(const std::filesystem::path& /*path*/) {
-    throw NotImplementedException("Macintosh IMG save (Phase 2)");
+void MacintoshIMGImage::save(const std::filesystem::path& path) {
+    const std::filesystem::path target = path.empty() ? m_filePath : path;
+    if (target.empty()) {
+        throw InvalidFormatException("Macintosh IMG save: no destination path");
+    }
+    std::ofstream out(target, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw InvalidFormatException("Cannot open for write: " + target.string());
+    }
+    if (!m_data.empty()) {
+        out.write(reinterpret_cast<const char*>(m_data.data()),
+                  static_cast<std::streamsize>(m_data.size()));
+    }
+    if (!out) {
+        throw InvalidFormatException("Write failed: " + target.string());
+    }
+    out.flush();
+    if (!out) {
+        throw InvalidFormatException("Flush failed: " + target.string());
+    }
+    m_modified = false;
 }
 
 void MacintoshIMGImage::create(const DiskGeometry& /*geometry*/) {
