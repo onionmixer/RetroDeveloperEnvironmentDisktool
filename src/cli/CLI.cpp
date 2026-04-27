@@ -153,6 +153,13 @@ bool isCriticalBootFile(rde::BootDiskProfile profile, const std::string& filenam
             static const std::set<std::string> s = {"HUMAN.SYS", "COMMAND.X"};
             return s.count(f) > 0;
         }
+        case rde::BootDiskProfile::Macintosh: {
+            // Mac-Roman names are case-preserving but matching uses upper-case
+            // (baseNameUpper above) — System and Finder are the standard
+            // boot-critical names in System 6/7-era HFS / MFS volumes.
+            static const std::set<std::string> s = {"SYSTEM", "FINDER"};
+            return s.count(f) > 0;
+        }
         case rde::BootDiskProfile::Unknown:
             return false;
     }
@@ -248,6 +255,11 @@ std::vector<std::pair<uint32_t, uint32_t>> protectedLinearRanges(const rde::Disk
         case rde::BootDiskProfile::Human68k:
             // Human68k boot/IPL sector only.
             addRange(0, 0);
+            break;
+        case rde::BootDiskProfile::Macintosh:
+            // Mac classic boot blocks occupy logical sectors 0 and 1
+            // (the first 1024 bytes of the volume). Sector 2 is the MDB.
+            addRange(0, 1);
             break;
         case rde::BootDiskProfile::Unknown:
             break;
@@ -475,7 +487,7 @@ std::vector<std::string> CLI::parseGlobalOptions(const std::vector<std::string>&
             }
             auto profile = BootDiskPolicy::profileFromString(args[++i]);
             if (!profile.has_value()) {
-                m_globalOptionError = "Invalid --bootdisk-profile value (use dos33|prodos|msxdos|human68k|unknown)";
+                m_globalOptionError = "Invalid --bootdisk-profile value (use dos33|prodos|msxdos|human68k|macintosh|unknown)";
                 break;
             }
             m_forcedBootProfile = profile;
@@ -502,7 +514,7 @@ void CLI::printHelp() const {
     std::cout << "  --bootdisk-mode <m>  Boot disk protection mode: strict|warn|off\n";
     std::cout << "  --force-bootdisk     Override boot disk mutation block\n";
     std::cout << "  --force-system-file  Force delete of boot-critical files without prompt\n";
-    std::cout << "  --bootdisk-profile <p>  Force boot profile: dos33|prodos|msxdos|human68k|unknown\n";
+    std::cout << "  --bootdisk-profile <p>  Force boot profile: dos33|prodos|msxdos|human68k|macintosh|unknown\n";
     std::cout << "  --keep-backup        Keep .bak file when saving changes\n";
     std::cout << "  -h, --help       Show help message\n";
     std::cout << "  -V, --version    Show version information\n";

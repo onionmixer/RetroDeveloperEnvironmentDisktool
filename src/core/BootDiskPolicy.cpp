@@ -45,10 +45,11 @@ BootDiskProfile profileFromFS(FileSystemType fsType, DiskFormat format) {
         case FileSystemType::MSXDOS2:
         case FileSystemType::FAT12: return BootDiskProfile::MSXDOS;
         case FileSystemType::Human68k: return BootDiskProfile::Human68k;
+        case FileSystemType::HFS:
+        case FileSystemType::MFS:
+            return BootDiskProfile::Macintosh;
         case FileSystemType::Unknown:
         case FileSystemType::FAT16:
-        case FileSystemType::HFS:    // Macintosh boot profile activated at M5
-        case FileSystemType::MFS:    // Macintosh boot profile activated at M5
             break;
     }
 
@@ -78,6 +79,7 @@ std::optional<BootDiskProfile> BootDiskPolicy::profileFromString(const std::stri
     if (v == "prodos") return BootDiskProfile::ProDOS;
     if (v == "msxdos") return BootDiskProfile::MSXDOS;
     if (v == "human68k" || v == "human") return BootDiskProfile::Human68k;
+    if (v == "macintosh" || v == "mac") return BootDiskProfile::Macintosh;
     return std::nullopt;
 }
 
@@ -97,6 +99,7 @@ const char* BootDiskPolicy::profileToString(BootDiskProfile profile) {
         case BootDiskProfile::ProDOS: return "prodos";
         case BootDiskProfile::MSXDOS: return "msxdos";
         case BootDiskProfile::Human68k: return "human68k";
+        case BootDiskProfile::Macintosh: return "macintosh";
     }
     return "unknown";
 }
@@ -153,6 +156,39 @@ BootDiskDetection BootDiskPolicy::detect(const std::string& imagePath,
         case BootDiskProfile::Human68k:
             hasSystemFiles = hasAny(rootNames, {"HUMAN.SYS", "COMMAND.X", "CONFIG.SYS", "AUTOEXEC.BAT"});
             break;
+        case BootDiskProfile::Macintosh: {
+            // PLAN §19.7: require LK boot block AND System+Finder presence.
+            // Either root-level (e.g. typical MFS) or under "System Folder"
+            // (HFS samples in MacDiskcopy/sample/). Both names must be present.
+            const auto& raw = image.getRawData();
+            const bool hasLK = raw.size() >= 2 && raw[0] == 'L' && raw[1] == 'K';
+            if (!hasLK) {
+                hasSystemFiles = false;
+                break;
+            }
+            const bool rootHasBoth =
+                rootNames.count("SYSTEM") > 0 && rootNames.count("FINDER") > 0;
+            if (rootHasBoth) {
+                hasSystemFiles = true;
+                break;
+            }
+            // Check inside "System Folder" if it appears at the root.
+            if (handler && rootNames.count("SYSTEM FOLDER") > 0) {
+                try {
+                    auto sub = handler->listFiles("System Folder");
+                    bool sf = false, ff = false;
+                    for (const auto& e : sub) {
+                        const std::string n = toUpper(e.name);
+                        if (n == "SYSTEM") sf = true;
+                        if (n == "FINDER") ff = true;
+                    }
+                    hasSystemFiles = sf && ff;
+                } catch (...) {
+                    hasSystemFiles = false;
+                }
+            }
+            break;
+        }
         case BootDiskProfile::Unknown:
             break;
     }
