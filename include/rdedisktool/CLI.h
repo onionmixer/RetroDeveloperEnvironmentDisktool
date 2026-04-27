@@ -156,6 +156,14 @@ private:
     int cmdValidate(const std::vector<std::string>& args);
     int cmdListFormats(const std::vector<std::string>& args);
 
+    // Macintosh AppleDouble / MacBinary export helper called from cmdExtract.
+    // Defined in CLI.cpp where LoadedDisk is in scope.
+    int extractMacintoshSpecial(LoadedDisk& disk,
+                                 const std::string& filename,
+                                 const std::string& outputPath,
+                                 bool modeAppleDouble,
+                                 bool modeMacBinary);
+
     // Initialize built-in commands
     void initCommands();
 
