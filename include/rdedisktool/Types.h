@@ -14,7 +14,8 @@ enum class Platform {
     Unknown,
     AppleII,
     MSX,
-    X68000
+    X68000,
+    Macintosh       // Classic Macintosh (System 6/7-era floppies)
 };
 
 // Disk format enumeration
@@ -33,7 +34,10 @@ enum class DiskFormat {
     MSXXSA,         // XSA compressed (.xsa)
     // X68000 formats
     X68000XDF,      // X68000 XDF format (.xdf)
-    X68000DIM       // X68000 DIM format (.dim)
+    X68000DIM,      // X68000 DIM format (.dim)
+    // Macintosh formats
+    MacIMG,         // Raw 512-byte sector image (.img / .dsk)
+    MacDC42         // Apple Disk Copy 4.2 container (.image / .dc42)
 };
 
 // File system type
@@ -48,7 +52,10 @@ enum class FileSystemType {
     FAT12,          // FAT12
     FAT16,          // FAT16
     // X68000
-    Human68k        // Human68k file system
+    Human68k,       // Human68k file system
+    // Macintosh
+    HFS,            // Hierarchical File System
+    MFS             // Macintosh File System (flat)
 };
 
 // Sector order for Apple II
@@ -197,6 +204,7 @@ inline const char* platformToString(Platform p) {
         case Platform::AppleII: return "Apple II";
         case Platform::MSX: return "MSX";
         case Platform::X68000: return "X68000";
+        case Platform::Macintosh: return "Macintosh";
     }
     return "Unknown";
 }
@@ -215,6 +223,8 @@ inline const char* formatToString(DiskFormat f) {
         case DiskFormat::MSXXSA: return "MSX XSA";
         case DiskFormat::X68000XDF: return "X68000 XDF";
         case DiskFormat::X68000DIM: return "X68000 DIM";
+        case DiskFormat::MacIMG: return "Macintosh Raw Image";
+        case DiskFormat::MacDC42: return "Apple Disk Copy 4.2";
     }
     return "Unknown";
 }
@@ -236,6 +246,8 @@ inline const char* formatToIdentifier(DiskFormat f) {
         case DiskFormat::MSXXSA: return "MSXXSA";
         case DiskFormat::X68000XDF: return "X68000XDF";
         case DiskFormat::X68000DIM: return "X68000DIM";
+        case DiskFormat::MacIMG: return "MacIMG";
+        case DiskFormat::MacDC42: return "MacDC42";
     }
     return "Unknown";
 }
@@ -254,6 +266,8 @@ inline const char* formatToExtension(DiskFormat f) {
         case DiskFormat::MSXXSA: return ".xsa";
         case DiskFormat::X68000XDF: return ".xdf";
         case DiskFormat::X68000DIM: return ".dim";
+        case DiskFormat::MacIMG: return ".img";
+        case DiskFormat::MacDC42: return ".image";
     }
     return "";
 }
@@ -286,6 +300,8 @@ inline const char* fileSystemTypeToString(FileSystemType f) {
         case FileSystemType::FAT12: return "FAT12";
         case FileSystemType::FAT16: return "FAT16";
         case FileSystemType::Human68k: return "Human68k";
+        case FileSystemType::HFS: return "HFS";
+        case FileSystemType::MFS: return "MFS";
     }
     return "Unknown";
 }

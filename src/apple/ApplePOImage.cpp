@@ -235,6 +235,8 @@ bool ApplePOImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::MSXXSA:
         case DiskFormat::X68000XDF:
         case DiskFormat::X68000DIM:
+        case DiskFormat::MacIMG:
+        case DiskFormat::MacDC42:
             return false;
     }
     return false;
@@ -310,6 +312,8 @@ std::string ApplePOImage::getDiagnostics() const {
         case FileSystemType::FAT12:
         case FileSystemType::FAT16:
         case FileSystemType::Human68k:
+        case FileSystemType::HFS:
+        case FileSystemType::MFS:
             oss << "Unknown\n";
             break;
     }

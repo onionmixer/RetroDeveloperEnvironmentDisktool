@@ -188,6 +188,8 @@ bool MSXXSAImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::MSXXSA:
         case DiskFormat::X68000XDF:
         case DiskFormat::X68000DIM:
+        case DiskFormat::MacIMG:
+        case DiskFormat::MacDC42:
             return false;
     }
     return false;
@@ -303,6 +305,8 @@ std::string MSXXSAImage::getDiagnostics() const {
         case FileSystemType::DOS33:
         case FileSystemType::ProDOS:
         case FileSystemType::Human68k:
+        case FileSystemType::HFS:
+        case FileSystemType::MFS:
             oss << "Unknown"; break;
     }
     oss << "\n";

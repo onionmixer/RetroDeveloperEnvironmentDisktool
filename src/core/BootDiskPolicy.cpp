@@ -47,6 +47,8 @@ BootDiskProfile profileFromFS(FileSystemType fsType, DiskFormat format) {
         case FileSystemType::Human68k: return BootDiskProfile::Human68k;
         case FileSystemType::Unknown:
         case FileSystemType::FAT16:
+        case FileSystemType::HFS:    // Macintosh boot profile activated at M5
+        case FileSystemType::MFS:    // Macintosh boot profile activated at M5
             break;
     }
 

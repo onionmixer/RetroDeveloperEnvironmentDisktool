@@ -66,6 +66,13 @@ set(X68000_SOURCES
     src/x68000/X68000DIMImage.cpp
 )
 
+# Macintosh format sources
+set(MAC_SOURCES
+    src/macintosh/MacintoshDiskImage.cpp
+    src/macintosh/MacintoshIMGImage.cpp
+    src/macintosh/MacintoshDC42Image.cpp
+)
+
 # Filesystem sources
 set(FILESYSTEM_SOURCES
     src/filesystem/FileSystemHandler.cpp
@@ -97,6 +104,7 @@ add_library(rdedisktool_lib STATIC
     ${APPLE_SOURCES}
     ${MSX_SOURCES}
     ${X68000_SOURCES}
+    ${MAC_SOURCES}
     ${FILESYSTEM_SOURCES}
     ${UTILS_SOURCES}
 )
