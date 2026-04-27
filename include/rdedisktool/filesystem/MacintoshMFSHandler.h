@@ -101,8 +101,18 @@ private:
     // Read a 12-bit BE big-endian allocation map entry. Index 0 corresponds
     // to allocation block 2.
     uint16_t readAllocEntry(size_t index) const;
+    // Write a 12-bit BE big-endian allocation map entry. Mirrors readAllocEntry.
+    void writeAllocEntry(std::vector<uint8_t>& raw, size_t index, uint16_t value) const;
     // Convert allocation block N → byte offset in the raw stream.
     uint64_t blockOffset(uint16_t block) const;
+    // Walk the alloc map and return all currently-free block numbers (>= 2).
+    std::vector<uint16_t> findFreeBlocks(const std::vector<uint8_t>& raw, size_t need) const;
+    // Write a fresh directory entry into the directory area. Returns false if
+    // no slot fits within any 512B directory block.
+    bool insertDirectoryEntry(std::vector<uint8_t>& raw, const DirEntry& de) const;
+    // Update MDB scalar fields (drFreeBks, drNmFls, drNxtFNum) in-place.
+    void updateMdb(std::vector<uint8_t>& raw, int delta_files,
+                   int delta_freeBlocks, uint32_t bumpNxtFNum) const;
 };
 
 } // namespace rde
