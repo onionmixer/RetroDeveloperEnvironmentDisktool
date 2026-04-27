@@ -806,17 +806,18 @@ bool CLI::saveDiskImage(DiskImage* image, const std::string& operation) {
             }
         }
 
+        // POSIX std::filesystem::rename is atomic within a single filesystem
+        // and overwrites the destination — there is no portable case where
+        // retrying after removing the original is safer than failing cleanly.
+        // The previous code path "remove(original) + rename" risked permanent
+        // data loss when the second rename also failed (the original was
+        // already gone). PLAN_MACFDD.md §19.9.
         std::filesystem::rename(tmpPath, originalPath, ec);
         if (ec) {
-            // Retry by removing original first on platforms that don't allow overwrite rename.
-            std::filesystem::remove(originalPath, ec);
-            ec.clear();
-            std::filesystem::rename(tmpPath, originalPath, ec);
-        }
-
-        if (ec) {
             printError("Failed to replace original file after " + operation + ": " + ec.message());
-            std::filesystem::remove(tmpPath, ec);
+            // Best-effort cleanup of the temp file. Original is preserved.
+            std::error_code rmErr;
+            std::filesystem::remove(tmpPath, rmErr);
             return false;
         }
 
