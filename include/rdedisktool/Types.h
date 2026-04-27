@@ -219,6 +219,27 @@ inline const char* formatToString(DiskFormat f) {
     return "Unknown";
 }
 
+// Returns the canonical identifier (matches the C++ enum value name) for the format.
+// Useful for stable, machine-readable output (e.g. `list-formats`) where translated
+// human strings from formatToString() would be too noisy.
+inline const char* formatToIdentifier(DiskFormat f) {
+    switch (f) {
+        case DiskFormat::Unknown: return "Unknown";
+        case DiskFormat::AppleDO: return "AppleDO";
+        case DiskFormat::ApplePO: return "ApplePO";
+        case DiskFormat::AppleNIB: return "AppleNIB";
+        case DiskFormat::AppleNIB2: return "AppleNIB2";
+        case DiskFormat::AppleWOZ1: return "AppleWOZ1";
+        case DiskFormat::AppleWOZ2: return "AppleWOZ2";
+        case DiskFormat::MSXDSK: return "MSXDSK";
+        case DiskFormat::MSXDMK: return "MSXDMK";
+        case DiskFormat::MSXXSA: return "MSXXSA";
+        case DiskFormat::X68000XDF: return "X68000XDF";
+        case DiskFormat::X68000DIM: return "X68000DIM";
+    }
+    return "Unknown";
+}
+
 inline const char* formatToExtension(DiskFormat f) {
     switch (f) {
         case DiskFormat::Unknown: return "";
