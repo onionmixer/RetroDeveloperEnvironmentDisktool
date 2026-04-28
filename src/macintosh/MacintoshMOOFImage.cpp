@@ -133,11 +133,13 @@ void MacintoshMOOFImage::decodeGcrIntoSectorStream() {
     std::string errAccum;
     size_t decodedCount = 0;
 
-    // Walk the TMAP. Mac GCR uses one TMAP entry per (track*sides + side):
-    // index = track*sides + side. 0xFF = no track present.
+    // Walk the TMAP. Per the MOOF spec (and snow's reference loader), TMAP
+    // is always a fixed 80×2 = 160-byte structure with track-major / side-
+    // minor layout: byte offset = track * 2 + side. For single-sided (400K)
+    // the side-1 entries are 0xFF.
     for (int track = 0; track < 80; ++track) {
         for (int side = 0; side < sides; ++side) {
-            const size_t tmapIdx = static_cast<size_t>(track * sides + side);
+            const size_t tmapIdx = static_cast<size_t>(track * 2 + side);
             const uint8_t trkIdx = m_tmap[tmapIdx];
             if (trkIdx == 0xFF) continue;
             if (trkIdx >= m_trks.size()) continue;
@@ -195,7 +197,8 @@ void MacintoshMOOFImage::decodeMfmIntoSectorStream() {
 
     for (int cyl = 0; cyl < kCylinders; ++cyl) {
         for (int head = 0; head < kHeads; ++head) {
-            const size_t tmapIdx = static_cast<size_t>(cyl * kHeads + head);
+            // TMAP layout is always track-major / side-minor (track*2 + side).
+            const size_t tmapIdx = static_cast<size_t>(cyl * 2 + head);
             const uint8_t trkIdx = m_tmap[tmapIdx];
             if (trkIdx == 0xFF) continue;
             if (trkIdx >= m_trks.size()) continue;
