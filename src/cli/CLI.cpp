@@ -55,6 +55,7 @@ rde::DiskFormat formatFromString(const std::string& str) {
     // ambiguous .img / .dsk extensions that are shared with Apple/MSX/X68000.
     if (s == "mac_img" || s == "macimg") return rde::DiskFormat::MacIMG;
     if (s == "mac_dc42" || s == "macdc42" || s == "dc42") return rde::DiskFormat::MacDC42;
+    if (s == "mac_moof" || s == "macmoof" || s == "moof") return rde::DiskFormat::MacMOOF;
     return rde::DiskFormat::Unknown;
 }
 
@@ -87,7 +88,8 @@ bool isFileSystemCompatible(rde::DiskFormat format, rde::FileSystemType fsType) 
                      format == rde::DiskFormat::X68000DIM);
     // Macintosh formats
     bool isMac = (format == rde::DiskFormat::MacIMG ||
-                  format == rde::DiskFormat::MacDC42);
+                  format == rde::DiskFormat::MacDC42 ||
+                  format == rde::DiskFormat::MacMOOF);
 
     if (isApple) {
         return (fsType == rde::FileSystemType::DOS33 ||
@@ -579,8 +581,9 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  Apple II:  do, po, nib, nb2, woz, woz1, woz2\n";
         std::cout << "  MSX:       msxdsk, dmk\n";
         std::cout << "  X68000:    xdf, dim\n";
-        std::cout << "  Macintosh: mac_img (raw 512B sectors)\n";
-        std::cout << "             mac_dc42 — read-only via load(); use 'convert' to produce\n";
+        std::cout << "  Macintosh: mac_img  (raw 512B sectors)\n";
+        std::cout << "             mac_dc42 (Apple Disk Copy 4.2 wrapper)\n";
+        std::cout << "             mac_moof (Applesauce MOOF, GCR 400K/800K + MFM 1.44M)\n";
         std::cout << "\nSupported Filesystems:\n";
         std::cout << "  Apple II:  dos33, prodos\n";
         std::cout << "  MSX:       msxdos, fat12\n";
@@ -603,6 +606,7 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  rdedisktool create mac.img -f mac_img --fs hfs -n MyVolume         # 1440K HFS\n";
         std::cout << "  rdedisktool create mac.img -f mac_img --fs hfs -n V -g 80:2:10:512 # 800K HFS\n";
         std::cout << "  rdedisktool create mfs.img -f mac_img --fs mfs -n V -g 80:1:10:512 # 400K MFS\n";
+        std::cout << "  rdedisktool create mac.moof -f mac_moof                            # 1440K MFM, blank\n";
         std::cout << "  rdedisktool create custom.do -f do -g 40:1:16:256\n";
         std::cout << "  rdedisktool create blank.po -f po\n";
         std::cout << "\nNotes:\n";
@@ -612,6 +616,9 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "    until you copy real System and Finder files into the volume.\n";
         std::cout << "  * mac_dc42 cannot be created from scratch — make a mac_img first,\n";
         std::cout << "    then `convert mac.img mac.image -f mac_dc42`.\n";
+        std::cout << "  * mac_moof create produces a blank GCR/MFM bitstream image. Add files\n";
+        std::cout << "    via `convert mac.moof mac.img -f mac_img` round-trip, or by giving\n";
+        std::cout << "    snow a writable HFS volume; snow auto-emits MOOF on eject.\n";
         std::cout << "  * MFS 800K is in the wild (e.g. some boot disks) but rdedisktool\n";
         std::cout << "    cannot create it: 800K @ 512B alloc blocks exceeds the 12-bit\n";
         std::cout << "    MFS allocation map. Use an emulator or hfsutils for that geometry.\n";
@@ -694,13 +701,19 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "\nSupported Conversions:\n";
         std::cout << "  Apple II:  do <-> po\n";
         std::cout << "  MSX:       dsk <-> dmk <-> xsa\n";
-        std::cout << "  Macintosh: mac_img <-> mac_dc42  (raw 512B sectors ↔ Disk Copy 4.2 wrapper)\n";
+        std::cout << "  Macintosh: mac_img <-> mac_dc42 <-> mac_moof  (all 3 are bidirectional)\n";
+        std::cout << "             mac_img  = raw 512B sectors\n";
+        std::cout << "             mac_dc42 = Apple Disk Copy 4.2 wrapper (ROR32+BE16 checksum)\n";
+        std::cout << "             mac_moof = Applesauce MOOF bitstream (GCR 400K/800K + MFM 1.44M)\n";
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool convert game.do game.po\n";
         std::cout << "  rdedisktool convert game.dsk game.xsa\n";
         std::cout << "  rdedisktool convert game.xsa game.dsk -f msxdsk\n";
         std::cout << "  rdedisktool convert game.image game.img -f mac_img   # DC42 → raw\n";
         std::cout << "  rdedisktool convert game.img game.dc42 -f mac_dc42   # raw → DC42\n";
+        std::cout << "  rdedisktool convert game.moof game.img -f mac_img    # MOOF → raw (decode)\n";
+        std::cout << "  rdedisktool convert game.img game.moof -f mac_moof   # raw → MOOF (encode)\n";
+        std::cout << "  rdedisktool convert game.dc42 game.moof -f mac_moof  # DC42 → MOOF\n";
         std::cout << "\nNotes:\n";
         std::cout << "  * XSA compression achieves ~99%% ratio for typical disk images.\n";
         std::cout << "  * mac_dc42 → mac_img drops the DC42 header + tag bytes;\n";
