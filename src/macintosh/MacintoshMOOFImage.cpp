@@ -1,4 +1,5 @@
 #include "rdedisktool/macintosh/MacintoshMOOFImage.h"
+#include "rdedisktool/macintosh/MacGcrDecoder.h"
 #include "rdedisktool/DiskImageFactory.h"
 #include "rdedisktool/Exceptions.h"
 
@@ -100,17 +101,79 @@ void MacintoshMOOFImage::load(const std::filesystem::path& path) {
     m_writeProtected = m_info.writeProtected;
     m_fileSystemDetected = false;
 
-    // E1 scope guard: only chunk parsing is implemented in this milestone.
-    // The bitstream → 512B sector decoder lives in the next phase (E1-γ).
-    // Throwing here keeps the loaded but undecoded image from being used
-    // by HFS / MFS handlers as if it were already a raw sector stream.
-    throw NotImplementedException(
-        "Macintosh MOOF: chunk parsing OK (disk type " +
-        std::to_string(static_cast<int>(m_info.diskType)) +
-        ", " + m_info.creator +
-        "), but bitstream → 512B sector decode is not yet implemented "
-        "(E1-γ scope). Use `convert` from another tool, or wait for the "
-        "decode phase to land.");
+    // GCR (400K / 800K) — decode the bitstream tracks into a flat 512B sector
+    // image. MFM (1.44M) is deferred to E2; throw if encountered.
+    if (m_info.diskType == DiskType::DsHdMfm144M) {
+        throw NotImplementedException(
+            "Macintosh MOOF 1.44M MFM decode is deferred to E2.");
+    }
+    if (m_info.diskType != DiskType::SsDdGcr400K &&
+        m_info.diskType != DiskType::DsDdGcr800K) {
+        throw InvalidFormatException(
+            "Macintosh MOOF: unsupported disk type " +
+            std::to_string(static_cast<int>(m_info.diskType)));
+    }
+
+    decodeGcrIntoSectorStream();
+
+    m_writeProtected = true;  // E1 is read-only
+}
+
+void MacintoshMOOFImage::decodeGcrIntoSectorStream() {
+    const int sides = (m_info.diskType == DiskType::DsDdGcr800K) ? 2 : 1;
+    const size_t totalSectors = static_cast<size_t>(macGcrLinearBlock(
+        sides, 80, 0, 0));
+    m_data.assign(totalSectors * SECTOR_SIZE, 0);
+
+    std::vector<bool> filled(totalSectors, false);
+    std::string errAccum;
+    size_t decodedCount = 0;
+
+    // Walk the TMAP. Mac GCR uses one TMAP entry per (track*sides + side):
+    // index = track*sides + side. 0xFF = no track present.
+    for (int track = 0; track < 80; ++track) {
+        for (int side = 0; side < sides; ++side) {
+            const size_t tmapIdx = static_cast<size_t>(track * sides + side);
+            const uint8_t trkIdx = m_tmap[tmapIdx];
+            if (trkIdx == 0xFF) continue;
+            if (trkIdx >= m_trks.size()) continue;
+
+            const TrkEntry& te = m_trks[trkIdx];
+            if (te.blockCount == 0 || te.bitOrByteCount == 0) continue;
+            const size_t startOff = static_cast<size_t>(te.startBlock) * 512u;
+            const size_t bitCount = static_cast<size_t>(te.bitOrByteCount);
+            const size_t byteLen  = (bitCount + 7) / 8;
+            if (startOff + byteLen > m_fileBytes.size()) {
+                throw InvalidFormatException(
+                    "MOOF TRKS entry " + std::to_string(trkIdx) +
+                    " runs past EOF");
+            }
+
+            auto sectors = decodeMacGcrTrack(
+                m_fileBytes.data() + startOff, bitCount, errAccum);
+            for (const auto& s : sectors) {
+                if (!s.headerChecksumOk || !s.dataChecksumOk) continue;
+                if (s.track != track || s.side != side) continue;
+                if (s.sector >= macGcrSectorsForTrack(track)) continue;
+                const size_t lin = macGcrLinearBlock(
+                    sides, s.track, s.side, s.sector);
+                if (lin >= totalSectors) continue;
+                if (filled[lin]) continue;
+                std::memcpy(m_data.data() + lin * SECTOR_SIZE,
+                            s.data.data(), SECTOR_SIZE);
+                filled[lin] = true;
+                ++decodedCount;
+            }
+        }
+    }
+
+    if (decodedCount == 0) {
+        throw InvalidFormatException(
+            "Macintosh MOOF: no sectors decoded from any track" +
+            (errAccum.empty() ? std::string() : (" (" + errAccum + ")")));
+    }
+
+    initGeometryFromSize(m_data.size());
 }
 
 void MacintoshMOOFImage::parseChunks(const std::vector<uint8_t>& bytes) {
@@ -277,9 +340,8 @@ std::string MacintoshMOOFImage::getDiagnostics() const {
         }
     }
     oss << "\n";
-    oss << "MOOF Notice: read-only chunk parsing (E1-α/β scope).\n"
-        << "             Bitstream → sector decode lands in E1-γ;\n"
-        << "             write support is deferred to E3.\n";
+    oss << "MOOF Notice: read-only — GCR 400K/800K decode supported.\n"
+        << "             1.44M MFM read (E2) and write (E3/E4) deferred.\n";
     return oss.str();
 }
 

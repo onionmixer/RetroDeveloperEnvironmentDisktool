@@ -65,7 +65,8 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::create(DiskImage* disk) {
 
     // Macintosh disk formats. The actual filesystem (HFS or MFS) is decided by
     // the MDB signature at sector 2 (offset 0x400) — see MacintoshDiskImage.
-    if (format == DiskFormat::MacIMG || format == DiskFormat::MacDC42) {
+    if (format == DiskFormat::MacIMG || format == DiskFormat::MacDC42 ||
+        format == DiskFormat::MacMOOF) {
         const FileSystemType fs = disk->getFileSystemType();
         if (fs == FileSystemType::HFS) {
             auto h = std::make_unique<MacintoshHFSHandler>();

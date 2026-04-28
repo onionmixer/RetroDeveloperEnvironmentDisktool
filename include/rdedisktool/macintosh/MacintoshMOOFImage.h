@@ -92,6 +92,10 @@ private:
     // InvalidFormatException on malformed structure or CRC failure.
     void parseChunks(const std::vector<uint8_t>& bytes);
 
+    // Walk the TMAP+TRKS, decode each GCR track via MacGcrDecoder, and write
+    // the resulting 512B sectors into m_data. Throws on unrecoverable errors.
+    void decodeGcrIntoSectorStream();
+
     // CRC32-ISO-HDLC (Gary S. Brown 1986) over bytes [12..end). Returns
     // 0 when caller asked to skip (header CRC == 0).
     static uint32_t computeCrc32(const uint8_t* data, size_t len);
