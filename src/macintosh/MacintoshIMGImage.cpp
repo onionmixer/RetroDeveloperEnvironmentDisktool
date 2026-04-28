@@ -80,8 +80,24 @@ void MacintoshIMGImage::save(const std::filesystem::path& path) {
     m_modified = false;
 }
 
-void MacintoshIMGImage::create(const DiskGeometry& /*geometry*/) {
-    throw NotImplementedException("Macintosh IMG create (Phase 2)");
+void MacintoshIMGImage::create(const DiskGeometry& geometry) {
+    // Mac IMG is a flat 512B-sector stream. The geometry's logical layout
+    // (tracks × sides × sectorsPerTrack × bytesPerSector) just gives us the
+    // total byte count to allocate; format() on the handler then fills in
+    // boot/MDB/directory bytes.
+    const size_t total = static_cast<size_t>(geometry.tracks) *
+                          static_cast<size_t>(geometry.sides) *
+                          static_cast<size_t>(geometry.sectorsPerTrack) *
+                          static_cast<size_t>(geometry.bytesPerSector);
+    if (total == 0 || (total % SECTOR_SIZE) != 0) {
+        throw InvalidFormatException("Macintosh IMG create: geometry must yield "
+                                      "a non-zero multiple of 512 bytes");
+    }
+    m_data.assign(total, 0);
+    m_geometry = geometry;
+    m_modified = true;
+    m_writeProtected = false;
+    m_fileSystemDetected = false;
 }
 
 bool MacintoshIMGImage::canConvertTo(DiskFormat format) const {
