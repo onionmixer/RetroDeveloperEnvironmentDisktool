@@ -180,6 +180,16 @@ private:
     bool removeCatalogLeafRecord(std::vector<uint8_t>& raw,
                                   uint32_t parentCNID,
                                   const std::string& name);
+
+    // C1 (nested mutation): split a path "Dir/Sub/Leaf" into the parent's
+    // CNID + leaf name. Pure leaf strings ("Leaf") return root parent.
+    // Throws NotImplementedException if the parent path doesn't resolve to
+    // an existing folder.
+    struct ParentResolved {
+        uint32_t parentCNID;
+        std::string leafName;
+    };
+    ParentResolved resolveParentForMutation(const std::string& path) const;
 };
 
 } // namespace rde
