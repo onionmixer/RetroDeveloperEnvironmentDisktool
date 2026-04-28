@@ -704,6 +704,205 @@ inline bool applyFolderValenceByCNID(
     return false;
 }
 
+// C2 helpers — read a folder record's body bytes (70 B) and patch the name
+// field of a folder thread record (recType=0x03) in place. Both walk the
+// catalog leaf chain by reassembling the catalog file from its initial
+// extents, navigate by key, and either copy out body bytes or mutate.
+
+inline bool readFolderRecordBody(
+        const std::vector<uint8_t>& raw,
+        uint16_t firstAllocBlock,
+        uint32_t allocBlockSize,
+        const std::array<uint16_t, 6>& catalogExtents,
+        uint32_t parentCNID,
+        const std::string& name,
+        std::vector<uint8_t>& outBody) {
+    outBody.clear();
+    if (allocBlockSize == 0) return false;
+
+    const uint64_t firstAllocByte =
+        static_cast<uint64_t>(firstAllocBlock) * 512ULL;
+    std::vector<uint8_t> catalogBytes;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint16_t start = catalogExtents[i * 2];
+        const uint16_t count = catalogExtents[i * 2 + 1];
+        if (count == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(start) * allocBlockSize;
+        const uint64_t len = static_cast<uint64_t>(count) * allocBlockSize;
+        if (off + len > raw.size()) return false;
+        catalogBytes.insert(catalogBytes.end(),
+            raw.begin() + off, raw.begin() + off + len);
+    }
+    if (catalogBytes.size() < 14 + 2 * 0x20) return false;
+    const uint16_t nodeSize = (static_cast<uint16_t>(catalogBytes[0x20]) << 8) |
+                                catalogBytes[0x21];
+    if (nodeSize == 0 || nodeSize > 16384 ||
+        catalogBytes.size() % nodeSize != 0) return false;
+
+    const uint32_t firstLeaf = (static_cast<uint32_t>(catalogBytes[0x18]) << 24) |
+                                (static_cast<uint32_t>(catalogBytes[0x19]) << 16) |
+                                (static_cast<uint32_t>(catalogBytes[0x1a]) << 8) |
+                                 static_cast<uint32_t>(catalogBytes[0x1b]);
+
+    uint32_t node = firstLeaf;
+    std::set<uint32_t> visited;
+    while (node != 0) {
+        if (visited.count(node)) break;
+        visited.insert(node);
+        const size_t nodeOff = static_cast<size_t>(node) * nodeSize;
+        if (nodeOff + nodeSize > catalogBytes.size()) break;
+        const uint8_t* p = catalogBytes.data() + nodeOff;
+        const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+
+        auto recOff = [&](uint16_t idx) -> uint16_t {
+            const size_t pos = nodeSize - 2 * (idx + 1);
+            return (static_cast<uint16_t>(p[pos]) << 8) | p[pos + 1];
+        };
+
+        for (uint16_t i = 0; i < numRecs; ++i) {
+            const uint16_t off = recOff(i);
+            const uint16_t end = recOff(static_cast<uint16_t>(i + 1));
+            if (off >= nodeSize || end > nodeSize || off >= end) continue;
+            const size_t recLen = static_cast<size_t>(end) - off;
+            const uint8_t kl = p[off];
+            if (1U + kl > recLen) continue;
+            if (kl < 6) continue;
+            const uint32_t pc =
+                (static_cast<uint32_t>(p[off + 0x02]) << 24) |
+                (static_cast<uint32_t>(p[off + 0x03]) << 16) |
+                (static_cast<uint32_t>(p[off + 0x04]) << 8) |
+                 static_cast<uint32_t>(p[off + 0x05]);
+            if (pc != parentCNID) continue;
+            const uint8_t nl = p[off + 0x06];
+            const std::string nm(reinterpret_cast<const char*>(p + off + 0x07),
+                                  std::min<size_t>(nl,
+                                    static_cast<size_t>(kl >= 6 ? kl - 6 : 0)));
+            if (nm != name) continue;
+
+            size_t dataOff = 1U + kl;
+            if (dataOff & 1U) dataOff += 1;
+            if (dataOff + 70 > recLen) return false;
+            const uint8_t recType = p[off + dataOff];
+            if (recType != 0x01) return false;  // not a folder record
+
+            outBody.assign(p + off + dataOff, p + off + dataOff + 70);
+            return true;
+        }
+        node = (static_cast<uint32_t>(p[0x00]) << 24) |
+               (static_cast<uint32_t>(p[0x01]) << 16) |
+               (static_cast<uint32_t>(p[0x02]) << 8) |
+                static_cast<uint32_t>(p[0x03]);
+    }
+    return false;
+}
+
+inline bool patchFolderThreadName(
+        std::vector<uint8_t>& raw,
+        uint16_t firstAllocBlock,
+        uint32_t allocBlockSize,
+        const std::array<uint16_t, 6>& catalogExtents,
+        uint32_t folderCNID,
+        const std::string& newName) {
+    if (allocBlockSize == 0) return false;
+    if (newName.size() > 31) return false;
+
+    const uint64_t firstAllocByte =
+        static_cast<uint64_t>(firstAllocBlock) * 512ULL;
+    std::vector<uint8_t> catalogBytes;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint16_t start = catalogExtents[i * 2];
+        const uint16_t count = catalogExtents[i * 2 + 1];
+        if (count == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(start) * allocBlockSize;
+        const uint64_t len = static_cast<uint64_t>(count) * allocBlockSize;
+        if (off + len > raw.size()) return false;
+        catalogBytes.insert(catalogBytes.end(),
+            raw.begin() + off, raw.begin() + off + len);
+    }
+    if (catalogBytes.size() < 14 + 2 * 0x20) return false;
+    const uint16_t nodeSize = (static_cast<uint16_t>(catalogBytes[0x20]) << 8) |
+                                catalogBytes[0x21];
+    if (nodeSize == 0 || nodeSize > 16384 ||
+        catalogBytes.size() % nodeSize != 0) return false;
+
+    const uint32_t firstLeaf = (static_cast<uint32_t>(catalogBytes[0x18]) << 24) |
+                                (static_cast<uint32_t>(catalogBytes[0x19]) << 16) |
+                                (static_cast<uint32_t>(catalogBytes[0x1a]) << 8) |
+                                 static_cast<uint32_t>(catalogBytes[0x1b]);
+
+    uint32_t node = firstLeaf;
+    std::set<uint32_t> visited;
+    while (node != 0) {
+        if (visited.count(node)) break;
+        visited.insert(node);
+        const size_t nodeOff = static_cast<size_t>(node) * nodeSize;
+        if (nodeOff + nodeSize > catalogBytes.size()) break;
+        uint8_t* p = catalogBytes.data() + nodeOff;
+        const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+
+        auto recOff = [&](uint16_t idx) -> uint16_t {
+            const size_t pos = nodeSize - 2 * (idx + 1);
+            return (static_cast<uint16_t>(p[pos]) << 8) | p[pos + 1];
+        };
+
+        for (uint16_t i = 0; i < numRecs; ++i) {
+            const uint16_t off = recOff(i);
+            const uint16_t end = recOff(static_cast<uint16_t>(i + 1));
+            if (off >= nodeSize || end > nodeSize || off >= end) continue;
+            const size_t recLen = static_cast<size_t>(end) - off;
+            const uint8_t kl = p[off];
+            if (1U + kl > recLen) continue;
+            if (kl < 6) continue;
+            const uint32_t pc =
+                (static_cast<uint32_t>(p[off + 0x02]) << 24) |
+                (static_cast<uint32_t>(p[off + 0x03]) << 16) |
+                (static_cast<uint32_t>(p[off + 0x04]) << 8) |
+                 static_cast<uint32_t>(p[off + 0x05]);
+            if (pc != folderCNID) continue;
+            const uint8_t nameLenInKey = p[off + 0x06];
+            if (nameLenInKey != 0) continue;  // need empty name (thread key)
+
+            size_t dataOff = 1U + kl;
+            if (dataOff & 1U) dataOff += 1;
+            if (dataOff + 46 > recLen) continue;
+            const uint8_t recType = p[off + dataOff];
+            if (recType != 0x03) continue;  // folder thread only
+
+            // Patch the body name field at body+0x0e..+0x2e (1 length byte +
+            // 31 name bytes). Zero-pad past the new name length.
+            const size_t nameOff = off + dataOff + 0x0e;
+            p[nameOff] = static_cast<uint8_t>(newName.size());
+            std::memcpy(p + nameOff + 1, newName.data(), newName.size());
+            std::memset(p + nameOff + 1 + newName.size(), 0,
+                        31 - newName.size());
+
+            // Spread catalog bytes back into raw.
+            size_t cursor = 0;
+            for (size_t e = 0; e < 3 && cursor < catalogBytes.size(); ++e) {
+                const uint16_t start = catalogExtents[e * 2];
+                const uint16_t count = catalogExtents[e * 2 + 1];
+                if (count == 0) continue;
+                const uint64_t writeOff = firstAllocByte +
+                    static_cast<uint64_t>(start) * allocBlockSize;
+                const size_t len = std::min<size_t>(
+                    static_cast<size_t>(count) * allocBlockSize,
+                    catalogBytes.size() - cursor);
+                std::memcpy(raw.data() + writeOff,
+                            catalogBytes.data() + cursor, len);
+                cursor += len;
+            }
+            return true;
+        }
+        node = (static_cast<uint32_t>(p[0x00]) << 24) |
+               (static_cast<uint32_t>(p[0x01]) << 16) |
+               (static_cast<uint32_t>(p[0x02]) << 8) |
+                static_cast<uint32_t>(p[0x03]);
+    }
+    return false;
+}
+
 } // namespace
 
 bool MacintoshHFSHandler::writeFile(const std::string& filename,
@@ -1243,38 +1442,161 @@ bool MacintoshHFSHandler::renameFile(const std::string& oldName,
     }
     const CatalogChild* target = lookupByPath(oldName);
     if (!target) return false;
+
+    // C2: folders go through the dedicated renameFolder path which preserves
+    // the folder's CNID + body bytes (DInfo / DXInfo / valence) so children
+    // stay attached.
     if (target->isDirectory) {
-        throw NotImplementedException("Macintosh HFS rename of folders is out of M10 scope");
+        return renameFolder(oldName, newName);
     }
 
     std::string newLeaf = newName;
     while (!newLeaf.empty() && newLeaf.front() == '/') newLeaf.erase(newLeaf.begin());
+    while (!newLeaf.empty() && newLeaf.back()  == '/') newLeaf.pop_back();
     if (newLeaf.find('/') != std::string::npos) {
-        throw NotImplementedException("Macintosh HFS rename across directories is out of M10 scope");
+        throw NotImplementedException("Macintosh HFS rename across directories is out of scope");
     }
     if (newLeaf.empty() || newLeaf.size() > 31) return false;
-    if (lookupByPath(newLeaf) != nullptr) return false;
 
-    // Rename in HFS = key change. The new key length differs whenever the
-    // new name length differs, which means the record size changes and
-    // potentially crosses node boundaries. M10 minimal scope: do it as a
-    // delete-then-add. This works as long as the leaf still has room and
-    // the new name doesn't overflow the catalog. Both branches are already
-    // protected by the existing M7/M10 guards.
-    //
-    // Snapshot the file's data fork before deletion so we can re-create it
-    // with the new name. Resource fork support is intentionally limited to
-    // empty rsrc forks here (target files added via M7 writeFile have no
-    // rsrc fork; existing files with rsrc forks fall through to the
-    // out-of-scope branch in deleteFile).
+    // C1: rename preserves the file's parent. Reconstruct the full target
+    // path under the same parent as oldName, then delete-then-add.
+    ParentResolved oldPR = resolveParentForMutation(oldName);
+    std::string newPath;
+    if (oldPR.parentCNID == HFS_ROOT_CNID) {
+        newPath = newLeaf;
+    } else {
+        // Strip oldLeaf from oldName and append newLeaf instead.
+        std::string trimmed = oldName;
+        while (!trimmed.empty() && trimmed.front() == '/') trimmed.erase(trimmed.begin());
+        while (!trimmed.empty() && trimmed.back()  == '/') trimmed.pop_back();
+        const auto slash = trimmed.rfind('/');
+        const std::string parentPath = (slash == std::string::npos)
+            ? std::string() : trimmed.substr(0, slash);
+        newPath = parentPath.empty() ? newLeaf : (parentPath + "/" + newLeaf);
+    }
+    if (lookupByPath(newPath) != nullptr) return false;
+
+    // Resource-fork-preserving rename is C3 work; reject for now to keep the
+    // file's rsrc bytes intact.
     if (target->rsrcLogical != 0) {
-        throw NotImplementedException("Macintosh HFS rename of files with resource forks is out of M10 scope");
+        throw NotImplementedException("Macintosh HFS rename of files with resource forks is out of scope (C3)");
     }
     std::vector<uint8_t> dataFork = extractFork(target->cnid, 0x00);
     if (!deleteFile(oldName)) return false;
     FileMetadata md;
     md.targetName = newLeaf;
-    return writeFile(newLeaf, dataFork, md);
+    return writeFile(newPath, dataFork, md);
+}
+
+bool MacintoshHFSHandler::renameFolder(const std::string& oldName,
+                                         const std::string& newName) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+
+    const CatalogChild* target = lookupByPath(oldName);
+    if (!target || !target->isDirectory) return false;
+    if (target->cnid == HFS_ROOT_CNID) {
+        throw NotImplementedException(
+            "Macintosh HFS folder rename: cannot rename the root volume "
+            "folder via this path. Re-format with the desired volume name.");
+    }
+
+    std::string newLeaf = newName;
+    while (!newLeaf.empty() && newLeaf.front() == '/') newLeaf.erase(newLeaf.begin());
+    while (!newLeaf.empty() && newLeaf.back()  == '/') newLeaf.pop_back();
+    if (newLeaf.find('/') != std::string::npos) {
+        throw NotImplementedException(
+            "Macintosh HFS folder rename across directories is out of scope");
+    }
+    if (newLeaf.empty() || newLeaf.size() > 31) return false;
+    if (m_mdb.allocBlockSize == 0) return false;
+
+    // Resolve the OLD path's parent + leaf; rename happens within the same
+    // parent (no move).
+    ParentResolved oldPR = resolveParentForMutation(oldName);
+    if (oldPR.leafName == newLeaf) return true;  // no-op rename
+
+    // Ensure the new name doesn't already exist under the same parent.
+    std::string newPath;
+    {
+        std::string trimmed = oldName;
+        while (!trimmed.empty() && trimmed.front() == '/') trimmed.erase(trimmed.begin());
+        while (!trimmed.empty() && trimmed.back()  == '/') trimmed.pop_back();
+        const auto slash = trimmed.rfind('/');
+        const std::string parentPath = (slash == std::string::npos)
+            ? std::string() : trimmed.substr(0, slash);
+        newPath = parentPath.empty() ? newLeaf : (parentPath + "/" + newLeaf);
+    }
+    if (lookupByPath(newPath) != nullptr) return false;
+
+    std::vector<uint8_t> raw = m_disk->getRawData();
+
+    // 1. Read the old folder record's body bytes (70 B) so we can preserve
+    //    cnid, valence, dates, DInfo, DXInfo, reserved on re-insert.
+    std::vector<uint8_t> folderBody;
+    if (!readFolderRecordBody(raw, m_mdb.firstAllocBlock,
+                                m_mdb.allocBlockSize, m_mdb.catalogExtents,
+                                oldPR.parentCNID, oldPR.leafName, folderBody)) {
+        return false;
+    }
+    if (folderBody.size() != 70) return false;
+
+    // 2. Build the new folder record (key with new name, body verbatim).
+    std::vector<uint8_t> newFolderRecord;
+    {
+        const uint8_t kl = static_cast<uint8_t>(6 + newLeaf.size());
+        newFolderRecord.push_back(kl);
+        newFolderRecord.push_back(0);  // reserved
+        newFolderRecord.push_back(static_cast<uint8_t>((oldPR.parentCNID >> 24) & 0xFF));
+        newFolderRecord.push_back(static_cast<uint8_t>((oldPR.parentCNID >> 16) & 0xFF));
+        newFolderRecord.push_back(static_cast<uint8_t>((oldPR.parentCNID >> 8) & 0xFF));
+        newFolderRecord.push_back(static_cast<uint8_t>(oldPR.parentCNID & 0xFF));
+        newFolderRecord.push_back(static_cast<uint8_t>(newLeaf.size()));
+        newFolderRecord.insert(newFolderRecord.end(),
+                                newLeaf.begin(), newLeaf.end());
+        if (newFolderRecord.size() & 1U) newFolderRecord.push_back(0);
+        newFolderRecord.insert(newFolderRecord.end(),
+                                folderBody.begin(), folderBody.end());
+    }
+
+    // 3. Remove the old folder record.
+    if (!removeCatalogLeafRecord(raw, oldPR.parentCNID, oldPR.leafName)) {
+        return false;
+    }
+
+    // 4. Insert the new folder record. If this throws (leaf full), `raw` is
+    //    discarded — disk untouched.
+    if (!insertCatalogLeafRecord(raw, oldPR.parentCNID, newLeaf, newFolderRecord)) {
+        return false;
+    }
+
+    // 5. Patch the folder's thread record body.name in place. The thread
+    //    record's KEY (parent=folder.cnid, name="") is invariant during a
+    //    rename, so this is size-neutral and can never push the leaf over.
+    if (!patchFolderThreadName(raw, m_mdb.firstAllocBlock,
+                                 m_mdb.allocBlockSize, m_mdb.catalogExtents,
+                                 target->cnid, newLeaf)) {
+        throw NotImplementedException(
+            "Macintosh HFS folder rename: thread record missing — catalog "
+            "inconsistent (volume may have been written by a tool that "
+            "omits thread records).");
+    }
+
+    // 6. MDB write-side bookkeeping (no count change — rename is an in-place
+    //    rewrite). Just bump drLsMod / drWrCnt.
+    bumpMdbWriteMetadata(raw, 0, 0, 0, toMacEpoch(std::time(nullptr)));
+
+    // 7. Commit + refresh.
+    m_disk->setRawData(raw);
+    m_childrenByParent.clear();
+    m_byCNID.clear();
+    m_extentsOverflow.clear();
+    parseMdb();
+    walkExtentsOverflowLeaves();
+    walkCatalogLeaves();
+    return true;
 }
 bool MacintoshHFSHandler::format(const std::string& volumeName) {
     if (!m_disk) return false;
