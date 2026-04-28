@@ -1,8 +1,10 @@
 #include "rdedisktool/macintosh/MacintoshDC42Image.h"
+#include "rdedisktool/macintosh/MacintoshIMGImage.h"
 #include "rdedisktool/macintosh/DC42Checksum.h"
 #include "rdedisktool/DiskImageFactory.h"
 #include "rdedisktool/Exceptions.h"
 
+#include <cstring>
 #include <fstream>
 #include <iomanip>
 #include <iterator>
@@ -147,8 +149,81 @@ void MacintoshDC42Image::load(const std::filesystem::path& path) {
     initGeometryFromSize(dataSize);
 }
 
-void MacintoshDC42Image::save(const std::filesystem::path& /*path*/) {
-    throw NotImplementedException("Macintosh DC42 save (Phase 2)");
+void MacintoshDC42Image::save(const std::filesystem::path& path) {
+    const std::filesystem::path target = path.empty() ? m_filePath : path;
+    if (target.empty()) {
+        throw InvalidFormatException("Macintosh DC42 save: no destination path");
+    }
+    if (m_data.empty() || (m_data.size() % 512) != 0) {
+        throw InvalidFormatException("Macintosh DC42 save: invalid raw data size");
+    }
+
+    std::vector<uint8_t> hdr(HEADER_SIZE, 0);
+
+    const size_t nameLen = std::min<size_t>(m_imageName.size(), 63);
+    hdr[0] = static_cast<uint8_t>(nameLen);
+    if (nameLen > 0) {
+        std::memcpy(hdr.data() + 1, m_imageName.data(), nameLen);
+    }
+
+    auto putBE32 = [&](size_t off, uint32_t v) {
+        hdr[off]     = static_cast<uint8_t>((v >> 24) & 0xFF);
+        hdr[off + 1] = static_cast<uint8_t>((v >> 16) & 0xFF);
+        hdr[off + 2] = static_cast<uint8_t>((v >> 8) & 0xFF);
+        hdr[off + 3] = static_cast<uint8_t>(v & 0xFF);
+    };
+    auto putBE16 = [&](size_t off, uint16_t v) {
+        hdr[off]     = static_cast<uint8_t>((v >> 8) & 0xFF);
+        hdr[off + 1] = static_cast<uint8_t>(v & 0xFF);
+    };
+
+    const uint32_t dataSize = static_cast<uint32_t>(m_data.size());
+    const uint32_t tagSize = 0;     // Phase 2 simplification: drop tags.
+    const uint32_t dataChecksum = dc42Checksum(m_data.data(), dataSize);
+    const uint32_t tagChecksum  = 0;
+
+    putBE32(0x40, dataSize);
+    putBE32(0x44, tagSize);
+    putBE32(0x48, dataChecksum);
+    putBE32(0x4C, tagChecksum);
+
+    // SPEC §285 reference values for Disk Copy 4.2 disk encoding / format byte:
+    //   400K  GCR  → encoding 0x00 / format byte 0x02
+    //   800K  GCR  → encoding 0x01 / format byte 0x22
+    //   720K  MFM  → encoding 0x02 / format byte 0x12
+    //   1440K MFM  → encoding 0x03 / format byte 0x12
+    uint8_t enc = m_diskEncoding;
+    uint8_t fmt = m_formatByte;
+    if (enc == 0 && fmt == 0) {
+        if      (dataSize == 400u * 1024u)  { enc = 0x00; fmt = 0x02; }
+        else if (dataSize == 800u * 1024u)  { enc = 0x01; fmt = 0x22; }
+        else if (dataSize == 720u * 1024u)  { enc = 0x02; fmt = 0x12; }
+        else if (dataSize == 1440u * 1024u) { enc = 0x03; fmt = 0x12; }
+    }
+    hdr[0x50] = enc;
+    hdr[0x51] = fmt;
+    putBE16(0x52, 0x0100);
+
+    std::ofstream out(target, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        throw InvalidFormatException("Cannot open for write: " + target.string());
+    }
+    out.write(reinterpret_cast<const char*>(hdr.data()),
+              static_cast<std::streamsize>(hdr.size()));
+    out.write(reinterpret_cast<const char*>(m_data.data()),
+              static_cast<std::streamsize>(m_data.size()));
+    if (!out) {
+        throw InvalidFormatException("Write failed: " + target.string());
+    }
+    out.flush();
+
+    m_dataSize = dataSize;
+    m_tagSize = tagSize;
+    m_dataChecksum = dataChecksum;
+    m_tagChecksum = tagChecksum;
+    m_diskEncoding = enc;
+    m_formatByte = fmt;
+    m_modified = false;
 }
 
 void MacintoshDC42Image::create(const DiskGeometry& /*geometry*/) {
@@ -158,7 +233,7 @@ void MacintoshDC42Image::create(const DiskGeometry& /*geometry*/) {
 bool MacintoshDC42Image::canConvertTo(DiskFormat format) const {
     switch (format) {
         case DiskFormat::MacIMG:
-            return false;  // Phase 3
+            return true;  // M9 — drop DC42 header, keep raw sector stream
         case DiskFormat::Unknown:
         case DiskFormat::AppleDO:
         case DiskFormat::ApplePO:
@@ -178,6 +253,13 @@ bool MacintoshDC42Image::canConvertTo(DiskFormat format) const {
 }
 
 std::unique_ptr<DiskImage> MacintoshDC42Image::convertTo(DiskFormat format) const {
+    if (format == DiskFormat::MacIMG) {
+        // m_data already holds the raw sector stream (header was stripped at
+        // load() time). Pass it straight through to the IMG container.
+        auto out = std::make_unique<MacintoshIMGImage>();
+        out->setRawData(m_data);
+        return out;
+    }
     throw NotImplementedException("Macintosh DC42 convertTo " +
                                    std::string(formatToString(format)) + " (Phase 3)");
 }

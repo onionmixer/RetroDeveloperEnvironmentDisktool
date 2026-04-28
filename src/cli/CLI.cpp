@@ -50,6 +50,10 @@ rde::DiskFormat formatFromString(const std::string& str) {
     // X68000 formats
     if (s == "xdf" || s == "x68000xdf" || s == "x68k") return rde::DiskFormat::X68000XDF;
     if (s == "dim" || s == "x68000dim") return rde::DiskFormat::X68000DIM;
+    // Macintosh formats — explicit mac_* prefix to avoid colliding with the
+    // ambiguous .img / .dsk extensions that are shared with Apple/MSX/X68000.
+    if (s == "mac_img" || s == "macimg") return rde::DiskFormat::MacIMG;
+    if (s == "mac_dc42" || s == "macdc42" || s == "dc42") return rde::DiskFormat::MacDC42;
     return rde::DiskFormat::Unknown;
 }
 
@@ -1922,6 +1926,25 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
 
         std::unique_ptr<DiskImage> outputImage;
         size_t sectorsConverted = 0;
+
+        // Macintosh containers: prefer the input's convertTo() path which
+        // copies the raw 512B-sector stream directly. The generic sector-by-
+        // sector loop below relies on track/side/sector layout, which raw
+        // Mac images don't preserve in a meaningful way (the geometry is
+        // logical-only — see MacintoshDiskImage::initGeometryFromSize).
+        if (inputPlatform == Platform::Macintosh &&
+            outputPlatform == Platform::Macintosh &&
+            inputImage->canConvertTo(outputFormat)) {
+            outputImage = inputImage->convertTo(outputFormat);
+            outputImage->save(outputPath);
+            sectorsConverted = inputImage->getRawData().size() / 512;
+            if (!m_quiet) {
+                std::cout << "Converted " << inputPath << " -> " << outputPath
+                          << " (" << inputImage->getRawData().size() << " bytes, "
+                          << sectorsConverted << " sectors)\n";
+            }
+            return 0;
+        }
 
         // Special handling for XSA output format
         if (outputFormat == DiskFormat::MSXXSA) {
