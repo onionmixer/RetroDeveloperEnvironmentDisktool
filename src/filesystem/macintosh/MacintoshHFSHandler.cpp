@@ -516,6 +516,168 @@ inline void putBE32(std::vector<uint8_t>& raw, size_t off, uint32_t v) {
     raw[off + 3] = static_cast<uint8_t>(v & 0xFF);
 }
 
+// MDB write-side bookkeeping per Inside Mac File Manager:
+//   drLsMod   (0x06, u32) — last-modify Mac epoch
+//   drWrCnt   (0x46, u32) — write count, +1 each volume update
+//   drFilCnt  (0x54, u32) — total files (recursive)
+//   drDirCnt  (0x58, u32) — total dirs  (recursive)
+//   drNmRtDirs(0x52, u16) — direct root dirs
+// These are silently ignored by the current Python read path, so the M7/M10
+// initial implementation skipped them. BasiliskII / Mini vMac / hfsutils do
+// validate, so we now keep them coherent.
+inline void bumpMdbWriteMetadata(std::vector<uint8_t>& raw,
+                                  int32_t fileCountDelta,
+                                  int32_t dirCountDelta,
+                                  int32_t rootDirsDelta,
+                                  uint32_t macTimestamp) {
+    if (raw.size() < 0x400 + 0x80) return;  // MDB block missing — bail out
+    const size_t mdbBase = 0x400;
+
+    auto getBE16 = [&](size_t off) -> uint16_t {
+        return static_cast<uint16_t>((raw[off] << 8) | raw[off + 1]);
+    };
+    auto getBE32 = [&](size_t off) -> uint32_t {
+        return (static_cast<uint32_t>(raw[off])     << 24) |
+               (static_cast<uint32_t>(raw[off + 1]) << 16) |
+               (static_cast<uint32_t>(raw[off + 2]) <<  8) |
+                static_cast<uint32_t>(raw[off + 3]);
+    };
+
+    putBE32(raw, mdbBase + 0x06, macTimestamp);
+
+    const uint32_t wr = getBE32(mdbBase + 0x46);
+    putBE32(raw, mdbBase + 0x46, wr + 1u);
+
+    if (fileCountDelta != 0) {
+        const int64_t v = static_cast<int64_t>(getBE32(mdbBase + 0x54)) + fileCountDelta;
+        putBE32(raw, mdbBase + 0x54, v < 0 ? 0u : static_cast<uint32_t>(v));
+    }
+    if (dirCountDelta != 0) {
+        const int64_t v = static_cast<int64_t>(getBE32(mdbBase + 0x58)) + dirCountDelta;
+        putBE32(raw, mdbBase + 0x58, v < 0 ? 0u : static_cast<uint32_t>(v));
+    }
+    if (rootDirsDelta != 0) {
+        const int32_t v = static_cast<int32_t>(getBE16(mdbBase + 0x52)) + rootDirsDelta;
+        putBE16(raw, mdbBase + 0x52, v < 0 ? 0u : static_cast<uint16_t>(v));
+    }
+}
+
+// Walk catalog leaves searching for the root folder record (parent CNID = 1,
+// recType = 0x01). When found, adjust its valence (body offset 0x04, BE u16)
+// by `delta`, clamped at 0. Returns true if updated, false when no such
+// record exists (some volumes have no root folder record — only the root
+// thread). Mutates `raw` in place.
+//
+// Body layout per Inside Mac (HFS folder record):
+//   0x00 recType (0x01) | 0x01 reserved | 0x02 flags(u16) | 0x04 valence(u16)
+//   0x06 cnid(u32)      | 0x0a crDate    | 0x0e mdDate     | 0x12 backup
+inline bool applyRootFolderValenceDelta(
+        std::vector<uint8_t>& raw,
+        uint16_t firstAllocBlock,
+        uint32_t allocBlockSize,
+        const std::array<uint16_t, 6>& catalogExtents,
+        int32_t delta) {
+    if (delta == 0) return true;  // nothing to do — treat as success
+    if (allocBlockSize == 0) return false;
+
+    // Reconstruct catalog file bytes from its 3 initial extents.
+    const uint64_t firstAllocByte =
+        static_cast<uint64_t>(firstAllocBlock) * 512ULL;
+    std::vector<uint8_t> catalogBytes;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint16_t start = catalogExtents[i * 2];
+        const uint16_t count = catalogExtents[i * 2 + 1];
+        if (count == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(start) * allocBlockSize;
+        const uint64_t len = static_cast<uint64_t>(count) * allocBlockSize;
+        if (off + len > raw.size()) return false;
+        catalogBytes.insert(catalogBytes.end(),
+            raw.begin() + off, raw.begin() + off + len);
+    }
+    if (catalogBytes.size() < 14 + 2 * 0x20) return false;
+    const uint16_t nodeSize = (static_cast<uint16_t>(catalogBytes[0x20]) << 8) |
+                                catalogBytes[0x21];
+    if (nodeSize == 0 || nodeSize > 16384 ||
+        catalogBytes.size() % nodeSize != 0) return false;
+
+    const uint32_t firstLeaf = (static_cast<uint32_t>(catalogBytes[0x18]) << 24) |
+                                (static_cast<uint32_t>(catalogBytes[0x19]) << 16) |
+                                (static_cast<uint32_t>(catalogBytes[0x1a]) << 8) |
+                                 static_cast<uint32_t>(catalogBytes[0x1b]);
+
+    uint32_t node = firstLeaf;
+    std::set<uint32_t> visited;
+    while (node != 0) {
+        if (visited.count(node)) break;
+        visited.insert(node);
+        const size_t nodeOff = static_cast<size_t>(node) * nodeSize;
+        if (nodeOff + nodeSize > catalogBytes.size()) break;
+        uint8_t* p = catalogBytes.data() + nodeOff;
+        const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+
+        auto recOff = [&](uint16_t idx) -> uint16_t {
+            const size_t pos = nodeSize - 2 * (idx + 1);
+            return (static_cast<uint16_t>(p[pos]) << 8) | p[pos + 1];
+        };
+
+        for (uint16_t i = 0; i < numRecs; ++i) {
+            const uint16_t off = recOff(i);
+            const uint16_t end = recOff(static_cast<uint16_t>(i + 1));
+            if (off >= nodeSize || end > nodeSize || off >= end) continue;
+            const size_t recLen = static_cast<size_t>(end) - off;
+            const uint8_t kl = p[off];
+            if (1U + kl > recLen) continue;
+            // Key: kl(1) reserved(1) parentCNID(4) nameLen(1) name(...).
+            if (kl < 6) continue;
+            const uint32_t parentCNID =
+                (static_cast<uint32_t>(p[off + 0x02]) << 24) |
+                (static_cast<uint32_t>(p[off + 0x03]) << 16) |
+                (static_cast<uint32_t>(p[off + 0x04]) <<  8) |
+                 static_cast<uint32_t>(p[off + 0x05]);
+            if (parentCNID != 1) continue;
+            size_t dataOff = 1U + kl;
+            if (dataOff & 1U) dataOff += 1;
+            if (dataOff + 0x06 > recLen) continue;
+            const uint8_t recType = p[off + dataOff];
+            if (recType != 0x01) continue;  // not a folder record
+
+            // Found the root folder record. Adjust valence at body+0x04.
+            const size_t valenceOff = off + dataOff + 0x04;
+            if (valenceOff + 1 >= nodeSize) continue;
+            const uint16_t cur =
+                (static_cast<uint16_t>(p[valenceOff]) << 8) | p[valenceOff + 1];
+            int32_t newVal = static_cast<int32_t>(cur) + delta;
+            if (newVal < 0) newVal = 0;
+            if (newVal > 0xFFFF) newVal = 0xFFFF;
+            p[valenceOff]     = static_cast<uint8_t>((newVal >> 8) & 0xFF);
+            p[valenceOff + 1] = static_cast<uint8_t>(newVal & 0xFF);
+
+            // Spread catalog bytes back into the disk image.
+            size_t cursor = 0;
+            for (size_t e = 0; e < 3 && cursor < catalogBytes.size(); ++e) {
+                const uint16_t start = catalogExtents[e * 2];
+                const uint16_t count = catalogExtents[e * 2 + 1];
+                if (count == 0) continue;
+                const uint64_t writeOff = firstAllocByte +
+                    static_cast<uint64_t>(start) * allocBlockSize;
+                const size_t len = std::min<size_t>(
+                    static_cast<size_t>(count) * allocBlockSize,
+                    catalogBytes.size() - cursor);
+                std::memcpy(raw.data() + writeOff,
+                            catalogBytes.data() + cursor, len);
+                cursor += len;
+            }
+            return true;
+        }
+        node = (static_cast<uint32_t>(p[0x00]) << 24) |
+               (static_cast<uint32_t>(p[0x01]) << 16) |
+               (static_cast<uint32_t>(p[0x02]) << 8) |
+                static_cast<uint32_t>(p[0x03]);
+    }
+    return false;
+}
+
 } // namespace
 
 bool MacintoshHFSHandler::writeFile(const std::string& filename,
@@ -815,11 +977,20 @@ bool MacintoshHFSHandler::writeFile(const std::string& filename,
         }
     }
 
-    // 10. Update MDB scalars.
+    // 10. Update MDB scalars + write-side bookkeeping (drLsMod / drWrCnt /
+    //      drFilCnt) and the root folder valence. Inside Mac File Manager
+    //      requires these for cross-tool consistency (BasiliskII / hfsutils
+    //      validate them; Python read silently ignores them).
     putBE16(raw, 0x400 + 0x0c, static_cast<uint16_t>(m_mdb.numFiles + 1));
     putBE32(raw, 0x400 + 0x1e, m_mdb.nextCNID + 1);
     putBE16(raw, 0x400 + 0x22,
             static_cast<uint16_t>(m_mdb.freeAllocBlocks - needed));
+
+    const std::time_t unixNow = metadata.timestamp.value_or(std::time(nullptr));
+    bumpMdbWriteMetadata(raw, +1, 0, 0, toMacEpoch(unixNow));
+    applyRootFolderValenceDelta(raw, m_mdb.firstAllocBlock,
+                                  m_mdb.allocBlockSize,
+                                  m_mdb.catalogExtents, +1);
 
     // 11. Commit.
     m_disk->setRawData(raw);
@@ -1005,10 +1176,16 @@ bool MacintoshHFSHandler::deleteFile(const std::string& filename) {
         }
     }
 
-    // 4. MDB scalars.
+    // 4. MDB scalars + write-side bookkeeping (drLsMod / drWrCnt / drFilCnt)
+    //    and the root folder valence. See writeFile for rationale.
     putBE16(raw, 0x400 + 0x0c, static_cast<uint16_t>(m_mdb.numFiles - 1));
     putBE16(raw, 0x400 + 0x22,
             static_cast<uint16_t>(m_mdb.freeAllocBlocks + freedBlocks));
+
+    bumpMdbWriteMetadata(raw, -1, 0, 0, toMacEpoch(std::time(nullptr)));
+    applyRootFolderValenceDelta(raw, m_mdb.firstAllocBlock,
+                                  m_mdb.allocBlockSize,
+                                  m_mdb.catalogExtents, -1);
 
     m_disk->setRawData(raw);
     m_childrenByParent.clear();
