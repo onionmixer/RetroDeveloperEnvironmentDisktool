@@ -1238,19 +1238,240 @@ bool MacintoshHFSHandler::renameFile(const std::string& oldName,
     md.targetName = newLeaf;
     return writeFile(newLeaf, dataFork, md);
 }
-bool MacintoshHFSHandler::format(const std::string&) {
-    // HFS format would require materializing every B-tree from scratch
-    // (boot blocks + MDB + volume bitmap + Catalog B-tree header & first
-    // leaf with the root folder + thread records + Extents Overflow B-tree
-    // header). Inside Mac File Manager defines the layout, but no Python
-    // reference exists for cross-tool byte-for-byte parity, so a native
-    // implementation would have no safety net. Use an external tool to
-    // create the blank volume and let rdedisktool read/write it.
-    throw NotImplementedException(
-        "Macintosh HFS format: not implemented — no reference tool exists "
-        "for cross-tool byte parity verification. Create a blank HFS volume "
-        "with an emulator (Mini vMac, BasiliskII) or hfsutils (mkfs.hfs) "
-        "and rdedisktool will then read/write it.");
+bool MacintoshHFSHandler::format(const std::string& volumeName) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+
+    std::vector<uint8_t> raw = m_disk->getRawData();
+    const size_t totalBytes = raw.size();
+    if (totalBytes == 0 || (totalBytes % 512) != 0) {
+        throw InvalidFormatException(
+            "Macintosh HFS format: disk image size must be a non-zero "
+            "multiple of 512 bytes");
+    }
+    const size_t numSectors = totalBytes / 512;
+
+    // B3 scope: support 800K and 1440K HFS volumes, the only sizes whose
+    // byte layout is sample-cross-checked (stuffit_expander_5.5.img =
+    // 1440K). Other sizes require either bigger bitmaps (>1 sector) or a
+    // larger drAlBlkSiz; out of scope until a sample fixture exists.
+    if (numSectors != 1600 && numSectors != 2880) {
+        throw NotImplementedException(
+            "Macintosh HFS format: B3 scope is 800K / 1440K only. "
+            "Provide a different geometry or use an external tool.");
+    }
+
+    // Volume name (clamp to 27 MacRoman bytes per Inside Mac drVN limit).
+    std::string name = volumeName;
+    if (name.empty()) name = "Untitled";
+    if (name.size() > 27) name.resize(27);
+
+    // Layout constants (verified against stuffit_expander_5.5.img).
+    constexpr uint32_t allocBlkSiz       = 512;
+    constexpr uint16_t kBitmapStart      = 3;
+    constexpr uint16_t kAlBlSt           = 4;
+    constexpr uint16_t kBTreeBlocks      = 22;
+    constexpr uint32_t kBTreeFileSize    = kBTreeBlocks * allocBlkSiz;  // 11264
+    constexpr uint16_t kNodeSize         = 512;
+    constexpr uint16_t kAlternateMdbTail = 2;
+    constexpr uint32_t kRootCNID         = 2;
+    constexpr uint32_t kFirstUserCNID    = 16;
+
+    const uint16_t numAllocBlocks =
+        static_cast<uint16_t>(numSectors - kAlBlSt - kAlternateMdbTail);
+    const uint16_t freeAllocBlocks =
+        static_cast<uint16_t>(numAllocBlocks - 2 * kBTreeBlocks);
+
+    // Wipe everything — we own the entire image.
+    std::fill(raw.begin(), raw.end(), 0);
+
+    const uint32_t macNow = toMacEpoch(std::time(nullptr));
+
+    // --- 1. MDB at sector 2 (file offset 0x400) -----------------------------
+    putBE16(raw, 0x400 + 0x00, 0x4244);                  // drSigWord "BD"
+    putBE32(raw, 0x400 + 0x02, macNow);                  // drCrDate
+    putBE32(raw, 0x400 + 0x06, macNow);                  // drLsMod
+    putBE16(raw, 0x400 + 0x0a, 0x0100);                  // drAtrb (cleanly unmounted)
+    putBE16(raw, 0x400 + 0x0c, 0);                       // drNmFls
+    putBE16(raw, 0x400 + 0x0e, kBitmapStart);            // drVBMSt
+    putBE16(raw, 0x400 + 0x10, 0);                       // drAllocPtr
+    putBE16(raw, 0x400 + 0x12, numAllocBlocks);          // drNmAlBlks
+    putBE32(raw, 0x400 + 0x14, allocBlkSiz);             // drAlBlkSiz
+    putBE32(raw, 0x400 + 0x18, 2048);                    // drClpSiz (file clump)
+    putBE16(raw, 0x400 + 0x1c, kAlBlSt);                 // drAlBlSt
+    putBE32(raw, 0x400 + 0x1e, kFirstUserCNID);          // drNxtCNID
+    putBE16(raw, 0x400 + 0x22, freeAllocBlocks);         // drFreeBks
+
+    // drVN @ 0x24: Pascal volume name (length + chars).
+    raw[0x400 + 0x24] = static_cast<uint8_t>(name.size());
+    std::memcpy(raw.data() + 0x400 + 0x25, name.data(), name.size());
+
+    // drVolBkUp / drVSeqNum already zero.
+    putBE32(raw, 0x400 + 0x46, 1);                       // drWrCnt
+    putBE32(raw, 0x400 + 0x4a, kBTreeFileSize);          // drXTClpSiz
+    putBE32(raw, 0x400 + 0x4e, kBTreeFileSize);          // drCTClpSiz
+    // drNmRtDirs / drFilCnt / drDirCnt / drFndrInfo / drVCSize / drVBMCSize
+    // / drCtlCSize all zero.
+    putBE32(raw, 0x400 + 0x82, kBTreeFileSize);          // drXTFlSize
+    putBE16(raw, 0x400 + 0x86, 0);                       // drXTExtRec[0].start
+    putBE16(raw, 0x400 + 0x88, kBTreeBlocks);            // drXTExtRec[0].count
+    putBE32(raw, 0x400 + 0x92, kBTreeFileSize);          // drCTFlSize
+    putBE16(raw, 0x400 + 0x96, kBTreeBlocks);            // drCTExtRec[0].start
+    putBE16(raw, 0x400 + 0x98, kBTreeBlocks);            // drCTExtRec[0].count
+
+    // --- 2. Volume bitmap at sector 3 (1 sector) ----------------------------
+    // First 44 alloc blocks (extents file 0..21 + catalog file 22..43) are
+    // "used"; rest free. Bit 7 of byte 0 = block 0 (MSB-first, Inside Mac).
+    {
+        const size_t bitmapBase = static_cast<size_t>(kBitmapStart) * 512;
+        const uint16_t usedBlocks = 2 * kBTreeBlocks;  // 44
+        for (uint16_t b = 0; b < usedBlocks; ++b) {
+            const size_t off = bitmapBase + (b / 8);
+            const uint8_t mask = static_cast<uint8_t>(1u << (7 - (b & 7)));
+            raw[off] |= mask;
+        }
+    }
+
+    // --- 3. Helper: write a B-tree header node ------------------------------
+    auto writeBTreeHeaderNode = [&](size_t nodeOff,
+                                       uint16_t treeDepth,
+                                       uint32_t rootNode,
+                                       uint32_t leafRecords,
+                                       uint32_t firstLeaf,
+                                       uint32_t lastLeaf,
+                                       uint16_t maxKeyLen,
+                                       uint32_t freeNodes,
+                                       uint16_t mapByte0) {
+        // BTNodeDescriptor.
+        // fLink, bLink already zero.
+        raw[nodeOff + 0x08] = 0x01;                          // kind = header
+        // height already zero.
+        putBE16(raw, nodeOff + 0x0a, 3);                     // numRecs = 3
+        // BTHeaderRec at offset 14.
+        putBE16(raw, nodeOff + 14 + 0x00, treeDepth);
+        putBE32(raw, nodeOff + 14 + 0x02, rootNode);
+        putBE32(raw, nodeOff + 14 + 0x06, leafRecords);
+        putBE32(raw, nodeOff + 14 + 0x0a, firstLeaf);
+        putBE32(raw, nodeOff + 14 + 0x0e, lastLeaf);
+        putBE16(raw, nodeOff + 14 + 0x12, kNodeSize);
+        putBE16(raw, nodeOff + 14 + 0x14, maxKeyLen);
+        putBE32(raw, nodeOff + 14 + 0x16, kBTreeBlocks);     // totalNodes
+        putBE32(raw, nodeOff + 14 + 0x1a, freeNodes);
+        // reserved1, clumpSize, btreeType, reserved2, attributes, reserved3
+        // all zero (matches sample stuffit_expander_5.5.img).
+
+        // Map record: byte 0 has bits set for nodes 0..k that are in use.
+        raw[nodeOff + 248] = static_cast<uint8_t>(mapByte0);
+
+        // Offset table at end (4 entries: 3 records + free ptr).
+        putBE16(raw, nodeOff + kNodeSize - 2, 14);            // rec[0]
+        putBE16(raw, nodeOff + kNodeSize - 4, 120);           // rec[1] (user data)
+        putBE16(raw, nodeOff + kNodeSize - 6, 248);           // rec[2] (map)
+        putBE16(raw, nodeOff + kNodeSize - 8, 504);           // free ptr
+    };
+
+    // --- 4. Extents Overflow B-tree (alloc blocks 0..21) --------------------
+    const size_t extentsFileOff =
+        static_cast<size_t>(kAlBlSt) * 512;  // 0x800
+    writeBTreeHeaderNode(extentsFileOff,
+                          /*treeDepth*/    0,
+                          /*rootNode*/     0,
+                          /*leafRecords*/  0,
+                          /*firstLeaf*/    0,
+                          /*lastLeaf*/     0,
+                          /*maxKeyLen*/    7,
+                          /*freeNodes*/    kBTreeBlocks - 1,
+                          /*mapByte0*/     0x80);
+
+    // --- 5. Catalog B-tree (alloc blocks 22..43) ----------------------------
+    const size_t catalogFileOff =
+        extentsFileOff + static_cast<size_t>(kBTreeBlocks) * allocBlkSiz;
+    writeBTreeHeaderNode(catalogFileOff,
+                          /*treeDepth*/    1,
+                          /*rootNode*/     1,
+                          /*leafRecords*/  2,
+                          /*firstLeaf*/    1,
+                          /*lastLeaf*/     1,
+                          /*maxKeyLen*/    37,
+                          /*freeNodes*/    kBTreeBlocks - 2,
+                          /*mapByte0*/     0xc0);
+
+    // Catalog leaf node (node 1): root folder record + root thread record.
+    {
+        const size_t leafOff = catalogFileOff + kNodeSize;
+        // BTNodeDescriptor: leaf, height 1, numRecs 2.
+        raw[leafOff + 0x08] = 0xff;          // kind = leaf (-1)
+        raw[leafOff + 0x09] = 0x01;          // height = 1
+        putBE16(raw, leafOff + 0x0a, 2);
+
+        // Root folder record at offset 14:
+        //   key:  keyLen(1) reserved(1) parent=1(4) nameLen(1) name(N)
+        //   body: 70-byte folder record (recType=0x01).
+        const uint8_t folderKeyLen =
+            static_cast<uint8_t>(6 + name.size());
+        const size_t folderRecStart = leafOff + 14;
+        raw[folderRecStart] = folderKeyLen;
+        // raw[folderRecStart+1] = 0;         // reserved
+        putBE32(raw, folderRecStart + 2, 1); // parent = 1 (drives root key)
+        raw[folderRecStart + 6] =
+            static_cast<uint8_t>(name.size());
+        std::memcpy(raw.data() + folderRecStart + 7,
+                    name.data(), name.size());
+
+        size_t folderBodyOff = folderRecStart + 1 + folderKeyLen;
+        if (folderBodyOff & 1U) folderBodyOff += 1;  // align body to even
+        raw[folderBodyOff + 0x00] = 0x01;            // recType = folder
+        // 0x02..0x03 flags=0; 0x04..0x05 valence=0
+        putBE32(raw, folderBodyOff + 0x06, kRootCNID);  // cnid = 2
+        putBE32(raw, folderBodyOff + 0x0a, macNow);     // create
+        putBE32(raw, folderBodyOff + 0x0e, macNow);     // modify
+        // 0x12 backup, 0x16 DInfo[16], 0x26 DXInfo[16], 0x36 reserved[16] = 0
+        const size_t folderRecEnd = folderBodyOff + 70;
+
+        // Root thread record. Sample uses keyLen=7 (one extra zero pad byte
+        // in the key) so that the body falls on an even offset without an
+        // explicit padding step. Match the sample for byte-for-byte parity.
+        const size_t threadRecStart = folderRecEnd;
+        raw[threadRecStart + 0] = 7;                 // keyLen
+        // raw[+1] = 0; reserved
+        putBE32(raw, threadRecStart + 2, kRootCNID); // parent = 2
+        // raw[+6] = 0; nameLen = 0
+        // raw[+7] = 0; pad
+
+        const size_t threadBodyOff = threadRecStart + 8;  // already even
+        raw[threadBodyOff + 0x00] = 0x03;            // recType = folder thread
+        // 0x01..0x09 reserved (9 bytes total reserved per Inside Mac
+        // CatThreadRec — see PLAN_MACFDD.md §22.2 sample hexdump).
+        putBE32(raw, threadBodyOff + 0x0a, kRootCNID);  // thdParID
+        raw[threadBodyOff + 0x0e] =
+            static_cast<uint8_t>(name.size());
+        std::memcpy(raw.data() + threadBodyOff + 0x0f,
+                    name.data(),
+                    std::min<size_t>(name.size(), 31));
+        const size_t threadRecEnd = threadBodyOff + 46;
+
+        // Offset table: [folderRecOff, threadRecOff, freePtr].
+        putBE16(raw, leafOff + kNodeSize - 2,
+                static_cast<uint16_t>(folderRecStart - leafOff));
+        putBE16(raw, leafOff + kNodeSize - 4,
+                static_cast<uint16_t>(threadRecStart - leafOff));
+        putBE16(raw, leafOff + kNodeSize - 6,
+                static_cast<uint16_t>(threadRecEnd  - leafOff));
+    }
+
+    // --- 6. Commit + refresh -----------------------------------------------
+    m_disk->setRawData(raw);
+    m_childrenByParent.clear();
+    m_byCNID.clear();
+    m_extentsOverflow.clear();
+    m_bootBlock = BootBlock{};
+    if (!parseMdb()) return false;
+    parseBootBlock();
+    walkExtentsOverflowLeaves();
+    if (!walkCatalogLeaves()) return false;
+    return true;
 }
 
 // B2: single-leaf catalog inserter used by createDirectory. Throws
