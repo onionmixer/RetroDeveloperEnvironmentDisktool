@@ -77,6 +77,7 @@ set(MAC_SOURCES
     src/macintosh/MacintoshMOOFImage.cpp
     src/macintosh/MacGcrDecoder.cpp
     src/macintosh/MacMfmDecoder.cpp
+    src/macintosh/MacGcrEncoder.cpp
 )
 
 # Filesystem sources
