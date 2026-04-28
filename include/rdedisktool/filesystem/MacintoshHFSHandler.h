@@ -79,6 +79,8 @@ public:
 
     bool supportsDirectories() const override { return true; }
     bool isDirectory(const std::string& path) const override;
+    bool createDirectory(const std::string& path) override;
+    bool deleteDirectory(const std::string& path) override;
 
     // Public read access for diagnostics & later phases (M5 boot policy).
     const Mdb& mdb() const { return m_mdb; }
