@@ -706,10 +706,16 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  * mac_dc42 → mac_img drops the DC42 header + tag bytes;\n";
         std::cout << "    mac_img → mac_dc42 wraps with a fresh DC42 header (ROR32+BE16 checksum).\n";
     } else if (command == "list") {
+        std::cout << "\nOptions:\n";
+        std::cout << "  -v, --verbose   Macintosh disks: show file type, creator, and Finder\n";
+        std::cout << "                  flags (high byte) columns. No effect on other\n";
+        std::cout << "                  platforms.\n";
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool list mydisk.dsk\n";
         std::cout << "  rdedisktool list mydisk.dsk GAMES\n";
         std::cout << "  rdedisktool list mydisk.dsk GAMES/RPG\n";
+        std::cout << "  rdedisktool list mac.img -v\n";
+        std::cout << "  rdedisktool list mac.img \"System Folder\" --verbose\n";
     } else if (command == "extract") {
         std::cout << "\nMacintosh-only Options (mutually exclusive):\n";
         std::cout << "  --apple-double  Write data fork to <output_path> + a paired\n";
@@ -1124,6 +1130,12 @@ int CLI::cmdInfo(const std::vector<std::string>& args) {
 }
 
 int CLI::cmdList(const std::vector<std::string>& args) {
+    // PR-D: -v / --verbose is consumed by the global option parser
+    // before per-command args see it; pick it up via m_verbose. Verbose
+    // is a no-op for non-Mac handlers — keeps existing output
+    // byte-identical so the 4 pre-Mac baselines stay locked.
+    const bool verbose = m_verbose;
+
     if (args.empty()) {
         printError("Missing image file argument");
         printCommandHelp("list");
@@ -1141,11 +1153,108 @@ int CLI::cmdList(const std::vector<std::string>& args) {
 
         auto files = disk.handler->listFiles(path);
 
+        // PR-D: detect Mac handlers — verbose mode adds Mac-specific
+        // columns (type / creator / Finder flags). Non-Mac handlers
+        // ignore -v entirely so non-Mac output stays identical.
+        auto* hfs = dynamic_cast<rde::MacintoshHFSHandler*>(disk.handler.get());
+        auto* mfs = dynamic_cast<rde::MacintoshMFSHandler*>(disk.handler.get());
+        const bool macVerbose = verbose && (hfs != nullptr || mfs != nullptr);
+
         if (m_quiet) {
             // Quiet mode: output only filenames
             for (const auto& file : files) {
                 std::cout << file.name << "\n";
             }
+        } else if (macVerbose) {
+            // Verbose Mac listing: 4-char Type, 4-char Creator, 2-char
+            // FFlagsHi (FInfo high byte). Folders print "—" for the
+            // Mac fields.
+            std::cout << "Directory listing for: " << imagePath << "\n";
+            std::cout << "Volume: " << disk.handler->getVolumeName() << "\n\n";
+
+            std::cout << std::left  << std::setw(30) << "Name"
+                      << std::right << std::setw(10) << "Size"
+                      << std::setw(6)  << "Type"
+                      << std::setw(6)  << "Attr"
+                      << "  " << std::left << std::setw(6) << "MacTy"
+                      << std::setw(6) << "Creat"
+                      << "FFlg\n";
+            std::cout << std::string(64, '-') << "\n";
+
+            // For HFS: full-path lookup (handles nested subdirs).
+            // For MFS: root-flat lookup by name only.
+            std::string pathPrefix = path;
+            while (!pathPrefix.empty() && pathPrefix.back() == '/') {
+                pathPrefix.pop_back();
+            }
+
+            auto fmt4 = [](const uint8_t b[4]) -> std::string {
+                std::string s(4, ' ');
+                for (int i = 0; i < 4; ++i) {
+                    const unsigned char c = b[i];
+                    s[i] = (c >= 0x20 && c < 0x7f) ? static_cast<char>(c) : '.';
+                }
+                return s;
+            };
+
+            size_t totalSize = 0;
+            for (const auto& file : files) {
+                std::cout << std::left  << std::setw(30) << file.name
+                          << std::right << std::setw(10) << file.size;
+
+                std::string typeStr = file.isDirectory ? "DIR" : "FILE";
+                std::cout << std::setw(6) << typeStr;
+
+                std::string attrStr;
+                if (file.attributes & 0x01) attrStr += "R";
+                if (file.attributes & 0x02) attrStr += "H";
+                if (file.attributes & 0x04) attrStr += "S";
+                if (file.attributes & 0x80) attrStr += "L";
+                std::cout << std::setw(6) << attrStr;
+
+                // Mac type / creator / FFlagsHi
+                std::string macType, macCreator;
+                std::string fflags = "  ";
+                if (file.isDirectory) {
+                    macType = "—";
+                    macCreator = "—";
+                    fflags = "  ";
+                } else if (hfs != nullptr) {
+                    const std::string fullPath =
+                        pathPrefix.empty() ? file.name
+                                            : pathPrefix + "/" + file.name;
+                    if (auto* child = hfs->lookupByPath(fullPath)) {
+                        macType    = fmt4(child->fileType);
+                        macCreator = fmt4(child->creator);
+                        char buf[3];
+                        std::snprintf(buf, sizeof(buf), "%02x",
+                                      child->finfo[8]);
+                        fflags = buf;
+                    } else {
+                        macType = "????"; macCreator = "????";
+                    }
+                } else if (mfs != nullptr) {
+                    if (auto* m = mfs->lookupByName(file.name)) {
+                        macType    = fmt4(m->fileType);
+                        macCreator = fmt4(m->creator);
+                        char buf[3];
+                        std::snprintf(buf, sizeof(buf), "%02x",
+                                      m->flUsrWds[8]);
+                        fflags = buf;
+                    } else {
+                        macType = "????"; macCreator = "????";
+                    }
+                }
+                std::cout << "  " << std::left << std::setw(6) << macType
+                          << std::setw(6) << macCreator
+                          << fflags << "\n";
+
+                totalSize += file.size;
+            }
+
+            std::cout << std::string(64, '-') << "\n";
+            std::cout << files.size() << " file(s), " << totalSize << " bytes\n";
+            std::cout << "Free space: " << disk.handler->getFreeSpace() << " bytes\n";
         } else {
             std::cout << "Directory listing for: " << imagePath << "\n";
             std::cout << "Volume: " << disk.handler->getVolumeName() << "\n\n";
