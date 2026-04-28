@@ -195,6 +195,19 @@ private:
     // children remain attached. Within-parent rename only — cross-folder
     // moves throw NotImplementedException.
     bool renameFolder(const std::string& oldName, const std::string& newName);
+
+    // C3 (rsrc-fork-preserving rename): after writeFile creates the new
+    // record (data fork only), patch its body to (a) carry the rsrc fork
+    // bytes, (b) restore preserved metadata (FInfo, FXInfo, filFlags,
+    // backupDate, clpSize) from `oldBody`. Throws NotImplementedException
+    // when the rsrc fork doesn't fit in a contiguous run of free
+    // allocation blocks (Extents Overflow B-tree write deferred).
+    bool applyRsrcForkAndMetadataPatch(
+        std::vector<uint8_t>& raw,
+        uint32_t parentCNID,
+        const std::string& leaf,
+        const std::vector<uint8_t>& oldBody,
+        const std::vector<uint8_t>& rsrcFork);
 };
 
 } // namespace rde
