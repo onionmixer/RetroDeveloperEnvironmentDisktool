@@ -797,6 +797,96 @@ inline bool readFolderRecordBody(
     return false;
 }
 
+// C3: read a file record's 102-byte body so a rename can preserve FInfo,
+// FXInfo, filFlags, backupDate, clpSize across the delete-then-add cycle.
+inline bool readFileRecordBody(
+        const std::vector<uint8_t>& raw,
+        uint16_t firstAllocBlock,
+        uint32_t allocBlockSize,
+        const std::array<uint16_t, 6>& catalogExtents,
+        uint32_t parentCNID,
+        const std::string& name,
+        std::vector<uint8_t>& outBody) {
+    outBody.clear();
+    if (allocBlockSize == 0) return false;
+
+    const uint64_t firstAllocByte =
+        static_cast<uint64_t>(firstAllocBlock) * 512ULL;
+    std::vector<uint8_t> catalogBytes;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint16_t start = catalogExtents[i * 2];
+        const uint16_t count = catalogExtents[i * 2 + 1];
+        if (count == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(start) * allocBlockSize;
+        const uint64_t len = static_cast<uint64_t>(count) * allocBlockSize;
+        if (off + len > raw.size()) return false;
+        catalogBytes.insert(catalogBytes.end(),
+            raw.begin() + off, raw.begin() + off + len);
+    }
+    if (catalogBytes.size() < 14 + 2 * 0x20) return false;
+    const uint16_t nodeSize = (static_cast<uint16_t>(catalogBytes[0x20]) << 8) |
+                                catalogBytes[0x21];
+    if (nodeSize == 0 || nodeSize > 16384 ||
+        catalogBytes.size() % nodeSize != 0) return false;
+
+    const uint32_t firstLeaf = (static_cast<uint32_t>(catalogBytes[0x18]) << 24) |
+                                (static_cast<uint32_t>(catalogBytes[0x19]) << 16) |
+                                (static_cast<uint32_t>(catalogBytes[0x1a]) << 8) |
+                                 static_cast<uint32_t>(catalogBytes[0x1b]);
+
+    uint32_t node = firstLeaf;
+    std::set<uint32_t> visited;
+    while (node != 0) {
+        if (visited.count(node)) break;
+        visited.insert(node);
+        const size_t nodeOff = static_cast<size_t>(node) * nodeSize;
+        if (nodeOff + nodeSize > catalogBytes.size()) break;
+        const uint8_t* p = catalogBytes.data() + nodeOff;
+        const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+
+        auto recOff = [&](uint16_t idx) -> uint16_t {
+            const size_t pos = nodeSize - 2 * (idx + 1);
+            return (static_cast<uint16_t>(p[pos]) << 8) | p[pos + 1];
+        };
+
+        for (uint16_t i = 0; i < numRecs; ++i) {
+            const uint16_t off = recOff(i);
+            const uint16_t end = recOff(static_cast<uint16_t>(i + 1));
+            if (off >= nodeSize || end > nodeSize || off >= end) continue;
+            const size_t recLen = static_cast<size_t>(end) - off;
+            const uint8_t kl = p[off];
+            if (1U + kl > recLen) continue;
+            if (kl < 6) continue;
+            const uint32_t pc =
+                (static_cast<uint32_t>(p[off + 0x02]) << 24) |
+                (static_cast<uint32_t>(p[off + 0x03]) << 16) |
+                (static_cast<uint32_t>(p[off + 0x04]) << 8) |
+                 static_cast<uint32_t>(p[off + 0x05]);
+            if (pc != parentCNID) continue;
+            const uint8_t nl = p[off + 0x06];
+            const std::string nm(reinterpret_cast<const char*>(p + off + 0x07),
+                                  std::min<size_t>(nl,
+                                    static_cast<size_t>(kl >= 6 ? kl - 6 : 0)));
+            if (nm != name) continue;
+
+            size_t dataOff = 1U + kl;
+            if (dataOff & 1U) dataOff += 1;
+            if (dataOff + 102 > recLen) return false;
+            const uint8_t recType = p[off + dataOff];
+            if (recType != 0x02) return false;  // not a file record
+
+            outBody.assign(p + off + dataOff, p + off + dataOff + 102);
+            return true;
+        }
+        node = (static_cast<uint32_t>(p[0x00]) << 24) |
+               (static_cast<uint32_t>(p[0x01]) << 16) |
+               (static_cast<uint32_t>(p[0x02]) << 8) |
+                static_cast<uint32_t>(p[0x03]);
+    }
+    return false;
+}
+
 inline bool patchFolderThreadName(
         std::vector<uint8_t>& raw,
         uint16_t firstAllocBlock,
@@ -1476,16 +1566,61 @@ bool MacintoshHFSHandler::renameFile(const std::string& oldName,
     }
     if (lookupByPath(newPath) != nullptr) return false;
 
-    // Resource-fork-preserving rename is C3 work; reject for now to keep the
-    // file's rsrc bytes intact.
-    if (target->rsrcLogical != 0) {
-        throw NotImplementedException("Macintosh HFS rename of files with resource forks is out of scope (C3)");
-    }
+    // C3: snapshot data + rsrc forks AND the original 102-byte file record
+    // body before any mutation, so we can preserve fileType / creator /
+    // FInfo / FXInfo / backupDate / clpSize across the delete-then-add cycle.
     std::vector<uint8_t> dataFork = extractFork(target->cnid, 0x00);
+    std::vector<uint8_t> rsrcFork;
+    if (target->rsrcLogical != 0) {
+        rsrcFork = extractFork(target->cnid, 0xFF);
+        if (rsrcFork.size() != target->rsrcLogical) {
+            throw NotImplementedException(
+                "Macintosh HFS rename: rsrc fork extraction incomplete "
+                "(file uses Extents Overflow B-tree)");
+        }
+    }
+
+    std::vector<uint8_t> oldBody;
+    {
+        const std::vector<uint8_t>& raw0 = m_disk->getRawData();
+        if (!readFileRecordBody(raw0, m_mdb.firstAllocBlock,
+                                  m_mdb.allocBlockSize, m_mdb.catalogExtents,
+                                  oldPR.parentCNID, oldPR.leafName, oldBody)) {
+            return false;
+        }
+    }
+
     if (!deleteFile(oldName)) return false;
     FileMetadata md;
     md.targetName = newLeaf;
-    return writeFile(newPath, dataFork, md);
+    if (!writeFile(newPath, dataFork, md)) return false;
+
+    // After writeFile, patch the new record's body to restore preserved
+    // metadata + (if any) attach the rsrc fork. Mutates a fresh raw
+    // snapshot and commits separately. If the rsrc fork doesn't fit in a
+    // contiguous run, throws — disk is left with the data-only file.
+    if (!rsrcFork.empty() ||
+        oldBody[0x02] != 0 || oldBody[0x03] != 0 ||
+        std::any_of(oldBody.begin() + 0x04, oldBody.begin() + 0x14,
+                     [](uint8_t b){ return b != 0; }) ||
+        std::any_of(oldBody.begin() + 0x34, oldBody.begin() + 0x38,
+                     [](uint8_t b){ return b != 0; }) ||
+        std::any_of(oldBody.begin() + 0x38, oldBody.begin() + 0x4a,
+                     [](uint8_t b){ return b != 0; })) {
+        std::vector<uint8_t> raw = m_disk->getRawData();
+        if (!applyRsrcForkAndMetadataPatch(raw, oldPR.parentCNID, newLeaf,
+                                             oldBody, rsrcFork)) {
+            return false;
+        }
+        m_disk->setRawData(raw);
+        m_childrenByParent.clear();
+        m_byCNID.clear();
+        m_extentsOverflow.clear();
+        parseMdb();
+        walkExtentsOverflowLeaves();
+        walkCatalogLeaves();
+    }
+    return true;
 }
 
 bool MacintoshHFSHandler::renameFolder(const std::string& oldName,
@@ -1598,6 +1733,220 @@ bool MacintoshHFSHandler::renameFolder(const std::string& oldName,
     walkCatalogLeaves();
     return true;
 }
+
+// C3: after writeFile() has created a fresh file record (data fork only,
+// zeros for FInfo / FXInfo / etc.), patch the new record so it carries
+//   (a) the rsrc fork bytes from the renamed file
+//   (b) the preserved metadata fields from the old file's body
+// Throws NotImplementedException when the rsrc fork doesn't fit in a
+// contiguous run of free allocation blocks (Extents Overflow B-tree write
+// remains deferred).
+bool MacintoshHFSHandler::applyRsrcForkAndMetadataPatch(
+        std::vector<uint8_t>& raw,
+        uint32_t parentCNID,
+        const std::string& leaf,
+        const std::vector<uint8_t>& oldBody,
+        const std::vector<uint8_t>& rsrcFork) {
+    if (m_mdb.allocBlockSize == 0) return false;
+    if (oldBody.size() != 102) return false;
+
+    const uint32_t blockSize = m_mdb.allocBlockSize;
+    const uint64_t firstAllocByte =
+        static_cast<uint64_t>(m_mdb.firstAllocBlock) * 512ULL;
+    const uint64_t bitmapByteBase =
+        static_cast<uint64_t>(m_mdb.bitmapStart) * 512ULL;
+
+    // 1. Allocate a contiguous run for the rsrc fork (if non-empty).
+    uint16_t rsrcStart = 0;
+    uint32_t rsrcBlocks = 0;
+    if (!rsrcFork.empty()) {
+        rsrcBlocks = static_cast<uint32_t>(
+            (rsrcFork.size() + blockSize - 1) / blockSize);
+        if (rsrcBlocks > 0xFFFFu) {
+            throw NotImplementedException(
+                "Macintosh HFS rename: rsrc fork too large for a single extent");
+        }
+        uint16_t firstFree = 0;
+        uint16_t bestLen = 0;
+        bool found = false;
+        for (uint16_t b = 0; b < m_mdb.numAllocBlocks; ++b) {
+            if (!bitmapBit(raw, bitmapByteBase, b)) {
+                if (bestLen == 0) firstFree = b;
+                ++bestLen;
+                if (bestLen >= rsrcBlocks) {
+                    rsrcStart = firstFree;
+                    found = true;
+                    break;
+                }
+            } else {
+                bestLen = 0;
+            }
+        }
+        if (!found) {
+            throw NotImplementedException(
+                "Macintosh HFS rename: no contiguous free run for the "
+                "rsrc fork (Extents Overflow B-tree update not implemented)");
+        }
+        // Write rsrc bytes + mark bitmap.
+        for (uint32_t i = 0; i < rsrcBlocks; ++i) {
+            const uint64_t off = firstAllocByte +
+                static_cast<uint64_t>(rsrcStart + i) * blockSize;
+            const size_t srcOff = static_cast<size_t>(i) * blockSize;
+            const size_t take = std::min<size_t>(blockSize,
+                                                  rsrcFork.size() - srcOff);
+            std::memcpy(raw.data() + off, rsrcFork.data() + srcOff, take);
+            if (take < blockSize) {
+                std::memset(raw.data() + off + take, 0, blockSize - take);
+            }
+        }
+        for (uint32_t i = 0; i < rsrcBlocks; ++i) {
+            setBitmapBit(raw, bitmapByteBase, rsrcStart + i, true);
+        }
+    }
+
+    // 2. Locate the new record in the catalog and patch its body bytes
+    //    in place. The record was just inserted by writeFile so it lives
+    //    in the same parent leaf; key (parentCNID, leaf) finds it.
+    std::vector<uint8_t> catalogBytes;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint16_t s = m_mdb.catalogExtents[i * 2];
+        const uint16_t c = m_mdb.catalogExtents[i * 2 + 1];
+        if (c == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(s) * blockSize;
+        const uint64_t len = static_cast<uint64_t>(c) * blockSize;
+        if (off + len > raw.size()) return false;
+        catalogBytes.insert(catalogBytes.end(),
+            raw.begin() + off, raw.begin() + off + len);
+    }
+    if (catalogBytes.size() < 14 + 2 * 0x20) return false;
+    const uint16_t nodeSize =
+        (static_cast<uint16_t>(catalogBytes[0x20]) << 8) | catalogBytes[0x21];
+    if (nodeSize == 0 || nodeSize > 16384 ||
+        catalogBytes.size() % nodeSize != 0) return false;
+
+    const uint32_t firstLeaf = (static_cast<uint32_t>(catalogBytes[0x18]) << 24) |
+                                (static_cast<uint32_t>(catalogBytes[0x19]) << 16) |
+                                (static_cast<uint32_t>(catalogBytes[0x1a]) << 8) |
+                                 static_cast<uint32_t>(catalogBytes[0x1b]);
+
+    bool patched = false;
+    uint32_t node = firstLeaf;
+    std::set<uint32_t> visited;
+    while (node != 0 && !patched) {
+        if (visited.count(node)) break;
+        visited.insert(node);
+        const size_t nodeOff = static_cast<size_t>(node) * nodeSize;
+        if (nodeOff + nodeSize > catalogBytes.size()) break;
+        uint8_t* p = catalogBytes.data() + nodeOff;
+        const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+
+        auto recOff = [&](uint16_t idx) -> uint16_t {
+            const size_t pos = nodeSize - 2 * (idx + 1);
+            return (static_cast<uint16_t>(p[pos]) << 8) | p[pos + 1];
+        };
+
+        for (uint16_t i = 0; i < numRecs; ++i) {
+            const uint16_t off = recOff(i);
+            const uint16_t end = recOff(static_cast<uint16_t>(i + 1));
+            if (off >= nodeSize || end > nodeSize || off >= end) continue;
+            const size_t recLen = static_cast<size_t>(end) - off;
+            const uint8_t kl = p[off];
+            if (1U + kl > recLen) continue;
+            if (kl < 6) continue;
+            const uint32_t pc =
+                (static_cast<uint32_t>(p[off + 0x02]) << 24) |
+                (static_cast<uint32_t>(p[off + 0x03]) << 16) |
+                (static_cast<uint32_t>(p[off + 0x04]) << 8) |
+                 static_cast<uint32_t>(p[off + 0x05]);
+            if (pc != parentCNID) continue;
+            const uint8_t nl = p[off + 0x06];
+            const std::string nm(reinterpret_cast<const char*>(p + off + 0x07),
+                                  std::min<size_t>(nl,
+                                    static_cast<size_t>(kl >= 6 ? kl - 6 : 0)));
+            if (nm != leaf) continue;
+            size_t dataOff = 1U + kl;
+            if (dataOff & 1U) dataOff += 1;
+            if (dataOff + 102 > recLen) continue;
+            const uint8_t recType = p[off + dataOff];
+            if (recType != 0x02) continue;
+
+            uint8_t* body = p + off + dataOff;
+
+            // Restore preserved metadata from oldBody.
+            //   0x02..0x03  filFlags + filTyp
+            //   0x04..0x13  FInfo (fileType, creator, finder flags, etc.)
+            //   0x34..0x37  filBkDat (backup date)
+            //   0x38..0x47  FXInfo
+            //   0x48..0x49  filClpSize
+            std::memcpy(body + 0x02, oldBody.data() + 0x02, 0x12);
+            std::memcpy(body + 0x34, oldBody.data() + 0x34, 0x04);
+            std::memcpy(body + 0x38, oldBody.data() + 0x38, 0x12);
+
+            // Set the rsrc fork fields.
+            body[0x22] = static_cast<uint8_t>((rsrcStart >> 8) & 0xFF);
+            body[0x23] = static_cast<uint8_t>(rsrcStart & 0xFF);
+            const uint32_t rsrcLogical =
+                static_cast<uint32_t>(rsrcFork.size());
+            const uint32_t rsrcPhysical = rsrcBlocks * blockSize;
+            body[0x24] = static_cast<uint8_t>((rsrcLogical >> 24) & 0xFF);
+            body[0x25] = static_cast<uint8_t>((rsrcLogical >> 16) & 0xFF);
+            body[0x26] = static_cast<uint8_t>((rsrcLogical >> 8) & 0xFF);
+            body[0x27] = static_cast<uint8_t>(rsrcLogical & 0xFF);
+            body[0x28] = static_cast<uint8_t>((rsrcPhysical >> 24) & 0xFF);
+            body[0x29] = static_cast<uint8_t>((rsrcPhysical >> 16) & 0xFF);
+            body[0x2a] = static_cast<uint8_t>((rsrcPhysical >> 8) & 0xFF);
+            body[0x2b] = static_cast<uint8_t>(rsrcPhysical & 0xFF);
+            // rsrcExtents[0] at body+0x56
+            body[0x56] = body[0x22];
+            body[0x57] = body[0x23];
+            body[0x58] = static_cast<uint8_t>((rsrcBlocks >> 8) & 0xFF);
+            body[0x59] = static_cast<uint8_t>(rsrcBlocks & 0xFF);
+            // rsrcExtents[1..2] stay zero (allocated by writeFile).
+
+            patched = true;
+            break;
+        }
+        if (patched) break;
+        node = (static_cast<uint32_t>(p[0x00]) << 24) |
+               (static_cast<uint32_t>(p[0x01]) << 16) |
+               (static_cast<uint32_t>(p[0x02]) << 8) |
+                static_cast<uint32_t>(p[0x03]);
+    }
+    if (!patched) return false;
+
+    // Spread catalog bytes back into raw.
+    size_t cursor = 0;
+    for (size_t i = 0; i < 3 && cursor < catalogBytes.size(); ++i) {
+        const uint16_t s = m_mdb.catalogExtents[i * 2];
+        const uint16_t c = m_mdb.catalogExtents[i * 2 + 1];
+        if (c == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(s) * blockSize;
+        const size_t len = std::min<size_t>(
+            static_cast<size_t>(c) * blockSize,
+            catalogBytes.size() - cursor);
+        std::memcpy(raw.data() + off,
+                    catalogBytes.data() + cursor, len);
+        cursor += len;
+    }
+
+    // 3. MDB drFreeBks decrement for rsrc fork blocks consumed.
+    if (rsrcBlocks > 0) {
+        // Re-read the live drFreeBks (writeFile already decremented for
+        // data fork, so we cannot use m_mdb.freeAllocBlocks which is still
+        // pre-write).
+        const uint16_t live =
+            (static_cast<uint16_t>(raw[0x400 + 0x22]) << 8) | raw[0x400 + 0x23];
+        const uint16_t newFree =
+            static_cast<uint16_t>(live - rsrcBlocks);
+        raw[0x400 + 0x22] = static_cast<uint8_t>((newFree >> 8) & 0xFF);
+        raw[0x400 + 0x23] = static_cast<uint8_t>(newFree & 0xFF);
+        bumpMdbWriteMetadata(raw, 0, 0, 0, toMacEpoch(std::time(nullptr)));
+    }
+    return true;
+}
+
 bool MacintoshHFSHandler::format(const std::string& volumeName) {
     if (!m_disk) return false;
     if (m_disk->isWriteProtected()) {
