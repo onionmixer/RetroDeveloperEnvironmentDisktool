@@ -616,17 +616,101 @@ bool MacintoshMFSHandler::renameFile(const std::string& oldName,
     return writeFile(leafNew, data, md);
 }
 
-bool MacintoshMFSHandler::format(const std::string&) {
-    // MFS format would create a fresh volume from scratch (boot blocks +
-    // MDB + 12-bit allocation map + empty directory area). Python provides
-    // mfs-init-empty for this; rdedisktool delegates by recommending users
-    // run that tool when they need a blank MFS image. Implementing it
-    // natively gains little but adds risk (MDB byte layout, bitmap byte
-    // layout, directory sentinel bytes — every byte must match the
-    // canonical layout to roundtrip with the Python reference).
-    throw NotImplementedException(
-        "Macintosh MFS format: use 'macdiskimage.py mfs-init-empty' to "
-        "create a blank MFS volume (rdedisktool will then read/write it)");
+bool MacintoshMFSHandler::format(const std::string& volumeName) {
+    // Native MFS format. Mirrors macdiskimage.py:5624 (write_mfs_init_empty)
+    // byte-for-byte so rdedisktool create produces the same image bytes as
+    // the Python reference for the same parameters.
+    if (!m_disk) return false;
+
+    // Defaults match Python: 800 sectors, alloc_block_size=1024, dir=12
+    // sectors, bootable=false. Native format takes the volume name from
+    // the CLI; everything else uses the same canonical defaults.
+    constexpr size_t SECTOR_SZ = 512;
+    constexpr size_t MFS_BOOT_BLOCK_SECTORS = 2;
+    constexpr size_t MFS_MDB_AND_MAP_SECTORS = 2;
+    constexpr size_t MFS_DIR_START_BLOCK = MFS_BOOT_BLOCK_SECTORS + MFS_MDB_AND_MAP_SECTORS;
+    constexpr size_t MFS_MAP_CAP_BYTES = MFS_MDB_AND_MAP_SECTORS * SECTOR_SZ - 64;
+    constexpr size_t MFS_MAP_MAX_ENTRIES = (MFS_MAP_CAP_BYTES * 8) / 12;
+
+    const auto& existing = m_disk->getRawData();
+    const size_t totalBytes = existing.size();
+    if (totalBytes == 0 || (totalBytes % SECTOR_SZ) != 0) {
+        throw InvalidFormatException("Macintosh MFS format: backing image must be "
+                                      "a non-zero multiple of 512 bytes "
+                                      "(call create() first)");
+    }
+    const size_t totalSectors = totalBytes / SECTOR_SZ;
+
+    // Volume name validation matches Python (max 27 MacRoman bytes).
+    std::string vname = volumeName.empty() ? std::string("UNTITLED") : volumeName;
+    if (vname.size() > 27) {
+        throw InvalidFormatException("MFS format: volume name longer than 27 bytes");
+    }
+
+    // Allocation block geometry: defaults from Python, with the same
+    // capacity/limit checks. allocation_block_size = 1024, directory_sectors = 12.
+    const size_t allocBlockSize = 1024;
+    const size_t directorySectors = 12;
+    const size_t allocStartBlockSec = MFS_DIR_START_BLOCK + directorySectors;
+    if (allocStartBlockSec >= totalSectors) {
+        throw InvalidFormatException("MFS format: image too small for boot+MDB+directory");
+    }
+    const size_t availableBytes = totalBytes - allocStartBlockSec * SECTOR_SZ;
+    if (availableBytes < allocBlockSize) {
+        throw InvalidFormatException("MFS format: no space for any allocation block");
+    }
+    size_t allocCount = availableBytes / allocBlockSize;
+    if (allocCount > MFS_MAP_MAX_ENTRIES) {
+        throw InvalidFormatException(
+            "MFS format: allocation block count " + std::to_string(allocCount) +
+            " exceeds map capacity " + std::to_string(MFS_MAP_MAX_ENTRIES) +
+            "; use larger allocation_block_size or smaller image");
+    }
+    if (allocCount > 0xFFFFu) {
+        throw InvalidFormatException("MFS format: allocation block count exceeds drNmAlBlks 16-bit limit");
+    }
+
+    std::vector<uint8_t> raw(totalBytes, 0);
+
+    // MDB at 0x400 (matches macdiskimage.py:5695). All-free volume so
+    // drFreeBks = allocCount; drNmFls = 0; drNxtFNum = 1.
+    raw[MFS_MDB_OFFSET]     = 0xD2;
+    raw[MFS_MDB_OFFSET + 1] = 0xD7;
+    auto put16 = [&](size_t off, uint16_t v) {
+        raw[off]     = static_cast<uint8_t>((v >> 8) & 0xFF);
+        raw[off + 1] = static_cast<uint8_t>(v & 0xFF);
+    };
+    auto put32 = [&](size_t off, uint32_t v) {
+        raw[off]     = static_cast<uint8_t>((v >> 24) & 0xFF);
+        raw[off + 1] = static_cast<uint8_t>((v >> 16) & 0xFF);
+        raw[off + 2] = static_cast<uint8_t>((v >> 8) & 0xFF);
+        raw[off + 3] = static_cast<uint8_t>(v & 0xFF);
+    };
+    put16(MFS_MDB_OFFSET + 0x0c, 0);                       // drNmFls
+    put16(MFS_MDB_OFFSET + 0x0e, MFS_DIR_START_BLOCK);     // drDrSt
+    put16(MFS_MDB_OFFSET + 0x10, directorySectors);        // drBlLen
+    put16(MFS_MDB_OFFSET + 0x12,
+          static_cast<uint16_t>(allocCount));              // drNmAlBlks
+    put32(MFS_MDB_OFFSET + 0x14,
+          static_cast<uint32_t>(allocBlockSize));          // drAlBlkSiz
+    put16(MFS_MDB_OFFSET + 0x1c,
+          static_cast<uint16_t>(allocStartBlockSec));      // drAlBlSt
+    put32(MFS_MDB_OFFSET + 0x1e, 1u);                       // drNxtFNum
+    put16(MFS_MDB_OFFSET + 0x22,
+          static_cast<uint16_t>(allocCount));              // drFreeBks
+    raw[MFS_MDB_OFFSET + 0x24] = static_cast<uint8_t>(vname.size());  // length
+    std::memcpy(raw.data() + MFS_MDB_OFFSET + 0x25,
+                vname.data(), vname.size());
+
+    // Allocation map and directory area are already zero (free / no entries).
+
+    m_disk->setRawData(raw);
+
+    // Refresh caches.
+    m_entries.clear();
+    if (!parseMdb()) return false;
+    if (!parseDirectory()) return false;
+    return true;
 }
 
 size_t MacintoshMFSHandler::getFreeSpace() const {
