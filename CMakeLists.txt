@@ -78,6 +78,7 @@ set(MAC_SOURCES
     src/macintosh/MacGcrDecoder.cpp
     src/macintosh/MacMfmDecoder.cpp
     src/macintosh/MacGcrEncoder.cpp
+    src/macintosh/MacMfmEncoder.cpp
 )
 
 # Filesystem sources
