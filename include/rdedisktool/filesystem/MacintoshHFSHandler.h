@@ -190,6 +190,11 @@ private:
         std::string leafName;
     };
     ParentResolved resolveParentForMutation(const std::string& path) const;
+
+    // C2 (folder rename): rename a folder while keeping its CNID stable so
+    // children remain attached. Within-parent rename only — cross-folder
+    // moves throw NotImplementedException.
+    bool renameFolder(const std::string& oldName, const std::string& newName);
 };
 
 } // namespace rde
