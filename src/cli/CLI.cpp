@@ -695,20 +695,24 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  rdedisktool list mydisk.dsk GAMES/RPG\n";
     } else if (command == "extract") {
         std::cout << "\nMacintosh-only Options (mutually exclusive):\n";
-        std::cout << "  --apple-double  Write data fork as the host file + ._<basename>\n";
-        std::cout << "                  sidecar holding real Mac name + Finder info + rsrc fork\n";
-        std::cout << "                  (AppleDouble v2, magic 0x00051607).\n";
+        std::cout << "  --apple-double  Write data fork to <output_path> + a paired\n";
+        std::cout << "                  ._<basename> sidecar in the same directory holding\n";
+        std::cout << "                  real Mac name + Finder info + rsrc fork (AppleDouble\n";
+        std::cout << "                  v2, magic 0x00051607). <output_path> must be a FILE\n";
+        std::cout << "                  path, not a directory.\n";
         std::cout << "  --macbinary     Write a single MacBinary v1 .bin file (128-byte header\n";
         std::cout << "                  + data fork + rsrc fork, padded to 128B blocks).\n";
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool extract game.dsk PLAYER.BIN ./player.bin\n";
         std::cout << "  rdedisktool extract game.dsk GAMES/GAME.COM\n";
         std::cout << "  rdedisktool extract game.dsk GAMES/RPG/SAVE.DAT ./mysave.dat\n";
-        std::cout << "  rdedisktool extract mac.img \"System Folder/Finder\" --apple-double ./out/\n";
+        std::cout << "  rdedisktool extract mac.img \"System Folder/Finder\" --apple-double ./Finder\n";
+        std::cout << "       (writes ./Finder + ./._Finder)\n";
         std::cout << "  rdedisktool extract mac.img \"TeachText\" --macbinary ./TeachText.bin\n";
-        std::cout << "\nNote: Without --apple-double / --macbinary, only the data fork is written\n";
-        std::cout << "      (rsrc fork is silently dropped — fine for text files but loses Mac\n";
-        std::cout << "      apps and resource-bearing files).\n";
+        std::cout << "\nNote: Without --apple-double / --macbinary, only the data fork is written.\n";
+        std::cout << "      A stderr warning fires if the source file has a non-empty resource\n";
+        std::cout << "      fork (silently dropping the rsrc fork is one of the easiest ways\n";
+        std::cout << "      to corrupt Mac applications).\n";
     } else if (command == "delete") {
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool delete mydisk.dsk OLDFILE.TXT\n";
@@ -1226,6 +1230,21 @@ int CLI::cmdExtract(const std::vector<std::string>& args) {
         if (modeAppleDouble || modeMacBinary) {
             return extractMacintoshSpecial(disk, filename, outputPath,
                                            modeAppleDouble, modeMacBinary);
+        }
+
+        // 4.1 (PR-A): warn loudly when a Mac file with a non-empty resource
+        // fork is being extracted without --apple-double / --macbinary —
+        // dropping the rsrc fork silently is one of the easiest ways to
+        // corrupt a Mac application.
+        if (auto* hfs = dynamic_cast<rde::MacintoshHFSHandler*>(disk.handler.get())) {
+            if (auto* child = hfs->lookupByPath(filename)) {
+                if (!child->isDirectory && child->rsrcLogical != 0) {
+                    std::cerr << "warning: '" << filename << "' has a non-empty "
+                              << "resource fork (" << child->rsrcLogical
+                              << " bytes); use --apple-double or --macbinary "
+                              << "to preserve it.\n";
+                }
+            }
         }
 
         auto data = disk.handler->readFile(filename);

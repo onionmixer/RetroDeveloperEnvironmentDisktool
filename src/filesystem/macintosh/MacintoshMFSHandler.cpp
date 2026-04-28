@@ -664,7 +664,11 @@ bool MacintoshMFSHandler::format(const std::string& volumeName) {
         throw InvalidFormatException(
             "MFS format: allocation block count " + std::to_string(allocCount) +
             " exceeds map capacity " + std::to_string(MFS_MAP_MAX_ENTRIES) +
-            "; use larger allocation_block_size or smaller image");
+            " (12-bit MFS allocation map limit). Use a smaller image (e.g. "
+            "400K floppy: -g 80:1:10:512) or a larger allocation block size. "
+            "For 800K MFS volumes seen in the wild, create the volume with "
+            "Mini vMac / hfsutils — rdedisktool can read those but cannot "
+            "write the layout.");
     }
     if (allocCount > 0xFFFFu) {
         throw InvalidFormatException("MFS format: allocation block count exceeds drNmAlBlks 16-bit limit");

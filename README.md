@@ -129,7 +129,7 @@ rdedisktool [options] <command> [arguments]
 | `--bootdisk-mode <strict|warn|off>` | Boot disk mutation protection mode (default: `strict`, safe add verification enabled) |
 | `--force-bootdisk` | Override boot disk mutation block intentionally |
 | `--force-system-file` | Force delete of boot-critical system files without prompt |
-| `--bootdisk-profile <dos33|prodos|msxdos|human68k|unknown>` | Force bootdisk profile for detection |
+| `--bootdisk-profile <dos33|prodos|msxdos|human68k|macintosh|unknown>` | Force bootdisk profile for detection |
 | `--keep-backup` | Keep `.bak` file when saving modified image |
 | `-h, --help` | Show help message |
 | `-V, --version` | Show version information |
@@ -864,8 +864,11 @@ rdedisktool list mac.img "System Folder"
 rdedisktool add     mac.img ./hello.txt "Hello.txt"
 rdedisktool extract mac.img "Hello.txt" ./out.txt
 
-# Extract a file with its resource fork preserved (AppleDouble v2 sidecar)
-rdedisktool extract mac.img "TeachText" --apple-double ./out/
+# Extract a file with its resource fork preserved (AppleDouble v2 sidecar).
+# The output path must be a FILE path; the ._<basename> sidecar is created
+# next to it in the same directory.
+rdedisktool extract mac.img "TeachText" --apple-double ./TeachText
+# (produces ./TeachText + ./._TeachText)
 
 # Extract as MacBinary v1 (single .bin with both forks + Finder info)
 rdedisktool extract mac.img "TeachText" --macbinary ./TeachText.bin

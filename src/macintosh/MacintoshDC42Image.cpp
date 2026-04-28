@@ -292,6 +292,11 @@ std::string MacintoshDC42Image::getDiagnostics() const {
     oss << "File System: " << fileSystemTypeToString(getFileSystemType()) << "\n";
     oss << "Write Protected: " << (m_writeProtected ? "Yes" : "No") << "\n";
     oss << "Modified: " << (m_modified ? "Yes" : "No") << "\n";
+    oss << "\n";
+    oss << "DC42 Notice: snow's bundled fluxfox (≤ v1.4.1) misdetects this DC42\n"
+        << "             file as raw and corrupts sector 0. Convert to raw\n"
+        << "             before mounting in snow:\n"
+        << "               rdedisktool convert <this> <out>.img -f mac_img\n";
     return oss.str();
 }
 
