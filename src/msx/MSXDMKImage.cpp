@@ -536,6 +536,7 @@ bool MSXDMKImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::X68000DIM:
         case DiskFormat::MacIMG:
         case DiskFormat::MacDC42:
+        case DiskFormat::MacMOOF:
             return false;
     }
     return false;

@@ -237,6 +237,7 @@ bool X68000XDFImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::X68000XDF:
         case DiskFormat::MacIMG:
         case DiskFormat::MacDC42:
+        case DiskFormat::MacMOOF:
             return false;
     }
     return false;

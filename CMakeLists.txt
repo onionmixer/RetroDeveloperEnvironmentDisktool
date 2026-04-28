@@ -74,6 +74,7 @@ set(MAC_SOURCES
     src/macintosh/DC42Checksum.cpp
     src/macintosh/MacFileExporters.cpp
     src/macintosh/MacFileImporters.cpp
+    src/macintosh/MacintoshMOOFImage.cpp
 )
 
 # Filesystem sources

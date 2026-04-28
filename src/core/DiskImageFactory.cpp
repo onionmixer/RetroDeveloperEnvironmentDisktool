@@ -137,6 +137,7 @@ Platform DiskImageFactory::getPlatformForFormat(DiskFormat format) {
 
         case DiskFormat::MacIMG:
         case DiskFormat::MacDC42:
+        case DiskFormat::MacMOOF:
             return Platform::Macintosh;
 
         case DiskFormat::Unknown:
@@ -284,6 +285,7 @@ DiskGeometry DiskImageFactory::getDefaultGeometry(DiskFormat format) {
         // (raw IMG and DC42 store sector streams, not GCR/MFM tracks).
         case DiskFormat::MacIMG:
         case DiskFormat::MacDC42:
+        case DiskFormat::MacMOOF:
             geom.tracks = 80;
             geom.sides = 2;
             geom.sectorsPerTrack = 18;
@@ -325,6 +327,8 @@ std::vector<std::string> DiskImageFactory::getExtensions(DiskFormat format) {
             return {".img"};
         case DiskFormat::MacDC42:
             return {".image", ".dc42"};
+        case DiskFormat::MacMOOF:
+            return {".moof"};
         case DiskFormat::Unknown:
             return {};
     }

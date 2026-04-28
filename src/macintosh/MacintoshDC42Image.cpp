@@ -247,6 +247,7 @@ bool MacintoshDC42Image::canConvertTo(DiskFormat format) const {
         case DiskFormat::X68000XDF:
         case DiskFormat::X68000DIM:
         case DiskFormat::MacDC42:
+        case DiskFormat::MacMOOF:
             return false;
     }
     return false;

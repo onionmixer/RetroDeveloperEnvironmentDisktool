@@ -147,6 +147,15 @@ rde::DiskFormat FormatDetector::detectByMagic(const std::vector<uint8_t>& data) 
         return dc42Format;
     }
 
+    // PR-E1: Applesauce MOOF — magic is 8 bytes "MOOF\xff\x0a\x0d\x0a", unique
+    // enough that no other format can collide. CRC + chunk validation happens
+    // later in the loader.
+    if (data.size() >= 8 &&
+        data[0] == 'M' && data[1] == 'O' && data[2] == 'O' && data[3] == 'F' &&
+        data[4] == 0xff && data[5] == 0x0a && data[6] == 0x0d && data[7] == 0x0a) {
+        return rde::DiskFormat::MacMOOF;
+    }
+
     return rde::DiskFormat::Unknown;
 }
 
@@ -194,6 +203,12 @@ rde::DiskFormat FormatDetector::detectByExtension(const std::string& ext, size_t
     // (they are ambiguous between Apple/MSX/Mac); content stage decides them.
     if (ext == ".image" || ext == ".dc42") {
         return rde::DiskFormat::MacDC42;
+    }
+
+    // PR-E1: Applesauce MOOF — unique extension, magic-detected anyway,
+    // but mapping by extension lets `info` work on truncated files.
+    if (ext == ".moof") {
+        return rde::DiskFormat::MacMOOF;
     }
 
     return rde::DiskFormat::Unknown;

@@ -37,7 +37,8 @@ enum class DiskFormat {
     X68000DIM,      // X68000 DIM format (.dim)
     // Macintosh formats
     MacIMG,         // Raw 512-byte sector image (.img / .dsk)
-    MacDC42         // Apple Disk Copy 4.2 container (.image / .dc42)
+    MacDC42,        // Apple Disk Copy 4.2 container (.image / .dc42)
+    MacMOOF         // Applesauce MOOF (.moof) — bitstream/flux GCR/MFM
 };
 
 // File system type
@@ -225,6 +226,7 @@ inline const char* formatToString(DiskFormat f) {
         case DiskFormat::X68000DIM: return "X68000 DIM";
         case DiskFormat::MacIMG: return "Macintosh Raw Image";
         case DiskFormat::MacDC42: return "Apple Disk Copy 4.2";
+        case DiskFormat::MacMOOF: return "Applesauce MOOF";
     }
     return "Unknown";
 }
@@ -248,6 +250,7 @@ inline const char* formatToIdentifier(DiskFormat f) {
         case DiskFormat::X68000DIM: return "X68000DIM";
         case DiskFormat::MacIMG: return "MacIMG";
         case DiskFormat::MacDC42: return "MacDC42";
+        case DiskFormat::MacMOOF: return "MacMOOF";
     }
     return "Unknown";
 }
@@ -268,6 +271,7 @@ inline const char* formatToExtension(DiskFormat f) {
         case DiskFormat::X68000DIM: return ".dim";
         case DiskFormat::MacIMG: return ".img";
         case DiskFormat::MacDC42: return ".image";
+        case DiskFormat::MacMOOF: return ".moof";
     }
     return "";
 }
@@ -291,6 +295,7 @@ inline DiskFormat stringToFormat(const std::string& s) {
     // ambiguous .img / .dsk extensions shared with other platforms.
     if (s == "mac_img" || s == "macimg") return DiskFormat::MacIMG;
     if (s == "mac_dc42" || s == "macdc42" || s == "dc42") return DiskFormat::MacDC42;
+    if (s == "mac_moof" || s == "macmoof" || s == "moof") return DiskFormat::MacMOOF;
     return DiskFormat::Unknown;
 }
 
