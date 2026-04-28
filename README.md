@@ -160,11 +160,19 @@ rdedisktool add diskwork/bootdisk/msx/msxdos23.dsk ./PATCH.BIN PATCH.BIN
 rdedisktool --force-bootdisk add diskwork/bootdisk/msx/msxdos23.dsk ./PATCH.BIN PATCH.BIN
 ```
 
-`strict` mode behavior on bootdisks:
-- `delete/mkdir/rmdir` are blocked by default.
-- `add` is allowed only when safe-add verification passes:
-  - protected boot sectors unchanged
-  - existing files unchanged (recursive, including subdirectories)
+Bootdisk mode behavior matrix:
+
+| Mode | `add` | `delete` / `mkdir` / `rmdir` / `rename` |
+|------|-------|------------------------------------------|
+| `strict` (default) | safe-add verification (boot sectors guarded) | **blocked** — requires `--force-bootdisk` per call |
+| `warn` | safe-add verification (boot sectors still guarded) | allowed with a stderr warning per call |
+| `off` | unrestricted | unrestricted |
+
+`safe-add` invariants (run in `strict` and `warn`):
+- protected boot sectors unchanged after the write
+- existing files unchanged (recursive, including subdirectories)
+
+**Critical system files** (e.g. `System` / `Finder` / `COMMAND2.COM` / `HUMAN.SYS`) still require `[y/N]` confirmation on `delete` regardless of mode. Use `--force-system-file` to bypass the prompt intentionally. (`rmdir` / `rename` of critical files are NOT prompted today — opting into `warn` mode allows those without confirmation. Future PR may extend the gate.)
 
 In verbose mode, `info -v` includes:
 - `BootDisk` / `Profile` / `Confidence`

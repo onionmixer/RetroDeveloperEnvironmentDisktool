@@ -1563,6 +1563,11 @@ int CLI::cmdDelete(const std::vector<std::string>& args) {
             }
             return 1;
         }
+        // PR-B: warn mode emits the policy reason as a stderr warning but
+        // proceeds. (Off / non-bootdisk paths leave reason empty.)
+        if (!policy.reason.empty()) {
+            std::cerr << policy.reason << "\n";
+        }
 
         if (!disk.handler->fileExists(filename)) {
             printError("File not found: " + filename);
@@ -1623,6 +1628,11 @@ int CLI::cmdRename(const std::vector<std::string>& args) {
             }
             return 1;
         }
+        // PR-B: warn mode emits the policy reason as a stderr warning but
+        // proceeds.
+        if (!policy.reason.empty()) {
+            std::cerr << policy.reason << "\n";
+        }
 
         if (!disk.handler->renameFile(oldName, newName)) {
             printError("Failed to rename: " + oldName + " -> " + newName);
@@ -1679,6 +1689,11 @@ int CLI::cmdMkdir(const std::vector<std::string>& args) {
                 printError("Hint: use --force-bootdisk to override intentionally.");
             }
             return 1;
+        }
+        // PR-B: warn mode emits the policy reason as a stderr warning but
+        // proceeds.
+        if (!policy.reason.empty()) {
+            std::cerr << policy.reason << "\n";
         }
 
         // Use unified directory interface
@@ -1742,6 +1757,11 @@ int CLI::cmdRmdir(const std::vector<std::string>& args) {
                 printError("Hint: use --force-bootdisk to override intentionally.");
             }
             return 1;
+        }
+        // PR-B: warn mode emits the policy reason as a stderr warning but
+        // proceeds.
+        if (!policy.reason.empty()) {
+            std::cerr << policy.reason << "\n";
         }
 
         // Use unified directory interface

@@ -222,7 +222,7 @@ BootDiskDetection BootDiskPolicy::detect(const std::string& imagePath,
 
 BootDiskDecision BootDiskPolicy::canMutate(const BootDiskDetection& det,
                                            BootDiskMode mode,
-                                           MutationOp /*op*/,
+                                           MutationOp op,
                                            const std::string& /*target*/,
                                            bool forceFlag) {
     BootDiskDecision out;
@@ -235,6 +235,37 @@ BootDiskDecision BootDiskPolicy::canMutate(const BootDiskDetection& det,
     }
     if (forceFlag) {
         return out;
+    }
+
+    // Warn mode: relax the destructive ops (delete / mkdir / rmdir /
+    // rename) to "warn-and-proceed" so that bulk trim operations on a
+    // bootdisk don't require --force-bootdisk per call. The boot block
+    // is still protected because:
+    //   * `add` (the path that touches sectors 0..1 most easily via
+    //     fragmentation) keeps going through safe-add verification,
+    //     handled caller-side based on this decision's allowed=false
+    //     for Add even under warn.
+    //   * Critical-file [y/N] confirmation in cmdDelete still fires for
+    //     System / Finder / etc. regardless of mode (per FIX 2.1's
+    //     mitigation guidance).
+    if (mode == BootDiskMode::Warn) {
+        const bool isDestructive =
+            op == MutationOp::Delete ||
+            op == MutationOp::Mkdir  ||
+            op == MutationOp::Rmdir  ||
+            op == MutationOp::Rename;
+        if (isDestructive) {
+            out.allowed = true;
+            out.reason =
+                std::string("warning: bootdisk-mode warn — destructive ") +
+                "mutation allowed on bootdisk (profile=" +
+                profileToString(det.profile) +
+                "). Use --bootdisk-mode strict to require explicit "
+                "--force-bootdisk per call.";
+            return out;
+        }
+        // Add falls through to the "blocked" branch so the caller routes
+        // it through safe-add verification (same path as strict).
     }
 
     out.allowed = false;
