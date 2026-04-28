@@ -527,6 +527,68 @@ int compareCatalogKey(uint32_t parentA, const std::string& nameA,
     return 0;
 }
 
+// C4 helper: allocate a free B-tree node by scanning the header node's
+// map record (offset 248..nodeSize-8). On success, sets the bit and
+// decrements freeNodes in the BT header rec; returns the new node index.
+// Returns 0 if no free nodes remain.
+inline uint32_t allocateBTreeNodeFromMap(
+        std::vector<uint8_t>& catalogBytes,
+        uint16_t nodeSize) {
+    if (catalogBytes.size() < nodeSize) return 0;
+    const size_t mapStart = 248;
+    const size_t mapEnd   = nodeSize - 8;  // before offset table
+
+    const uint32_t totalNodes =
+        (static_cast<uint32_t>(catalogBytes[14 + 0x16]) << 24) |
+        (static_cast<uint32_t>(catalogBytes[14 + 0x17]) << 16) |
+        (static_cast<uint32_t>(catalogBytes[14 + 0x18]) <<  8) |
+         static_cast<uint32_t>(catalogBytes[14 + 0x19]);
+    const uint32_t totalCovered =
+        std::min<uint32_t>(totalNodes,
+                            static_cast<uint32_t>((mapEnd - mapStart) * 8));
+
+    for (uint32_t b = 1; b < totalCovered; ++b) {  // skip node 0 (header)
+        const size_t off = mapStart + (b / 8);
+        const uint8_t mask = static_cast<uint8_t>(1u << (7 - (b & 7)));
+        if ((catalogBytes[off] & mask) == 0) {
+            catalogBytes[off] |= mask;
+            // Decrement freeNodes (BT header rec offset 0x1a, u32 BE).
+            const uint32_t fn =
+                (static_cast<uint32_t>(catalogBytes[14 + 0x1a]) << 24) |
+                (static_cast<uint32_t>(catalogBytes[14 + 0x1b]) << 16) |
+                (static_cast<uint32_t>(catalogBytes[14 + 0x1c]) <<  8) |
+                 static_cast<uint32_t>(catalogBytes[14 + 0x1d]);
+            const uint32_t fn2 = fn > 0 ? fn - 1 : 0;
+            catalogBytes[14 + 0x1a] = static_cast<uint8_t>((fn2 >> 24) & 0xFF);
+            catalogBytes[14 + 0x1b] = static_cast<uint8_t>((fn2 >> 16) & 0xFF);
+            catalogBytes[14 + 0x1c] = static_cast<uint8_t>((fn2 >>  8) & 0xFF);
+            catalogBytes[14 + 0x1d] = static_cast<uint8_t>(fn2 & 0xFF);
+            return b;
+        }
+    }
+    return 0;
+}
+
+// C4 helper: build an index-node record `key + 4 byte data (node number)`
+// from a leaf record (whose key we copy verbatim). Pad to even total size
+// per HFS B-tree convention.
+inline std::vector<uint8_t> buildIndexRecord(
+        const std::vector<uint8_t>& leafRecord,
+        uint32_t childNodeIdx) {
+    if (leafRecord.empty()) return {};
+    const uint8_t kl = leafRecord[0];
+    if (1U + kl > leafRecord.size()) return {};
+    std::vector<uint8_t> rec;
+    rec.reserve(1 + kl + 1 + 4);
+    rec.insert(rec.end(), leafRecord.begin(), leafRecord.begin() + 1 + kl);
+    if (rec.size() & 1U) rec.push_back(0);
+    rec.push_back(static_cast<uint8_t>((childNodeIdx >> 24) & 0xFF));
+    rec.push_back(static_cast<uint8_t>((childNodeIdx >> 16) & 0xFF));
+    rec.push_back(static_cast<uint8_t>((childNodeIdx >>  8) & 0xFF));
+    rec.push_back(static_cast<uint8_t>(childNodeIdx & 0xFF));
+    return rec;
+}
+
 inline void putBE16(std::vector<uint8_t>& raw, size_t off, uint16_t v) {
     raw[off]     = static_cast<uint8_t>((v >> 8) & 0xFF);
     raw[off + 1] = static_cast<uint8_t>(v & 0xFF);
@@ -1216,9 +1278,18 @@ bool MacintoshHFSHandler::writeFile(const std::string& filename,
     };
     const uint16_t freePtr = recOff(numRecs);  // start of free space
     const size_t freeSpace = (nodeSize - offsetTableBytes) - freePtr;
+    bool didSplit = false;
     if (fullRecord.size() + 2 > freeSpace) {
-        throw NotImplementedException("Macintosh HFS write: target leaf node full (split not implemented)");
+        // C4: split the leaf and insert via the dedicated path. Mutates
+        // catalogBytes; throws on tree shapes the partial implementation
+        // doesn't support.
+        if (!splitLeafAndInsertRecord(catalogBytes, nodeSize, targetNode,
+                                        parentCNID, leaf, fullRecord)) {
+            return false;
+        }
+        didSplit = true;
     }
+    if (!didSplit) {
 
     // Find the insertion index.
     size_t insertIdx = numRecs;
@@ -1271,6 +1342,14 @@ bool MacintoshHFSHandler::writeFile(const std::string& filename,
     }
     // Bump record count.
     putBE16(catalogBytes, nodeOff + 0x0a, static_cast<uint16_t>(numRecs + 1));
+
+    // C4: if the insertion landed at position 0 of the leaf, sync the
+    // parent index entry so its key reflects the new first record.
+    if (insertIdx == 0) {
+        syncIndexEntryForLeaf(catalogBytes, nodeSize, targetNode);
+    }
+
+    } // if (!didSplit)
 
     // 9. Spread catalog bytes back into the disk image (extents).
     {
@@ -2327,8 +2406,29 @@ bool MacintoshHFSHandler::insertCatalogLeafRecord(
     const size_t freeSpace = (nodeSize - offsetTableBytes) - freePtr;
     // +2 for the new offset table entry.
     if (fullRecord.size() + 2 > freeSpace) {
-        throw NotImplementedException(
-            "Macintosh HFS createDirectory: target leaf full (split not implemented)");
+        // C4: split the leaf and insert into the appropriate half. Mutates
+        // catalogBytes; throws NotImplementedException on tree shapes the
+        // split path doesn't handle (depth>2, parent index also full, etc.)
+        if (!splitLeafAndInsertRecord(catalogBytes, nodeSize, targetNode,
+                                        parentCNID, name, fullRecord)) {
+            return false;
+        }
+        // Spread the post-split catalog back into raw and return.
+        size_t cursor = 0;
+        for (size_t i = 0; i < 3 && cursor < catalogBytes.size(); ++i) {
+            const uint16_t s = m_mdb.catalogExtents[i * 2];
+            const uint16_t c = m_mdb.catalogExtents[i * 2 + 1];
+            if (c == 0) continue;
+            const uint64_t off = firstAllocByte +
+                static_cast<uint64_t>(s) * blockSize;
+            const size_t len = std::min<size_t>(
+                static_cast<size_t>(c) * blockSize,
+                catalogBytes.size() - cursor);
+            std::memcpy(raw.data() + off,
+                        catalogBytes.data() + cursor, len);
+            cursor += len;
+        }
+        return true;
     }
 
     size_t insertIdx = numRecs;
@@ -2376,6 +2476,12 @@ bool MacintoshHFSHandler::insertCatalogLeafRecord(
     }
     putBE16(catalogBytes, nodeOff + 0x0a, static_cast<uint16_t>(numRecs + 1));
 
+    // C4: if the insertion landed at position 0 of the leaf, the leaf's
+    // first key changed; sync the parent index entry.
+    if (insertIdx == 0) {
+        syncIndexEntryForLeaf(catalogBytes, nodeSize, targetNode);
+    }
+
     // Spread catalog bytes back into raw.
     size_t cursor = 0;
     for (size_t i = 0; i < 3 && cursor < catalogBytes.size(); ++i) {
@@ -2391,6 +2497,440 @@ bool MacintoshHFSHandler::insertCatalogLeafRecord(
                     catalogBytes.data() + cursor, len);
         cursor += len;
     }
+    return true;
+}
+
+// C4: split a full leaf node and insert a record. Operates on the
+// in-memory catalog file buffer (caller spreads back to raw). Throws
+// NotImplementedException for tree shapes the partial implementation
+// doesn't support (treeDepth>2, root-index also full, OOB nodes, etc.).
+bool MacintoshHFSHandler::splitLeafAndInsertRecord(
+        std::vector<uint8_t>& catalogBytes,
+        uint16_t nodeSize,
+        uint32_t fullLeafNode,
+        uint32_t parentCNID,
+        const std::string& name,
+        const std::vector<uint8_t>& fullRecord) {
+    if (catalogBytes.size() < nodeSize) return false;
+
+    auto getU32 = [&](size_t off) -> uint32_t {
+        return (static_cast<uint32_t>(catalogBytes[off    ]) << 24) |
+               (static_cast<uint32_t>(catalogBytes[off + 1]) << 16) |
+               (static_cast<uint32_t>(catalogBytes[off + 2]) <<  8) |
+                static_cast<uint32_t>(catalogBytes[off + 3]);
+    };
+    auto putU32 = [&](size_t off, uint32_t v) {
+        catalogBytes[off    ] = static_cast<uint8_t>((v >> 24) & 0xFF);
+        catalogBytes[off + 1] = static_cast<uint8_t>((v >> 16) & 0xFF);
+        catalogBytes[off + 2] = static_cast<uint8_t>((v >>  8) & 0xFF);
+        catalogBytes[off + 3] = static_cast<uint8_t>(v & 0xFF);
+    };
+
+    // BT header rec lives in node 0 starting at byte 14.
+    const size_t bth = 14;
+    const uint16_t treeDepth =
+        static_cast<uint16_t>((catalogBytes[bth] << 8) | catalogBytes[bth + 1]);
+    const uint32_t rootNode  = getU32(bth + 0x02);
+    const uint32_t lastLeaf  = getU32(bth + 0x0e);
+    const uint32_t leafRecs  = getU32(bth + 0x06);
+
+    if (treeDepth != 1 && treeDepth != 2) {
+        throw NotImplementedException(
+            "Macintosh HFS leaf split: tree depth > 2 unsupported "
+            "(needs cascading index split)");
+    }
+
+    // 1. Read the full leaf's records into a list of byte vectors.
+    const size_t oldOff = static_cast<size_t>(fullLeafNode) * nodeSize;
+    if (oldOff + nodeSize > catalogBytes.size()) {
+        throw NotImplementedException("HFS leaf split: full leaf node OOB");
+    }
+    const uint16_t oldNumRecs =
+        static_cast<uint16_t>((catalogBytes[oldOff + 0x0a] << 8) |
+                                catalogBytes[oldOff + 0x0b]);
+    const uint32_t oldFLink = getU32(oldOff + 0x00);
+    const uint32_t oldBLink = getU32(oldOff + 0x04);
+
+    auto recOff = [&](const uint8_t* p, uint16_t idx) -> uint16_t {
+        const size_t pos = nodeSize - 2 * (idx + 1);
+        return static_cast<uint16_t>((p[pos] << 8) | p[pos + 1]);
+    };
+    std::vector<std::vector<uint8_t>> oldRecs;
+    oldRecs.reserve(oldNumRecs);
+    {
+        const uint8_t* p = catalogBytes.data() + oldOff;
+        for (uint16_t i = 0; i < oldNumRecs; ++i) {
+            const uint16_t off = recOff(p, i);
+            const uint16_t end = recOff(p, static_cast<uint16_t>(i + 1));
+            if (off >= nodeSize || end > nodeSize || off >= end) {
+                throw NotImplementedException("HFS leaf split: malformed offset table");
+            }
+            oldRecs.emplace_back(p + off, p + end);
+        }
+    }
+
+    // 2. Find the insertion point for the new record (key-sorted).
+    size_t insertIdx = oldNumRecs;
+    for (size_t i = 0; i < oldRecs.size(); ++i) {
+        const auto& r = oldRecs[i];
+        if (r.size() < 7) continue;
+        const uint8_t kl = r[0];
+        if (kl < 6) continue;
+        const uint32_t pc =
+            (static_cast<uint32_t>(r[0x02]) << 24) |
+            (static_cast<uint32_t>(r[0x03]) << 16) |
+            (static_cast<uint32_t>(r[0x04]) <<  8) |
+             static_cast<uint32_t>(r[0x05]);
+        const uint8_t nl = r[0x06];
+        const std::string nm(reinterpret_cast<const char*>(r.data() + 0x07),
+                              std::min<size_t>(nl,
+                                static_cast<size_t>(kl >= 6 ? kl - 6 : 0)));
+        if (compareCatalogKey(parentCNID, name, pc, nm) < 0) {
+            insertIdx = i;
+            break;
+        }
+    }
+
+    // 3. Build the merged record list and partition ~50/50 by count.
+    std::vector<std::vector<uint8_t>> all = oldRecs;
+    all.insert(all.begin() + insertIdx, fullRecord);
+    const size_t total = all.size();
+    if (total < 2) return false;
+    const size_t splitIdx = total / 2;
+    if (splitIdx == 0 || splitIdx >= total) return false;
+
+    std::vector<std::vector<uint8_t>> leftRecs(all.begin(), all.begin() + splitIdx);
+    std::vector<std::vector<uint8_t>> rightRecs(all.begin() + splitIdx, all.end());
+
+    // 4. Allocate the new leaf node.
+    const uint32_t newLeafNode = allocateBTreeNodeFromMap(catalogBytes, nodeSize);
+    if (newLeafNode == 0) {
+        throw NotImplementedException(
+            "Macintosh HFS leaf split: B-tree map has no free nodes");
+    }
+    const size_t newOff = static_cast<size_t>(newLeafNode) * nodeSize;
+    if (newOff + nodeSize > catalogBytes.size()) {
+        throw NotImplementedException(
+            "Macintosh HFS leaf split: new leaf node beyond catalog file size");
+    }
+
+    auto packLeaf = [&](size_t nodeBase,
+                         uint32_t fLink, uint32_t bLink,
+                         const std::vector<std::vector<uint8_t>>& recs) -> bool {
+        std::memset(catalogBytes.data() + nodeBase, 0, nodeSize);
+        // Descriptor.
+        putU32(nodeBase + 0x00, fLink);
+        putU32(nodeBase + 0x04, bLink);
+        catalogBytes[nodeBase + 0x08] = 0xff;  // kind = leaf
+        catalogBytes[nodeBase + 0x09] = 0x01;  // height = 1
+        catalogBytes[nodeBase + 0x0a] =
+            static_cast<uint8_t>((recs.size() >> 8) & 0xFF);
+        catalogBytes[nodeBase + 0x0b] =
+            static_cast<uint8_t>(recs.size() & 0xFF);
+        // Pack records starting at offset 14.
+        size_t cursor = 14;
+        std::vector<uint16_t> offsets;
+        offsets.reserve(recs.size() + 1);
+        offsets.push_back(static_cast<uint16_t>(cursor));
+        for (const auto& r : recs) {
+            if (cursor + r.size() > nodeSize - 2 * (recs.size() + 1)) {
+                return false;  // doesn't fit even after split
+            }
+            std::memcpy(catalogBytes.data() + nodeBase + cursor,
+                        r.data(), r.size());
+            cursor += r.size();
+            offsets.push_back(static_cast<uint16_t>(cursor));
+        }
+        for (size_t i = 0; i < offsets.size(); ++i) {
+            const size_t pos = nodeSize - 2 * (i + 1);
+            catalogBytes[nodeBase + pos] =
+                static_cast<uint8_t>((offsets[i] >> 8) & 0xFF);
+            catalogBytes[nodeBase + pos + 1] =
+                static_cast<uint8_t>(offsets[i] & 0xFF);
+        }
+        return true;
+    };
+
+    // 5. Repack old leaf with the left half + new leaf with the right half.
+    if (!packLeaf(oldOff, /*fLink=*/newLeafNode, /*bLink=*/oldBLink, leftRecs)) {
+        throw NotImplementedException(
+            "Macintosh HFS leaf split: left half too large for one node");
+    }
+    if (!packLeaf(newOff, /*fLink=*/oldFLink,    /*bLink=*/fullLeafNode, rightRecs)) {
+        throw NotImplementedException(
+            "Macintosh HFS leaf split: right half too large for one node");
+    }
+
+    // 6. Patch old fLink target's bLink to point at the new leaf.
+    if (oldFLink != 0) {
+        const size_t f = static_cast<size_t>(oldFLink) * nodeSize;
+        if (f + nodeSize <= catalogBytes.size()) {
+            putU32(f + 0x04, newLeafNode);
+        }
+    }
+
+    // 7. Update header.lastLeaf if applicable. Note: the BT header rec's
+    //    `leafRecords` field is intentionally left untouched here for
+    //    consistency with the existing M7 / B2 / B3 / C1..C3 insert paths,
+    //    none of which update it. Python read walks the leaf chain rather
+    //    than trusting the field. Bringing it into sync with reality is
+    //    a separate cleanup PR.
+    (void)leafRecs;
+    if (oldFLink == 0 || lastLeaf == fullLeafNode) {
+        putU32(bth + 0x0e, newLeafNode);
+    }
+
+    // 8. Propagate to parent.
+    if (treeDepth == 1) {
+        // Root WAS the leaf. Allocate a new index node and set it as root.
+        const uint32_t newIdx = allocateBTreeNodeFromMap(catalogBytes, nodeSize);
+        if (newIdx == 0) {
+            throw NotImplementedException(
+                "Macintosh HFS leaf split: no free node for new root index");
+        }
+        const size_t idxOff = static_cast<size_t>(newIdx) * nodeSize;
+        if (idxOff + nodeSize > catalogBytes.size()) {
+            throw NotImplementedException("HFS leaf split: new index node OOB");
+        }
+        std::memset(catalogBytes.data() + idxOff, 0, nodeSize);
+        catalogBytes[idxOff + 0x08] = 0x00;  // kind = index
+        catalogBytes[idxOff + 0x09] = 0x02;  // height = 2 (above leaves)
+        catalogBytes[idxOff + 0x0a] = 0x00;
+        catalogBytes[idxOff + 0x0b] = 0x02;  // numRecs = 2
+
+        std::vector<uint8_t> r1 = buildIndexRecord(leftRecs.front(),  fullLeafNode);
+        std::vector<uint8_t> r2 = buildIndexRecord(rightRecs.front(), newLeafNode);
+        if (r1.empty() || r2.empty()) return false;
+
+        size_t cursor = 14;
+        std::memcpy(catalogBytes.data() + idxOff + cursor, r1.data(), r1.size());
+        cursor += r1.size();
+        const uint16_t off2 = static_cast<uint16_t>(cursor);
+        std::memcpy(catalogBytes.data() + idxOff + cursor, r2.data(), r2.size());
+        cursor += r2.size();
+        const uint16_t off3 = static_cast<uint16_t>(cursor);
+
+        // Offset table: [14, off2, off3]
+        const size_t base = idxOff + nodeSize;
+        catalogBytes[base - 2] = 0x00; catalogBytes[base - 1] = 14;
+        catalogBytes[base - 4] = static_cast<uint8_t>((off2 >> 8) & 0xFF);
+        catalogBytes[base - 3] = static_cast<uint8_t>(off2 & 0xFF);
+        catalogBytes[base - 6] = static_cast<uint8_t>((off3 >> 8) & 0xFF);
+        catalogBytes[base - 5] = static_cast<uint8_t>(off3 & 0xFF);
+
+        // Update header: rootNode = newIdx, treeDepth = 2.
+        catalogBytes[bth + 0x00] = 0x00;
+        catalogBytes[bth + 0x01] = 0x02;
+        putU32(bth + 0x02, newIdx);
+    } else {
+        // treeDepth == 2: existing root index. The split has two effects:
+        //   (a) the left leaf's first key may have changed (insertion at
+        //       front) — handled below via syncIndexEntryForLeaf
+        //   (b) a new leaf is born — a new entry must be inserted (here)
+        const size_t idxOff = static_cast<size_t>(rootNode) * nodeSize;
+        if (idxOff + nodeSize > catalogBytes.size()) {
+            throw NotImplementedException("HFS leaf split: root index OOB");
+        }
+
+        // (a) Sync the existing entry for the left (still fullLeafNode).
+        syncIndexEntryForLeaf(catalogBytes, nodeSize, fullLeafNode);
+
+        // (b) Insert (firstKey of new leaf, newLeafNode), sorted by key.
+        const uint16_t idxNumRecs =
+            static_cast<uint16_t>((catalogBytes[idxOff + 0x0a] << 8) |
+                                    catalogBytes[idxOff + 0x0b]);
+        auto idxRecOff = [&](uint16_t i) -> uint16_t {
+            const size_t pos = idxOff + nodeSize - 2 * (i + 1);
+            return static_cast<uint16_t>(
+                (catalogBytes[pos] << 8) | catalogBytes[pos + 1]);
+        };
+        const uint16_t idxFreePtr = idxRecOff(idxNumRecs);
+        const size_t idxOTSize = static_cast<size_t>(idxNumRecs + 1) * 2U;
+        const size_t idxFreeSpace =
+            (nodeSize - idxOTSize) - idxFreePtr;
+
+        std::vector<uint8_t> idxRec = buildIndexRecord(rightRecs.front(),
+                                                         newLeafNode);
+        if (idxRec.empty()) return false;
+        if (idxRec.size() + 2 > idxFreeSpace) {
+            throw NotImplementedException(
+                "Macintosh HFS leaf split: root index also full "
+                "(cascading index split deferred — out of scope)");
+        }
+
+        // Find sorted insert position in the index.
+        const uint8_t* idxP = catalogBytes.data() + idxOff;
+        size_t idxInsertIdx = idxNumRecs;
+        for (uint16_t i = 0; i < idxNumRecs; ++i) {
+            const uint16_t ko = idxRecOff(i);
+            if (ko + 1U + 6U > nodeSize) break;
+            const uint8_t kl = idxP[ko];
+            if (kl < 6) continue;
+            const uint32_t pc =
+                (static_cast<uint32_t>(idxP[ko + 0x02]) << 24) |
+                (static_cast<uint32_t>(idxP[ko + 0x03]) << 16) |
+                (static_cast<uint32_t>(idxP[ko + 0x04]) <<  8) |
+                 static_cast<uint32_t>(idxP[ko + 0x05]);
+            const uint8_t nl = idxP[ko + 0x06];
+            const std::string nm(
+                reinterpret_cast<const char*>(idxP + ko + 0x07),
+                std::min<size_t>(nl,
+                    static_cast<size_t>(kl >= 6 ? kl - 6 : 0)));
+            // Compare against the new leaf's first key.
+            const auto& firstRight = rightRecs.front();
+            const uint8_t newKl = firstRight[0];
+            const uint32_t newPc =
+                (static_cast<uint32_t>(firstRight[0x02]) << 24) |
+                (static_cast<uint32_t>(firstRight[0x03]) << 16) |
+                (static_cast<uint32_t>(firstRight[0x04]) <<  8) |
+                 static_cast<uint32_t>(firstRight[0x05]);
+            const uint8_t newNl = firstRight[0x06];
+            const std::string newNm(
+                reinterpret_cast<const char*>(firstRight.data() + 0x07),
+                std::min<size_t>(newNl,
+                    static_cast<size_t>(newKl >= 6 ? newKl - 6 : 0)));
+            if (compareCatalogKey(newPc, newNm, pc, nm) < 0) {
+                idxInsertIdx = i;
+                break;
+            }
+        }
+
+        const uint16_t insertOff = (idxInsertIdx == idxNumRecs) ?
+            idxFreePtr : idxRecOff(static_cast<uint16_t>(idxInsertIdx));
+        const size_t shiftLen = idxFreePtr - insertOff;
+        if (shiftLen > 0) {
+            std::memmove(catalogBytes.data() + idxOff + insertOff + idxRec.size(),
+                         catalogBytes.data() + idxOff + insertOff,
+                         shiftLen);
+        }
+        std::memcpy(catalogBytes.data() + idxOff + insertOff,
+                    idxRec.data(), idxRec.size());
+
+        std::vector<uint16_t> idxOffsets;
+        idxOffsets.reserve(idxNumRecs + 2);
+        for (uint16_t i = 0; i < idxNumRecs; ++i) idxOffsets.push_back(idxRecOff(i));
+        idxOffsets.insert(idxOffsets.begin() + idxInsertIdx, insertOff);
+        for (size_t i = idxInsertIdx + 1; i < idxOffsets.size(); ++i) {
+            idxOffsets[i] = static_cast<uint16_t>(idxOffsets[i] + idxRec.size());
+        }
+        idxOffsets.push_back(static_cast<uint16_t>(idxFreePtr + idxRec.size()));
+        for (size_t i = 0; i < idxOffsets.size(); ++i) {
+            const size_t pos = idxOff + nodeSize - 2 * (i + 1);
+            catalogBytes[pos]     =
+                static_cast<uint8_t>((idxOffsets[i] >> 8) & 0xFF);
+            catalogBytes[pos + 1] =
+                static_cast<uint8_t>(idxOffsets[i] & 0xFF);
+        }
+        catalogBytes[idxOff + 0x0a] =
+            static_cast<uint8_t>(((idxNumRecs + 1) >> 8) & 0xFF);
+        catalogBytes[idxOff + 0x0b] =
+            static_cast<uint8_t>((idxNumRecs + 1) & 0xFF);
+    }
+
+    return true;
+}
+
+// C4 helper: keep the root-index entry pointing to `leafNode` in sync
+// with the leaf's current first-record key. Called after every operation
+// that may shift a leaf's first record (insert at front, split, etc.).
+// No-op for treeDepth==1 (root is the leaf, no index exists).
+bool MacintoshHFSHandler::syncIndexEntryForLeaf(
+        std::vector<uint8_t>& catalogBytes,
+        uint16_t nodeSize,
+        uint32_t leafNode) {
+    if (catalogBytes.size() < nodeSize) return false;
+
+    auto getU32 = [&](size_t off) -> uint32_t {
+        return (static_cast<uint32_t>(catalogBytes[off    ]) << 24) |
+               (static_cast<uint32_t>(catalogBytes[off + 1]) << 16) |
+               (static_cast<uint32_t>(catalogBytes[off + 2]) <<  8) |
+                static_cast<uint32_t>(catalogBytes[off + 3]);
+    };
+
+    const size_t bth = 14;
+    const uint16_t treeDepth =
+        static_cast<uint16_t>((catalogBytes[bth] << 8) | catalogBytes[bth + 1]);
+    if (treeDepth < 2) return true;
+    const uint32_t rootNode = getU32(bth + 0x02);
+
+    // Read the leaf's current first record key.
+    const size_t leafOff = static_cast<size_t>(leafNode) * nodeSize;
+    if (leafOff + nodeSize > catalogBytes.size()) return false;
+    const uint8_t* lp = catalogBytes.data() + leafOff;
+    const uint16_t leafNumRecs =
+        static_cast<uint16_t>((lp[0x0a] << 8) | lp[0x0b]);
+    if (leafNumRecs == 0) return true;
+    const uint16_t leafFirstOff =
+        static_cast<uint16_t>((lp[nodeSize - 2] << 8) | lp[nodeSize - 1]);
+    const uint8_t leafKL = lp[leafFirstOff];
+    if (leafFirstOff + 1U + leafKL > nodeSize) return false;
+    std::vector<uint8_t> firstRec(lp + leafFirstOff,
+                                    lp + leafFirstOff + 1 + leafKL);
+
+    // Build the desired index record.
+    std::vector<uint8_t> desired = buildIndexRecord(firstRec, leafNode);
+    if (desired.empty()) return false;
+
+    // Find the existing index entry pointing to leafNode.
+    const size_t idxOff = static_cast<size_t>(rootNode) * nodeSize;
+    if (idxOff + nodeSize > catalogBytes.size()) return false;
+    uint8_t* ip = catalogBytes.data() + idxOff;
+    const uint16_t idxNumRecs =
+        static_cast<uint16_t>((ip[0x0a] << 8) | ip[0x0b]);
+    auto idxRecOff = [&](uint16_t i) -> uint16_t {
+        const size_t pos = nodeSize - 2 * (i + 1);
+        return static_cast<uint16_t>((ip[pos] << 8) | ip[pos + 1]);
+    };
+    for (uint16_t i = 0; i < idxNumRecs; ++i) {
+        const uint16_t off = idxRecOff(i);
+        const uint16_t end = idxRecOff(static_cast<uint16_t>(i + 1));
+        if (off >= nodeSize || end > nodeSize || off >= end) continue;
+        const uint8_t kl = ip[off];
+        size_t dataOff = 1U + kl;
+        if (dataOff & 1U) dataOff += 1;
+        if (dataOff + 4 > static_cast<size_t>(end - off)) continue;
+        const uint32_t child =
+            (static_cast<uint32_t>(ip[off + dataOff    ]) << 24) |
+            (static_cast<uint32_t>(ip[off + dataOff + 1]) << 16) |
+            (static_cast<uint32_t>(ip[off + dataOff + 2]) <<  8) |
+             static_cast<uint32_t>(ip[off + dataOff + 3]);
+        if (child != leafNode) continue;
+
+        // Compare existing record bytes with desired.
+        const size_t oldRecLen = static_cast<size_t>(end - off);
+        if (oldRecLen == desired.size() &&
+            std::memcmp(ip + off, desired.data(), oldRecLen) == 0) {
+            return true;  // already in sync
+        }
+
+        const ptrdiff_t sizeDelta =
+            static_cast<ptrdiff_t>(desired.size()) -
+            static_cast<ptrdiff_t>(oldRecLen);
+        const uint16_t freePtr = idxRecOff(idxNumRecs);
+        const size_t freeSpace =
+            (nodeSize - static_cast<size_t>(idxNumRecs + 1) * 2U) - freePtr;
+        if (sizeDelta > 0 && static_cast<size_t>(sizeDelta) > freeSpace) {
+            throw NotImplementedException(
+                "HFS index sync: entry update would overflow node");
+        }
+        const size_t shiftLen = freePtr - end;
+        if (sizeDelta != 0 && shiftLen > 0) {
+            std::memmove(ip + end + sizeDelta, ip + end, shiftLen);
+        }
+        std::memcpy(ip + off, desired.data(), desired.size());
+        for (uint16_t j = static_cast<uint16_t>(i + 1); j <= idxNumRecs; ++j) {
+            const size_t pos = nodeSize - 2 * (j + 1);
+            const uint16_t o0 =
+                static_cast<uint16_t>((ip[pos] << 8) | ip[pos + 1]);
+            const uint16_t no0 = static_cast<uint16_t>(o0 + sizeDelta);
+            ip[pos]     = static_cast<uint8_t>((no0 >> 8) & 0xFF);
+            ip[pos + 1] = static_cast<uint8_t>(no0 & 0xFF);
+        }
+        return true;
+    }
+    // No matching entry — leaf isn't pointed to by root index. Could happen
+    // for the very first leaf in a depth-1→depth-2 transition that hasn't
+    // completed yet; safe to ignore.
     return true;
 }
 

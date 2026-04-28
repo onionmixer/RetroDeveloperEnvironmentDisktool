@@ -112,23 +112,29 @@ rg -q "Boot disk protection" /tmp/rdedisktool_test.log || {
   cat /tmp/rdedisktool_test.log >&2; exit 1
 }
 
-# 6. Full-leaf rejection on the stuffit_expander image (catalog leaf is full).
+# 6. C4: catalog leaf split. The stuffit_expander fixture has its single
+#    leaf nearly full (~80 bytes free); pre-C4 this branch rejected adds
+#    with a "split not implemented" message. Post-C4, the leaf is split
+#    and the add succeeds, surviving cross-tool read.
 cp "$FX_FULL" "$WORK/full.img"
-FULL_SHA=$(sha256sum "$WORK/full.img" | awk '{print $1}')
-set +e
 "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/full.img" "$INPUT" "Hello.txt" \
-    >/tmp/rdedisktool_test.log 2>&1
-rc=$?
-set -e
-[[ $rc -ne 0 ]] || { echo "expected full-leaf HFS add to fail" >&2; exit 1; }
-rg -q "split not implemented" /tmp/rdedisktool_test.log || {
-  echo "expected 'split not implemented' message; got:" >&2
-  cat /tmp/rdedisktool_test.log >&2; exit 1
-}
-[[ "$FULL_SHA" == "$(sha256sum "$WORK/full.img" | awk '{print $1}')" ]] || {
-  echo "full-leaf image was mutated despite split-not-implemented refusal" >&2
+    >/tmp/rdedisktool_test.log 2>&1 || {
+  echo "C4: full-leaf add should now succeed via split" >&2
+  cat /tmp/rdedisktool_test.log >&2
   exit 1
 }
+"$RDEDISKTOOL" list "$WORK/full.img" | rg -q "Hello.txt" || {
+  echo "C4: Hello.txt missing from list after leaf-split add" >&2
+  "$RDEDISKTOOL" list "$WORK/full.img" >&2
+  exit 1
+}
+if [[ "$HAVE_PY" == "1" ]]; then
+  python3 "$PY_TOOL" ls "$WORK/full.img" | rg -q "Hello.txt" || {
+    echo "C4: Python ls does not see Hello.txt after split" >&2
+    python3 "$PY_TOOL" ls "$WORK/full.img" >&2
+    exit 1
+  }
+fi
 
 # 7. M10: rename and delete cycle on the non-bootable image.
 "$RDEDISKTOOL" --bootdisk-mode off rename "$WORK/nonboot.img" "Hello.txt" "World.txt" \

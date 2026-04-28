@@ -208,6 +208,32 @@ private:
         const std::string& leaf,
         const std::vector<uint8_t>& oldBody,
         const std::vector<uint8_t>& rsrcFork);
+
+    // C4 (catalog leaf split): split a full leaf node and insert a record
+    // that wouldn't otherwise fit. Allocates a new leaf from the B-tree
+    // node map, partitions records ~50/50 by count, fixes up the leaf
+    // chain (fLink / bLink), and updates the parent index. For
+    // treeDepth=1 (root is the leaf, e.g. fresh format() volume), a new
+    // index node is also allocated and the tree depth becomes 2. Throws
+    // NotImplementedException when the parent index is also full
+    // (cascading index split deferred), or when the tree depth exceeds 2
+    // (no fixture exercises this).
+    bool splitLeafAndInsertRecord(
+        std::vector<uint8_t>& catalogBytes,
+        uint16_t nodeSize,
+        uint32_t fullLeafNode,
+        uint32_t parentCNID,
+        const std::string& name,
+        const std::vector<uint8_t>& fullRecord);
+
+    // C4 helper: ensure the root-index entry pointing to `leafNode` has a
+    // key matching the leaf's current first-record key. No-op for
+    // treeDepth==1 (root is the leaf, no index to sync). Used after every
+    // leaf-modifying op (insert, split, ...) to keep the index consistent
+    // with the leaves it indexes.
+    bool syncIndexEntryForLeaf(std::vector<uint8_t>& catalogBytes,
+                                 uint16_t nodeSize,
+                                 uint32_t leafNode);
 };
 
 } // namespace rde
