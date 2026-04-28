@@ -1291,6 +1291,51 @@ bool MacintoshHFSHandler::format(const std::string& volumeName) {
     // Wipe everything — we own the entire image.
     std::fill(raw.begin(), raw.end(), 0);
 
+    // --- 0. Boot block scaffolding (sectors 0..1 = 1024 bytes) -------------
+    // Write the standard System 6/7 boot block header layout observed in
+    // 608_SystemTools.img: LK signature, BRA.W to entry 0x08a, sample-default
+    // version/flags/heap counts, and the canonical Pascal name fields with
+    // 0x20 (space) padding. The boot loader area itself stores only a
+    // BRA.S * (`60 fe`) at the entry — a halt loop. This keeps the volume
+    // "boot-shaped" so the boot disk policy will activate once System and
+    // Finder files are added, without shipping a real Mac boot loader.
+    {
+        uint8_t* bb = raw.data();
+        // bbID — magic
+        bb[0x000] = 'L'; bb[0x001] = 'K';
+        // bbEntry — BRA.W (60 00) with displacement 0x0086 → entry at 0x08a
+        bb[0x002] = 0x60; bb[0x003] = 0x00;
+        bb[0x004] = 0x00; bb[0x005] = 0x86;
+        // bbVersion (sample value)
+        bb[0x006] = 0x00; bb[0x007] = 0x17;
+        // bbPageFlags = 0 (already zero)
+
+        auto writePascal16 = [&](size_t off, const char* s) {
+            const size_t n = std::strlen(s);
+            bb[off] = static_cast<uint8_t>(n);
+            std::memcpy(bb + off + 1, s, n);
+            // Pad the remainder of the 16-byte field with spaces (0x20),
+            // matching Apple sample boot blocks.
+            std::memset(bb + off + 1 + n, 0x20, 15 - n);
+        };
+        writePascal16(0x00a, "System");
+        writePascal16(0x01a, "Finder");
+        writePascal16(0x02a, "Macsbug");
+        writePascal16(0x03a, "Disassembler");
+        writePascal16(0x04a, "StartUpScreen");
+        writePascal16(0x05a, "Finder");
+        writePascal16(0x06a, "Clipboard File");
+
+        // bbCntFCBs / bbCntEvts (sample defaults).
+        bb[0x07a] = 0x00; bb[0x07b] = 0x0a;   // 10
+        bb[0x07c] = 0x00; bb[0x07d] = 0x14;   // 20
+
+        // Halt loader at entry point: BRA.S * (branches to itself) so a Mac
+        // ROM that reads & jumps here just spins instead of executing
+        // garbage.
+        bb[0x08a] = 0x60; bb[0x08b] = 0xfe;
+    }
+
     const uint32_t macNow = toMacEpoch(std::time(nullptr));
 
     // --- 1. MDB at sector 2 (file offset 0x400) -----------------------------

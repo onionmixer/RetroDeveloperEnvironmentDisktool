@@ -43,6 +43,22 @@ rm -rf "$WORK"; mkdir -p "$WORK"
   "$RDEDISKTOOL" list "$WORK/blank.img" >&2
   exit 1
 }
+# Boot block scaffolding: LK signature, BRA.W to 0x08a, sample-default
+# bbVersion + Pascal name fields, halt loader at 0x08a.
+HEAD32=$(xxd -p -l 32 "$WORK/blank.img" | tr -d '\n')
+EXPECT='4c4b6000008600170000065379737465 6d20202020202020202006'
+EXPECT_NORM=$(printf '%s' "$EXPECT" | tr -d ' ')
+[[ "${HEAD32:0:54}" == "${EXPECT_NORM:0:54}" ]] || {
+  echo "B3 boot block prefix mismatch" >&2
+  echo "  got:    ${HEAD32:0:54}" >&2
+  echo "  expect: ${EXPECT_NORM:0:54}" >&2
+  exit 1
+}
+HALT=$(xxd -p -s 0x08a -l 2 "$WORK/blank.img")
+[[ "$HALT" == "60fe" ]] || {
+  echo "B3 boot block halt loader missing at 0x08a (got $HALT, expected 60fe)" >&2
+  exit 1
+}
 # Python independently confirms HFS classification + root listing.
 if [[ "$HAVE_PY" == "1" ]]; then
   python3 "$PY_TOOL" detect "$WORK/blank.img" \
