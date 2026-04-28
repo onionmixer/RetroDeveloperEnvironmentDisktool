@@ -1253,28 +1253,455 @@ bool MacintoshHFSHandler::format(const std::string&) {
         "and rdedisktool will then read/write it.");
 }
 
-bool MacintoshHFSHandler::createDirectory(const std::string& /*path*/) {
-    // mkdir on HFS requires inserting BOTH a folder record (type 0x01) and
-    // its corresponding thread record (type 0x03) into the catalog B-tree.
-    // The two records have keys with different parent CNIDs and may land
-    // in different leaf nodes — atomic insertion across two leaves with
-    // potential split is out of the safe-scope guards M7/M10 carry. Inside
-    // Mac File Manager defines the thread record layout but the Python
-    // reference (macdiskimage.py) intentionally ignores thread records on
-    // read, so cross-tool byte parity cannot be verified for the write side.
-    throw NotImplementedException(
-        "Macintosh HFS createDirectory: not implemented — requires atomic "
-        "insertion of folder + thread records across multiple catalog leaves "
-        "with no cross-tool verification path. Out of safe-scope.");
+// B2: single-leaf catalog inserter used by createDirectory. Throws
+// NotImplementedException when the target leaf is full (split required) or
+// the catalog is structurally unparseable. Returns false only when MDB /
+// extents are degenerate (e.g., empty catalog).
+bool MacintoshHFSHandler::insertCatalogLeafRecord(
+        std::vector<uint8_t>& raw,
+        uint32_t parentCNID,
+        const std::string& name,
+        const std::vector<uint8_t>& fullRecord) {
+    if (m_mdb.allocBlockSize == 0) return false;
+    if (m_mdb.catalogExtents[1] == 0) return false;
+
+    const uint32_t blockSize = m_mdb.allocBlockSize;
+    const uint64_t firstAllocByte =
+        static_cast<uint64_t>(m_mdb.firstAllocBlock) * 512ULL;
+
+    // Reassemble catalog file bytes from its initial 3 extents.
+    std::vector<uint8_t> catalogBytes;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint16_t start = m_mdb.catalogExtents[i * 2];
+        const uint16_t count = m_mdb.catalogExtents[i * 2 + 1];
+        if (count == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(start) * blockSize;
+        const uint64_t len = static_cast<uint64_t>(count) * blockSize;
+        if (off + len > raw.size()) {
+            throw NotImplementedException("HFS catalog extents past EOF");
+        }
+        catalogBytes.insert(catalogBytes.end(),
+            raw.begin() + off, raw.begin() + off + len);
+    }
+    if (catalogBytes.size() < 14 + 2 * 0x20) {
+        throw NotImplementedException("HFS catalog too small to parse");
+    }
+    const uint16_t nodeSize = (static_cast<uint16_t>(catalogBytes[0x20]) << 8) |
+                                catalogBytes[0x21];
+    if (nodeSize == 0 || nodeSize > 16384 ||
+        catalogBytes.size() % nodeSize != 0) {
+        throw NotImplementedException("HFS catalog node size invalid");
+    }
+
+    const uint32_t firstLeaf = (static_cast<uint32_t>(catalogBytes[0x18]) << 24) |
+                                (static_cast<uint32_t>(catalogBytes[0x19]) << 16) |
+                                (static_cast<uint32_t>(catalogBytes[0x1a]) << 8) |
+                                 static_cast<uint32_t>(catalogBytes[0x1b]);
+
+    // Walk leaf chain to find the leaf whose last key ≥ our key.
+    uint32_t targetNode = firstLeaf;
+    while (true) {
+        const size_t nodeOff = static_cast<size_t>(targetNode) * nodeSize;
+        if (nodeOff + nodeSize > catalogBytes.size()) {
+            throw NotImplementedException("HFS catalog leaf walk OOB");
+        }
+        const uint8_t* p = catalogBytes.data() + nodeOff;
+        const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+        if (numRecs == 0) break;
+        const uint16_t lastOff =
+            (static_cast<uint16_t>(p[nodeSize - 2 * (numRecs - 1) - 1]) |
+             (static_cast<uint16_t>(p[nodeSize - 2 * (numRecs - 1) - 2]) << 8));
+        const uint8_t lastKeyLen = p[lastOff];
+        if (lastOff + 1U + 6U > nodeSize) break;
+        const uint32_t lastParent =
+            (static_cast<uint32_t>(p[lastOff + 0x02]) << 24) |
+            (static_cast<uint32_t>(p[lastOff + 0x03]) << 16) |
+            (static_cast<uint32_t>(p[lastOff + 0x04]) << 8) |
+             static_cast<uint32_t>(p[lastOff + 0x05]);
+        const uint8_t lastNameLen = p[lastOff + 0x06];
+        const std::string lastName(reinterpret_cast<const char*>(p + lastOff + 0x07),
+                                    std::min<size_t>(lastNameLen,
+                                        static_cast<size_t>(lastKeyLen >= 6 ? lastKeyLen - 6 : 0)));
+        if (compareCatalogKey(parentCNID, name, lastParent, lastName) <= 0) {
+            break;
+        }
+        const uint32_t fLink = (static_cast<uint32_t>(p[0x00]) << 24) |
+                                (static_cast<uint32_t>(p[0x01]) << 16) |
+                                (static_cast<uint32_t>(p[0x02]) << 8) |
+                                 static_cast<uint32_t>(p[0x03]);
+        if (fLink == 0) break;
+        targetNode = fLink;
+    }
+
+    // Insert into chosen leaf (key-sorted).
+    const size_t nodeOff = static_cast<size_t>(targetNode) * nodeSize;
+    uint8_t* p = catalogBytes.data() + nodeOff;
+    const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+
+    const size_t offsetTableBytes = static_cast<size_t>(numRecs + 1) * 2U;
+    auto recOff = [&](uint16_t idx) -> uint16_t {
+        const size_t pos = nodeSize - 2 * (idx + 1);
+        return (static_cast<uint16_t>(p[pos]) << 8) | p[pos + 1];
+    };
+    const uint16_t freePtr = recOff(numRecs);
+    const size_t freeSpace = (nodeSize - offsetTableBytes) - freePtr;
+    // +2 for the new offset table entry.
+    if (fullRecord.size() + 2 > freeSpace) {
+        throw NotImplementedException(
+            "Macintosh HFS createDirectory: target leaf full (split not implemented)");
+    }
+
+    size_t insertIdx = numRecs;
+    for (uint16_t i = 0; i < numRecs; ++i) {
+        const uint16_t ko = recOff(i);
+        const uint8_t kl = p[ko];
+        if (ko + 1U + 6U > nodeSize) break;
+        const uint32_t pCnid =
+            (static_cast<uint32_t>(p[ko + 0x02]) << 24) |
+            (static_cast<uint32_t>(p[ko + 0x03]) << 16) |
+            (static_cast<uint32_t>(p[ko + 0x04]) << 8) |
+             static_cast<uint32_t>(p[ko + 0x05]);
+        const uint8_t nl = p[ko + 0x06];
+        const std::string nm(reinterpret_cast<const char*>(p + ko + 0x07),
+                              std::min<size_t>(nl,
+                                static_cast<size_t>(kl >= 6 ? kl - 6 : 0)));
+        if (compareCatalogKey(parentCNID, name, pCnid, nm) < 0) {
+            insertIdx = i;
+            break;
+        }
+    }
+
+    const uint16_t newRecStart = (insertIdx == numRecs) ?
+        freePtr : recOff(static_cast<uint16_t>(insertIdx));
+    const size_t shiftLen = freePtr - newRecStart;
+    if (shiftLen > 0) {
+        std::memmove(p + newRecStart + fullRecord.size(),
+                     p + newRecStart, shiftLen);
+    }
+    std::memcpy(p + newRecStart, fullRecord.data(), fullRecord.size());
+
+    std::vector<uint16_t> offsets;
+    offsets.reserve(numRecs + 2);
+    for (uint16_t i = 0; i < numRecs; ++i) offsets.push_back(recOff(i));
+    offsets.insert(offsets.begin() + insertIdx,
+                   static_cast<uint16_t>(newRecStart));
+    for (size_t i = insertIdx + 1; i < offsets.size(); ++i) {
+        offsets[i] = static_cast<uint16_t>(offsets[i] + fullRecord.size());
+    }
+    offsets.push_back(static_cast<uint16_t>(freePtr + fullRecord.size()));
+    for (size_t i = 0; i < offsets.size(); ++i) {
+        const size_t pos = nodeSize - 2 * (i + 1);
+        p[pos]     = static_cast<uint8_t>((offsets[i] >> 8) & 0xFF);
+        p[pos + 1] = static_cast<uint8_t>(offsets[i] & 0xFF);
+    }
+    putBE16(catalogBytes, nodeOff + 0x0a, static_cast<uint16_t>(numRecs + 1));
+
+    // Spread catalog bytes back into raw.
+    size_t cursor = 0;
+    for (size_t i = 0; i < 3 && cursor < catalogBytes.size(); ++i) {
+        const uint16_t start = m_mdb.catalogExtents[i * 2];
+        const uint16_t count = m_mdb.catalogExtents[i * 2 + 1];
+        if (count == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(start) * blockSize;
+        const size_t len = std::min<size_t>(
+            static_cast<size_t>(count) * blockSize,
+            catalogBytes.size() - cursor);
+        std::memcpy(raw.data() + off,
+                    catalogBytes.data() + cursor, len);
+        cursor += len;
+    }
+    return true;
 }
 
-bool MacintoshHFSHandler::deleteDirectory(const std::string& /*path*/) {
-    // rmdir is the inverse of createDirectory plus a recursive emptiness
-    // check. Same rationale as createDirectory — atomic two-leaf mutation
-    // with no cross-tool verification, deferred for safety.
-    throw NotImplementedException(
-        "Macintosh HFS deleteDirectory: not implemented — same constraint "
-        "as createDirectory (two-leaf mutation, no cross-tool verification).");
+// B2: single-leaf catalog remover used by deleteDirectory. Looks up by
+// (parentCNID, name) and drops the matching record. Returns true when a
+// record was removed; false when the key was not found.
+bool MacintoshHFSHandler::removeCatalogLeafRecord(
+        std::vector<uint8_t>& raw,
+        uint32_t parentCNID,
+        const std::string& name) {
+    if (m_mdb.allocBlockSize == 0) return false;
+    if (m_mdb.catalogExtents[1] == 0) return false;
+
+    const uint32_t blockSize = m_mdb.allocBlockSize;
+    const uint64_t firstAllocByte =
+        static_cast<uint64_t>(m_mdb.firstAllocBlock) * 512ULL;
+
+    std::vector<uint8_t> catalogBytes;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint16_t start = m_mdb.catalogExtents[i * 2];
+        const uint16_t count = m_mdb.catalogExtents[i * 2 + 1];
+        if (count == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(start) * blockSize;
+        const uint64_t len = static_cast<uint64_t>(count) * blockSize;
+        if (off + len > raw.size()) return false;
+        catalogBytes.insert(catalogBytes.end(),
+            raw.begin() + off, raw.begin() + off + len);
+    }
+    if (catalogBytes.size() < 14 + 2 * 0x20) return false;
+    const uint16_t nodeSize = (static_cast<uint16_t>(catalogBytes[0x20]) << 8) |
+                                catalogBytes[0x21];
+    if (nodeSize == 0 || nodeSize > 16384 ||
+        catalogBytes.size() % nodeSize != 0) return false;
+
+    const uint32_t firstLeaf = (static_cast<uint32_t>(catalogBytes[0x18]) << 24) |
+                                (static_cast<uint32_t>(catalogBytes[0x19]) << 16) |
+                                (static_cast<uint32_t>(catalogBytes[0x1a]) << 8) |
+                                 static_cast<uint32_t>(catalogBytes[0x1b]);
+
+    bool removed = false;
+    uint32_t node = firstLeaf;
+    std::set<uint32_t> visited;
+    while (node != 0 && !removed) {
+        if (visited.count(node)) break;
+        visited.insert(node);
+        const size_t nodeOff = static_cast<size_t>(node) * nodeSize;
+        if (nodeOff + nodeSize > catalogBytes.size()) break;
+        uint8_t* p = catalogBytes.data() + nodeOff;
+        const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+
+        auto recOff = [&](uint16_t idx) -> uint16_t {
+            const size_t pos = nodeSize - 2 * (idx + 1);
+            return (static_cast<uint16_t>(p[pos]) << 8) | p[pos + 1];
+        };
+
+        for (uint16_t i = 0; i < numRecs; ++i) {
+            const uint16_t off = recOff(i);
+            const uint16_t end = recOff(static_cast<uint16_t>(i + 1));
+            if (off >= nodeSize || end > nodeSize || off >= end) continue;
+            const size_t recLen = static_cast<size_t>(end) - off;
+            const uint8_t kl = p[off];
+            if (1U + kl > recLen) continue;
+            if (kl < 6) continue;
+            const uint32_t pc =
+                (static_cast<uint32_t>(p[off + 0x02]) << 24) |
+                (static_cast<uint32_t>(p[off + 0x03]) << 16) |
+                (static_cast<uint32_t>(p[off + 0x04]) << 8) |
+                 static_cast<uint32_t>(p[off + 0x05]);
+            if (pc != parentCNID) continue;
+            const uint8_t nl = p[off + 0x06];
+            const std::string nm(reinterpret_cast<const char*>(p + off + 0x07),
+                                  std::min<size_t>(nl,
+                                    static_cast<size_t>(kl >= 6 ? kl - 6 : 0)));
+            if (nm != name) continue;
+
+            // Match — drop this record.
+            const uint16_t freePtr = recOff(numRecs);
+            const size_t shiftLen = freePtr - end;
+            if (shiftLen > 0) {
+                std::memmove(p + off, p + end, shiftLen);
+            }
+            std::memset(p + freePtr - recLen, 0, recLen);
+
+            std::vector<uint16_t> offsets;
+            offsets.reserve(numRecs);
+            for (uint16_t k = 0; k < numRecs; ++k) offsets.push_back(recOff(k));
+            offsets.erase(offsets.begin() + i);
+            for (size_t k = i; k < offsets.size(); ++k) {
+                offsets[k] = static_cast<uint16_t>(offsets[k] - recLen);
+            }
+            offsets.push_back(static_cast<uint16_t>(freePtr - recLen));
+            for (size_t k = 0; k <= numRecs; ++k) {
+                const size_t pos = nodeSize - 2 * (k + 1);
+                p[pos] = 0;
+                p[pos + 1] = 0;
+            }
+            for (size_t k = 0; k < offsets.size(); ++k) {
+                const size_t pos = nodeSize - 2 * (k + 1);
+                p[pos]     = static_cast<uint8_t>((offsets[k] >> 8) & 0xFF);
+                p[pos + 1] = static_cast<uint8_t>(offsets[k] & 0xFF);
+            }
+            putBE16(catalogBytes, nodeOff + 0x0a, static_cast<uint16_t>(numRecs - 1));
+            removed = true;
+            break;
+        }
+        if (removed) break;
+        node = (static_cast<uint32_t>(p[0x00]) << 24) |
+               (static_cast<uint32_t>(p[0x01]) << 16) |
+               (static_cast<uint32_t>(p[0x02]) << 8) |
+                static_cast<uint32_t>(p[0x03]);
+    }
+    if (!removed) return false;
+
+    size_t cursor = 0;
+    for (size_t i = 0; i < 3 && cursor < catalogBytes.size(); ++i) {
+        const uint16_t start = m_mdb.catalogExtents[i * 2];
+        const uint16_t count = m_mdb.catalogExtents[i * 2 + 1];
+        if (count == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(start) * blockSize;
+        const size_t len = std::min<size_t>(
+            static_cast<size_t>(count) * blockSize,
+            catalogBytes.size() - cursor);
+        std::memcpy(raw.data() + off,
+                    catalogBytes.data() + cursor, len);
+        cursor += len;
+    }
+    return true;
+}
+
+bool MacintoshHFSHandler::createDirectory(const std::string& path) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+
+    // B2 scope: parent dir = root only. Reject anything with separators.
+    std::string leaf = path;
+    while (!leaf.empty() && leaf.front() == '/') leaf.erase(leaf.begin());
+    while (!leaf.empty() && leaf.back()  == '/') leaf.pop_back();
+    if (leaf.find('/') != std::string::npos) {
+        throw NotImplementedException(
+            "Macintosh HFS createDirectory: B2 scope is root-only "
+            "(no nested mkdir).");
+    }
+    if (leaf.empty() || leaf.size() > 31) return false;
+    if (lookupByPath(leaf) != nullptr) return false;
+    if (m_mdb.allocBlockSize == 0) return false;
+    if (m_mdb.catalogExtents[1] == 0) {
+        throw NotImplementedException("HFS createDirectory: catalog file empty");
+    }
+
+    std::vector<uint8_t> raw = m_disk->getRawData();
+
+    const uint32_t newCNID = m_mdb.nextCNID;
+    constexpr uint32_t kRoot = 2;
+    const uint32_t macNow = toMacEpoch(std::time(nullptr));
+
+    // 1. Folder record (recType=0x01, 70-byte body per Inside Mac).
+    std::vector<uint8_t> folderBody(70, 0);
+    folderBody[0x00] = 0x01;  // recType
+    // 0x02..0x03 flags = 0; 0x04..0x05 valence = 0
+    putBE32(folderBody, 0x06, newCNID);
+    putBE32(folderBody, 0x0a, macNow);  // create
+    putBE32(folderBody, 0x0e, macNow);  // modify
+    // 0x12 backup, 0x16 DInfo[16], 0x26 DXInfo[16], 0x36 reserved[16] = 0
+
+    std::vector<uint8_t> folderKey;
+    {
+        const uint8_t kl = static_cast<uint8_t>(6 + leaf.size());
+        folderKey.push_back(kl);
+        folderKey.push_back(0);
+        folderKey.push_back(static_cast<uint8_t>((kRoot >> 24) & 0xFF));
+        folderKey.push_back(static_cast<uint8_t>((kRoot >> 16) & 0xFF));
+        folderKey.push_back(static_cast<uint8_t>((kRoot >> 8) & 0xFF));
+        folderKey.push_back(static_cast<uint8_t>(kRoot & 0xFF));
+        folderKey.push_back(static_cast<uint8_t>(leaf.size()));
+        folderKey.insert(folderKey.end(), leaf.begin(), leaf.end());
+    }
+    std::vector<uint8_t> folderRecord = folderKey;
+    if (folderRecord.size() & 1U) folderRecord.push_back(0);
+    folderRecord.insert(folderRecord.end(), folderBody.begin(), folderBody.end());
+
+    // 2. Folder thread record (recType=0x03, 46-byte body per §22.2 sample
+    //    + Inside Mac CatThreadRec).
+    std::vector<uint8_t> threadBody(46, 0);
+    threadBody[0x00] = 0x03;  // folder thread
+    // 0x01 reserved, 0x02..0x09 reserved (8 bytes)
+    putBE32(threadBody, 0x0a, kRoot);  // thdParID = root
+    threadBody[0x0e] = static_cast<uint8_t>(leaf.size());
+    std::memcpy(threadBody.data() + 0x0f, leaf.data(),
+                std::min<size_t>(leaf.size(), 31));
+
+    std::vector<uint8_t> threadKey;
+    {
+        const uint8_t kl = 6;  // reserved + parentCNID + nameLen=0
+        threadKey.push_back(kl);
+        threadKey.push_back(0);
+        threadKey.push_back(static_cast<uint8_t>((newCNID >> 24) & 0xFF));
+        threadKey.push_back(static_cast<uint8_t>((newCNID >> 16) & 0xFF));
+        threadKey.push_back(static_cast<uint8_t>((newCNID >> 8) & 0xFF));
+        threadKey.push_back(static_cast<uint8_t>(newCNID & 0xFF));
+        threadKey.push_back(0);  // empty name
+    }
+    std::vector<uint8_t> threadRecord = threadKey;
+    if (threadRecord.size() & 1U) threadRecord.push_back(0);
+    threadRecord.insert(threadRecord.end(), threadBody.begin(), threadBody.end());
+
+    // 3. Insert both records. Either insertion may throw (split required) —
+    //    in that case `raw` is dropped without commit, leaving disk untouched.
+    if (!insertCatalogLeafRecord(raw, kRoot, leaf, folderRecord)) return false;
+    if (!insertCatalogLeafRecord(raw, newCNID, std::string(), threadRecord)) {
+        return false;
+    }
+
+    // 4. MDB updates.
+    putBE32(raw, 0x400 + 0x1e, m_mdb.nextCNID + 1);  // drNxtCNID
+    bumpMdbWriteMetadata(raw, 0, +1, +1, macNow);     // drDirCnt+1, drNmRtDirs+1
+    applyRootFolderValenceDelta(raw, m_mdb.firstAllocBlock,
+                                  m_mdb.allocBlockSize,
+                                  m_mdb.catalogExtents, +1);
+
+    // 5. Commit.
+    m_disk->setRawData(raw);
+
+    // 6. Refresh caches.
+    m_childrenByParent.clear();
+    m_byCNID.clear();
+    m_extentsOverflow.clear();
+    parseMdb();
+    walkExtentsOverflowLeaves();
+    walkCatalogLeaves();
+    return true;
+}
+
+bool MacintoshHFSHandler::deleteDirectory(const std::string& path) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+
+    std::string leaf = path;
+    while (!leaf.empty() && leaf.front() == '/') leaf.erase(leaf.begin());
+    while (!leaf.empty() && leaf.back()  == '/') leaf.pop_back();
+    if (leaf.find('/') != std::string::npos) {
+        throw NotImplementedException(
+            "Macintosh HFS deleteDirectory: B2 scope is root-only.");
+    }
+    if (leaf.empty()) return false;
+
+    const CatalogChild* victim = lookupByPath(leaf);
+    if (!victim) return false;
+    if (!victim->isDirectory) return false;
+
+    // Emptiness check via cached catalog (refreshed at end of every mutator).
+    auto childIt = m_childrenByParent.find(victim->cnid);
+    if (childIt != m_childrenByParent.end() && !childIt->second.empty()) {
+        return false;  // non-empty — POSIX rmdir semantics
+    }
+
+    constexpr uint32_t kRoot = 2;
+    std::vector<uint8_t> raw = m_disk->getRawData();
+
+    // Drop the folder record (key parent=2, name=leaf) AND its thread record
+    // (key parent=victim.cnid, name=""). Either failure aborts before commit.
+    if (!removeCatalogLeafRecord(raw, kRoot, leaf)) return false;
+    if (!removeCatalogLeafRecord(raw, victim->cnid, std::string())) {
+        // First removal succeeded in our snapshot but second didn't —
+        // drop the snapshot and throw so the on-disk image is untouched.
+        throw NotImplementedException(
+            "Macintosh HFS deleteDirectory: thread record missing — "
+            "catalog inconsistent (volume may have been written by a tool "
+            "that omits thread records).");
+    }
+
+    bumpMdbWriteMetadata(raw, 0, -1, -1, toMacEpoch(std::time(nullptr)));
+    applyRootFolderValenceDelta(raw, m_mdb.firstAllocBlock,
+                                  m_mdb.allocBlockSize,
+                                  m_mdb.catalogExtents, -1);
+
+    m_disk->setRawData(raw);
+
+    m_childrenByParent.clear();
+    m_byCNID.clear();
+    m_extentsOverflow.clear();
+    parseMdb();
+    walkExtentsOverflowLeaves();
+    walkCatalogLeaves();
+    return true;
 }
 
 size_t MacintoshHFSHandler::getFreeSpace() const {

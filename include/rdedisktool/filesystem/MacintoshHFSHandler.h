@@ -166,6 +166,20 @@ private:
 
     // Read raw bytes from an HFS allocation-block run.
     std::vector<uint8_t> readAllocBlocks(uint16_t startBlock, uint16_t count) const;
+
+    // B2 (mkdir / rmdir): single-leaf catalog mutators used by createDirectory
+    // and deleteDirectory. These reassemble the catalog file from its initial
+    // 3 extents, mutate the leaf containing the target key, then spread the
+    // bytes back into `raw`. They throw NotImplementedException when the
+    // mutation would require a node split or cross-leaf operation, so that
+    // partial mutations are never committed.
+    bool insertCatalogLeafRecord(std::vector<uint8_t>& raw,
+                                  uint32_t parentCNID,
+                                  const std::string& name,
+                                  const std::vector<uint8_t>& fullRecord);
+    bool removeCatalogLeafRecord(std::vector<uint8_t>& raw,
+                                  uint32_t parentCNID,
+                                  const std::string& name);
 };
 
 } // namespace rde
