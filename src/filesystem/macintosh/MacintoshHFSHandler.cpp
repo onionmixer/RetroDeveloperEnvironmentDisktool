@@ -1253,14 +1253,18 @@ bool MacintoshHFSHandler::format(const std::string& volumeName) {
     }
     const size_t numSectors = totalBytes / 512;
 
-    // B3 scope: support 800K and 1440K HFS volumes, the only sizes whose
-    // byte layout is sample-cross-checked (stuffit_expander_5.5.img =
-    // 1440K). Other sizes require either bigger bitmaps (>1 sector) or a
-    // larger drAlBlkSiz; out of scope until a sample fixture exists.
+    // rdedisktool only formats classic Mac floppy geometries: 800K
+    // (1600 sectors) and 1440K (2880 sectors). Larger HFS volumes are out
+    // of scope by design — they need wider bitmaps and/or a non-512
+    // drAlBlkSiz, and the legitimate use cases (hard disks, partitions)
+    // are covered by emulator-native tools (BasiliskII / Mini vMac /
+    // hfsutils mkfs.hfs).
     if (numSectors != 1600 && numSectors != 2880) {
         throw NotImplementedException(
-            "Macintosh HFS format: B3 scope is 800K / 1440K only. "
-            "Provide a different geometry or use an external tool.");
+            "Macintosh HFS format: only 800K (1600 sectors) and 1440K "
+            "(2880 sectors) Mac floppy geometries are supported. Larger "
+            "volumes are out of scope — use BasiliskII / Mini vMac / "
+            "hfsutils to create them.");
     }
 
     // Volume name (clamp to 27 MacRoman bytes per Inside Mac drVN limit).
