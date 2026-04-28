@@ -13,5 +13,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$SCRIPT_DIR/test_bootdisk_guard_macintosh.sh"
 "$SCRIPT_DIR/test_mac_mfs_write.sh"
 "$SCRIPT_DIR/test_mac_convert.sh"
+"$SCRIPT_DIR/test_mac_hfs_write.sh"
 
 echo "[PASS] all bootdisk guard tests"
