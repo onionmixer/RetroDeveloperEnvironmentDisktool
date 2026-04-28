@@ -1996,6 +1996,19 @@ bool MacintoshHFSHandler::applyRsrcForkAndMetadataPatch(
             std::memcpy(body + 0x02, oldBody.data() + 0x02, 0x12);
             std::memcpy(body + 0x34, oldBody.data() + 0x34, 0x04);
             std::memcpy(body + 0x38, oldBody.data() + 0x38, 0x12);
+            // PR-C: also preserve catalog dates (filCrDat 0x2c, filMdDat
+            // 0x30) when oldBody carries non-zero values. C3 rename used
+            // to leave the post-writeFile "now" timestamps; preserving
+            // the original dates is more faithful and lets PR-C plumb
+            // MacBinary createDate / modifyDate through the same path.
+            const bool hasCreateDate =
+                (oldBody[0x2c] | oldBody[0x2d] |
+                 oldBody[0x2e] | oldBody[0x2f]) != 0;
+            const bool hasModifyDate =
+                (oldBody[0x30] | oldBody[0x31] |
+                 oldBody[0x32] | oldBody[0x33]) != 0;
+            if (hasCreateDate) std::memcpy(body + 0x2c, oldBody.data() + 0x2c, 4);
+            if (hasModifyDate) std::memcpy(body + 0x30, oldBody.data() + 0x30, 4);
 
             // Set the rsrc fork fields.
             body[0x22] = static_cast<uint8_t>((rsrcStart >> 8) & 0xFF);
@@ -2058,6 +2071,87 @@ bool MacintoshHFSHandler::applyRsrcForkAndMetadataPatch(
         raw[0x400 + 0x23] = static_cast<uint8_t>(newFree & 0xFF);
         bumpMdbWriteMetadata(raw, 0, 0, 0, toMacEpoch(std::time(nullptr)));
     }
+    return true;
+}
+
+// PR-C: write a Mac file with both forks + Finder metadata. Combines
+// writeFile (data fork only) with applyRsrcForkAndMetadataPatch (rsrc
+// fork + FInfo / FXInfo / dates / clpSize / filFlags / filTyp). Used
+// by `add --macbinary` and `add --apple-double`.
+bool MacintoshHFSHandler::writeFileWithForks(
+        const std::string& targetPath,
+        const std::vector<uint8_t>& dataFork,
+        const std::vector<uint8_t>& rsrcFork,
+        const uint8_t fileType[4],
+        const uint8_t creator[4],
+        uint8_t finderFlagsHi,
+        uint8_t finderFlagsLo,
+        const uint8_t finderInfoLocation[6],
+        const uint8_t finderInfoExtended[16],
+        uint32_t createDate,
+        uint32_t modifyDate) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+
+    // Step 1: write the data fork via the existing writeFile path. This
+    // also handles bootdisk safe-add prerequisites (M7) and creates the
+    // initial catalog record with zeros for FInfo/FXInfo.
+    FileMetadata md;
+    md.targetName = targetPath;
+    if (!writeFile(targetPath, dataFork, md)) {
+        return false;
+    }
+
+    // Step 2: build a synthetic 102-byte body template carrying the
+    // desired FInfo/FXInfo/dates/etc. applyRsrcForkAndMetadataPatch
+    // overwrites the relevant byte ranges in the new record.
+    std::vector<uint8_t> templateBody(102, 0);
+    // 0x02 filFlags / 0x03 filTyp left at 0 (locked bit lives in FInfo).
+    std::memcpy(templateBody.data() + 0x04, fileType, 4);
+    std::memcpy(templateBody.data() + 0x08, creator,  4);
+    templateBody[0x0c] = finderFlagsHi;
+    templateBody[0x0d] = finderFlagsLo;
+    std::memcpy(templateBody.data() + 0x0e, finderInfoLocation, 6);
+    // FInfo[16] is now packed at body[0x04..0x13].
+
+    // Catalog dates (filCrDat / filMdDat). Encoded in the template body
+    // so applyRsrcForkAndMetadataPatch's date-preservation branch picks
+    // them up.
+    if (createDate != 0) {
+        templateBody[0x2c] = static_cast<uint8_t>((createDate >> 24) & 0xFF);
+        templateBody[0x2d] = static_cast<uint8_t>((createDate >> 16) & 0xFF);
+        templateBody[0x2e] = static_cast<uint8_t>((createDate >>  8) & 0xFF);
+        templateBody[0x2f] = static_cast<uint8_t>(createDate & 0xFF);
+    }
+    if (modifyDate != 0) {
+        templateBody[0x30] = static_cast<uint8_t>((modifyDate >> 24) & 0xFF);
+        templateBody[0x31] = static_cast<uint8_t>((modifyDate >> 16) & 0xFF);
+        templateBody[0x32] = static_cast<uint8_t>((modifyDate >>  8) & 0xFF);
+        templateBody[0x33] = static_cast<uint8_t>(modifyDate & 0xFF);
+    }
+    // FXInfo at body[0x38..0x47].
+    std::memcpy(templateBody.data() + 0x38, finderInfoExtended, 16);
+
+    // Step 3: figure out the (parent CNID, leaf name) under which the
+    // new record was inserted, then patch its body.
+    ParentResolved pr = resolveParentForMutation(targetPath);
+    std::vector<uint8_t> raw = m_disk->getRawData();
+    if (!applyRsrcForkAndMetadataPatch(raw, pr.parentCNID, pr.leafName,
+                                          templateBody, rsrcFork)) {
+        return false;
+    }
+    m_disk->setRawData(raw);
+
+    // Refresh in-memory caches so subsequent operations see the
+    // updated metadata + rsrc fork extents.
+    m_childrenByParent.clear();
+    m_byCNID.clear();
+    m_extentsOverflow.clear();
+    parseMdb();
+    walkExtentsOverflowLeaves();
+    walkCatalogLeaves();
     return true;
 }
 

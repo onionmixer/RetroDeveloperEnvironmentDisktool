@@ -119,6 +119,25 @@ public:
     // nullptr when the path does not resolve to a file or folder.
     const CatalogChild* lookupByPath(const std::string& path) const;
 
+    // PR-C: write a Mac file with both forks + Finder metadata.
+    // Internally calls writeFile (data fork) then patches the new
+    // catalog record body to (a) attach the resource fork via a fresh
+    // contiguous run of allocation blocks, (b) restore FInfo
+    // (type/creator/flags/location), FXInfo, and the catalog dates
+    // from the parsed MacBinary / AppleDouble source. Used by `add
+    // --macbinary` / `add --apple-double`.
+    bool writeFileWithForks(const std::string& targetPath,
+                              const std::vector<uint8_t>& dataFork,
+                              const std::vector<uint8_t>& rsrcFork,
+                              const uint8_t fileType[4],
+                              const uint8_t creator[4],
+                              uint8_t finderFlagsHi,
+                              uint8_t finderFlagsLo,
+                              const uint8_t finderInfoLocation[6],
+                              const uint8_t finderInfoExtended[16],
+                              uint32_t createDate,
+                              uint32_t modifyDate);
+
 private:
     Mdb m_mdb{};
     BootBlock m_bootBlock{};

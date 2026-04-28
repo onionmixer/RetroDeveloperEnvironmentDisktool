@@ -8,6 +8,7 @@
 #include "rdedisktool/filesystem/MacintoshHFSHandler.h"
 #include "rdedisktool/filesystem/MacintoshMFSHandler.h"
 #include "rdedisktool/macintosh/MacFileExporters.h"
+#include "rdedisktool/macintosh/MacFileImporters.h"
 #include "rdedisktool/apple/AppleConstants.h"
 #include "rdedisktool/msx/MSXXSAImage.h"
 #include "rdedisktool/msx/MSXDiskImage.h"
@@ -622,6 +623,18 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "                        ProDOS names:  SYS/BIN/TXT/BAS/CMD/INT/REL\n";
         std::cout << "                        Hex values:    0xFF or $FF\n";
         std::cout << "  -a, --addr <addr>   Load address for binary files (hex: 0x0803 or $0803)\n";
+        std::cout << "\nMacintosh-only Options (mutually exclusive, HFS only):\n";
+        std::cout << "  --macbinary         <host_file> is a MacBinary v1 (.bin) container.\n";
+        std::cout << "                      Both forks + Finder info (type/creator/flags) are\n";
+        std::cout << "                      written into the catalog. Target name defaults to\n";
+        std::cout << "                      the MacBinary Pascal name; explicit target\n";
+        std::cout << "                      argument overrides.\n";
+        std::cout << "  --apple-double      <host_file> is the data fork. The sidecar is\n";
+        std::cout << "                      auto-discovered next to it as one of:\n";
+        std::cout << "                        ._<basename>     (macOS convention)\n";
+        std::cout << "                        %<basename>      (netatalk-style)\n";
+        std::cout << "                        %<stem>.ad       (Retro68-style)\n";
+        std::cout << "                      Both forks + Finder info are written.\n";
         std::cout << "\nFile Type Reference:\n";
         std::cout << "  DOS 3.3:  T=Text  I=IntBASIC  A=Applesoft  B=Binary  S=S-type  R=Reloc\n";
         std::cout << "  ProDOS:   TXT=0x04  INT=0xFA  BAS=0xFC  BIN=0x06  SYS=0xFF  CMD=0xF0  REL=0xFE\n";
@@ -633,6 +646,10 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  rdedisktool add disk.do ./HELLO HELLO --type B --addr 0x0803\n";
         std::cout << "  rdedisktool add disk.po ./HELLO HELLO --type BIN --addr 0x0803\n";
         std::cout << "  rdedisktool add disk.po ./SYSTEM SYSTEM --type SYS --addr 0x2000\n";
+        std::cout << "  rdedisktool add mac.img ./Hello.bin --macbinary\n";
+        std::cout << "       (target name 'Hello' from MacBinary header)\n";
+        std::cout << "  rdedisktool add mac.img ./Hello.APPL --apple-double\n";
+        std::cout << "       (auto-finds sidecar ._Hello.APPL / %Hello.APPL / %Hello.ad)\n";
     } else if (command == "delete") {
         std::cout << "\nNotes:\n";
         std::cout << "  Deleting boot-critical system files asks for [y/N] confirmation.\n";
@@ -1356,6 +1373,27 @@ static uint16_t parseAddressString(const std::string& addrStr) {
 }
 
 int CLI::cmdAdd(const std::vector<std::string>& args) {
+    // PR-C: Mac-specific add modes (mutually exclusive). Pre-strip them
+    // before the generic option parser sees the argv. Symmetric to
+    // cmdExtract's --apple-double / --macbinary handling.
+    bool modeMacBinary   = false;
+    bool modeAppleDouble = false;
+    std::vector<std::string> filteredArgs;
+    filteredArgs.reserve(args.size());
+    for (const auto& a : args) {
+        if (a == "--macbinary") {
+            modeMacBinary = true;
+        } else if (a == "--apple-double") {
+            modeAppleDouble = true;
+        } else {
+            filteredArgs.push_back(a);
+        }
+    }
+    if (modeMacBinary && modeAppleDouble) {
+        printError("--apple-double and --macbinary are mutually exclusive");
+        return 1;
+    }
+
     // Parse options using CommandOptions
     rdedisktool::CommandOptions opts;
     opts.addFlag("force", {"-f", "--force"});
@@ -1363,7 +1401,7 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
     opts.addValue("addr", {"-a", "--addr"});
 
     std::string parseError;
-    if (!opts.parse(args, &parseError)) {
+    if (!opts.parse(filteredArgs, &parseError)) {
         printError(parseError);
         printCommandHelp("add");
         return 1;
@@ -1399,7 +1437,10 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
         return 1;
     }
 
-    // Extract filename from path if target name not specified
+    // Track whether the user passed an explicit target name. If they
+    // did NOT, Mac modes prefer the MacBinary / AppleDouble name over
+    // the host-file basename.
+    const bool targetNameWasExplicit = !targetName.empty();
     if (targetName.empty()) {
         size_t pos = hostFile.find_last_of("/\\");
         targetName = (pos != std::string::npos) ? hostFile.substr(pos + 1) : hostFile;
@@ -1420,10 +1461,65 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
         inFile.read(reinterpret_cast<char*>(data.data()), fileSize);
         inFile.close();
 
+        // PR-C: parse Mac forks before disk open. macFile.dataFork ends up
+        // holding the data fork bytes (which we then use in place of `data`
+        // for free-space checks); the rsrc fork + Finder metadata travels
+        // separately via writeFileWithForks below.
+        rde::ParsedMacFile macFile;
+        if (modeMacBinary) {
+            std::string parseErr;
+            if (!rde::parseMacBinary(data, macFile, parseErr)) {
+                printError("MacBinary parse: " + parseErr);
+                return 1;
+            }
+            if (!targetNameWasExplicit && !macFile.macRomanName.empty()) {
+                targetName = macFile.macRomanName;
+            }
+        } else if (modeAppleDouble) {
+            // host file is the data fork; auto-discover the sidecar.
+            std::filesystem::path hp(hostFile);
+            const std::string base = hp.filename().string();
+            const std::string stem = hp.stem().string();
+            const std::vector<std::filesystem::path> candidates = {
+                hp.parent_path() / ("._" + base),
+                hp.parent_path() / ("%" + base),
+                hp.parent_path() / ("%" + stem + ".ad"),
+            };
+            std::filesystem::path sidecar;
+            for (const auto& c : candidates) {
+                std::error_code ec;
+                if (std::filesystem::exists(c, ec)) { sidecar = c; break; }
+            }
+            if (sidecar.empty()) {
+                printError("--apple-double: cannot find sidecar near " + hostFile);
+                printError("  tried: ._<name>, %<name>, %<stem>.ad");
+                return 1;
+            }
+            std::string parseErr;
+            if (!rde::parseAppleDouble(hp, sidecar, macFile, parseErr)) {
+                printError("AppleDouble parse: " + parseErr);
+                return 1;
+            }
+            if (!targetNameWasExplicit && !macFile.macRomanName.empty()) {
+                targetName = macFile.macRomanName;
+            }
+        }
+
         // Open disk image
         auto disk = loadDiskImage(imagePath);
         if (!disk) {
             return 1;
+        }
+
+        // PR-C: --macbinary / --apple-double are HFS-only. Reject early.
+        rde::MacintoshHFSHandler* hfsForkHandler = nullptr;
+        if (modeMacBinary || modeAppleDouble) {
+            hfsForkHandler =
+                dynamic_cast<rde::MacintoshHFSHandler*>(disk.handler.get());
+            if (!hfsForkHandler) {
+                printError("--apple-double / --macbinary require an HFS volume");
+                return 1;
+            }
         }
 
         auto det = BootDiskPolicy::detect(imagePath, *disk.image, disk.handler.get(), m_forcedBootProfile);
@@ -1465,8 +1561,12 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
             }
         }
 
-        // Check free space
-        if (disk.handler->getFreeSpace() < data.size()) {
+        // Check free space (Mac modes: account for both forks)
+        size_t needBytes = data.size();
+        if (modeMacBinary || modeAppleDouble) {
+            needBytes = macFile.dataFork.size() + macFile.resourceFork.size();
+        }
+        if (disk.handler->getFreeSpace() < needBytes) {
             printError("Not enough space on disk");
             return 1;
         }
@@ -1481,12 +1581,28 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
         }
 
         // Write file
-        FileMetadata metadata;
-        metadata.targetName = targetName;
-        metadata.fileType = fileType;
-        metadata.loadAddress = loadAddress;
-
-        if (!disk.handler->writeFile(targetName, data, metadata)) {
+        bool writeOk = false;
+        if (modeMacBinary || modeAppleDouble) {
+            writeOk = hfsForkHandler->writeFileWithForks(
+                targetName,
+                macFile.dataFork,
+                macFile.resourceFork,
+                macFile.fileType,
+                macFile.creator,
+                macFile.finderFlagsHi,
+                macFile.finderFlagsLo,
+                macFile.finderInfoLocation,
+                macFile.finderInfoExtended,
+                macFile.createDate,
+                macFile.modifyDate);
+        } else {
+            FileMetadata metadata;
+            metadata.targetName = targetName;
+            metadata.fileType = fileType;
+            metadata.loadAddress = loadAddress;
+            writeOk = disk.handler->writeFile(targetName, data, metadata);
+        }
+        if (!writeOk) {
             printError("Failed to write file to disk image");
             return 1;
         }
