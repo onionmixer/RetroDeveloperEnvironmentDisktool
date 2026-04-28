@@ -834,14 +834,232 @@ bool MacintoshHFSHandler::writeFile(const std::string& filename,
     return true;
 }
 
-bool MacintoshHFSHandler::deleteFile(const std::string&) {
-    // M7 scope: write/create only. Delete requires re-packing the leaf node
-    // and freeing the volume bitmap, which we skip here to keep the surface
-    // minimal and safe for Phase 2 review.
-    throw NotImplementedException("Macintosh HFS delete is not implemented in Phase 2 (writeFile create-only scope)");
+bool MacintoshHFSHandler::deleteFile(const std::string& filename) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+    const CatalogChild* victim = lookupByPath(filename);
+    if (!victim) return false;
+    if (victim->isDirectory) return false;
+
+    // M10 safety: only handle files whose forks fit entirely in their initial
+    // 3 catalog extents (no Extents Overflow B-tree updates). Files larger
+    // than that surface as NotImplementedException so disk content is never
+    // partially mutated.
+    const uint32_t blockSize = m_mdb.allocBlockSize;
+    if (blockSize == 0) return false;
+    auto neededBlocks = [&](uint32_t logical) -> uint32_t {
+        return logical == 0 ? 0u :
+            static_cast<uint32_t>((logical + blockSize - 1) / blockSize);
+    };
+    auto extentsCover = [&](const std::array<uint16_t, 6>& ext) -> uint32_t {
+        return static_cast<uint32_t>(ext[1]) +
+               static_cast<uint32_t>(ext[3]) +
+               static_cast<uint32_t>(ext[5]);
+    };
+    const uint32_t needData = neededBlocks(victim->dataLogical);
+    const uint32_t needRsrc = neededBlocks(victim->rsrcLogical);
+    if (extentsCover(victim->dataExtents) < needData ||
+        extentsCover(victim->rsrcExtents) < needRsrc) {
+        throw NotImplementedException(
+            "Macintosh HFS delete: file uses Extents Overflow B-tree "
+            "(out of M10 scope — fork wider than 3 initial extents)");
+    }
+
+    std::vector<uint8_t> raw = m_disk->getRawData();
+
+    // 1. Free both forks in the volume bitmap.
+    const uint64_t bitmapByteBase =
+        static_cast<uint64_t>(m_mdb.bitmapStart) * 512ULL;
+    uint16_t freedBlocks = 0;
+    auto freeFork = [&](const std::array<uint16_t, 6>& ext) {
+        for (size_t i = 0; i < 3; ++i) {
+            const uint16_t start = ext[i * 2];
+            const uint16_t count = ext[i * 2 + 1];
+            for (uint16_t b = 0; b < count; ++b) {
+                setBitmapBit(raw, bitmapByteBase, start + b, false);
+                ++freedBlocks;
+            }
+        }
+    };
+    freeFork(victim->dataExtents);
+    freeFork(victim->rsrcExtents);
+
+    // 2. Locate the catalog leaf node + record by walking the leaf chain.
+    const uint64_t firstAllocByte =
+        static_cast<uint64_t>(m_mdb.firstAllocBlock) * 512ULL;
+
+    std::vector<uint8_t> catalogBytes;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint16_t start = m_mdb.catalogExtents[i * 2];
+        const uint16_t count = m_mdb.catalogExtents[i * 2 + 1];
+        if (count == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(start) * blockSize;
+        const uint64_t len = static_cast<uint64_t>(count) * blockSize;
+        if (off + len > raw.size()) return false;
+        catalogBytes.insert(catalogBytes.end(),
+            raw.begin() + off, raw.begin() + off + len);
+    }
+    if (catalogBytes.size() < 14 + 2 * 0x20) return false;
+    const uint16_t nodeSize = (static_cast<uint16_t>(catalogBytes[0x20]) << 8) |
+                                catalogBytes[0x21];
+    if (nodeSize == 0 || nodeSize > 16384 ||
+        catalogBytes.size() % nodeSize != 0) return false;
+
+    const uint32_t firstLeaf = (static_cast<uint32_t>(catalogBytes[0x18]) << 24) |
+                                (static_cast<uint32_t>(catalogBytes[0x19]) << 16) |
+                                (static_cast<uint32_t>(catalogBytes[0x1a]) << 8) |
+                                 static_cast<uint32_t>(catalogBytes[0x1b]);
+
+    bool removed = false;
+    uint32_t node = firstLeaf;
+    while (node != 0 && !removed) {
+        const size_t nodeOff = static_cast<size_t>(node) * nodeSize;
+        if (nodeOff + nodeSize > catalogBytes.size()) break;
+        uint8_t* p = catalogBytes.data() + nodeOff;
+        const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+
+        auto recOff = [&](uint16_t idx) -> uint16_t {
+            const size_t pos = nodeSize - 2 * (idx + 1);
+            return (static_cast<uint16_t>(p[pos]) << 8) | p[pos + 1];
+        };
+
+        for (uint16_t i = 0; i < numRecs; ++i) {
+            const uint16_t off = recOff(i);
+            const uint16_t end = recOff(static_cast<uint16_t>(i + 1));
+            if (off >= nodeSize || end > nodeSize || off >= end) continue;
+            const size_t recLen = static_cast<size_t>(end) - off;
+            const uint8_t kl = p[off];
+            if (1U + kl > recLen) continue;
+            size_t dataOff = 1U + kl;
+            if (dataOff & 1U) dataOff += 1;
+            if (dataOff >= recLen) continue;
+            const uint8_t recType = p[off + dataOff];
+            if (recType != 0x02) continue;  // file record only
+            const uint32_t cnid =
+                (static_cast<uint32_t>(p[off + dataOff + 0x14]) << 24) |
+                (static_cast<uint32_t>(p[off + dataOff + 0x15]) << 16) |
+                (static_cast<uint32_t>(p[off + dataOff + 0x16]) << 8)  |
+                 static_cast<uint32_t>(p[off + dataOff + 0x17]);
+            if (cnid != victim->cnid) continue;
+
+            // Found it — drop this record from the node.
+            const uint16_t freePtr = recOff(numRecs);
+            const size_t shiftLen = freePtr - end;
+            if (shiftLen > 0) {
+                std::memmove(p + off, p + end, shiftLen);
+            }
+            // Zero the trailing record bytes (best-effort; not required by HFS).
+            std::memset(p + freePtr - recLen, 0, recLen);
+
+            // Rebuild offset table.
+            std::vector<uint16_t> offsets;
+            offsets.reserve(numRecs);
+            for (uint16_t k = 0; k < numRecs; ++k) offsets.push_back(recOff(k));
+            offsets.erase(offsets.begin() + i);
+            for (size_t k = i; k < offsets.size(); ++k) {
+                offsets[k] = static_cast<uint16_t>(offsets[k] - recLen);
+            }
+            offsets.push_back(static_cast<uint16_t>(freePtr - recLen));  // free ptr
+            // Wipe the old offset table region first.
+            for (size_t k = 0; k <= numRecs; ++k) {
+                const size_t pos = nodeSize - 2 * (k + 1);
+                p[pos] = 0;
+                p[pos + 1] = 0;
+            }
+            for (size_t k = 0; k < offsets.size(); ++k) {
+                const size_t pos = nodeSize - 2 * (k + 1);
+                p[pos]     = static_cast<uint8_t>((offsets[k] >> 8) & 0xFF);
+                p[pos + 1] = static_cast<uint8_t>(offsets[k] & 0xFF);
+            }
+            // Decrement record count.
+            putBE16(catalogBytes, nodeOff + 0x0a, static_cast<uint16_t>(numRecs - 1));
+            removed = true;
+            break;
+        }
+        if (removed) break;
+        node = (static_cast<uint32_t>(p[0x00]) << 24) |
+               (static_cast<uint32_t>(p[0x01]) << 16) |
+               (static_cast<uint32_t>(p[0x02]) << 8) |
+                static_cast<uint32_t>(p[0x03]);
+    }
+    if (!removed) return false;
+
+    // 3. Write catalog bytes back into the disk image.
+    {
+        size_t cursor = 0;
+        for (size_t i = 0; i < 3 && cursor < catalogBytes.size(); ++i) {
+            const uint16_t start = m_mdb.catalogExtents[i * 2];
+            const uint16_t count = m_mdb.catalogExtents[i * 2 + 1];
+            if (count == 0) continue;
+            const uint64_t off = firstAllocByte +
+                static_cast<uint64_t>(start) * blockSize;
+            const size_t len = std::min<size_t>(
+                static_cast<size_t>(count) * blockSize,
+                catalogBytes.size() - cursor);
+            std::memcpy(raw.data() + off,
+                        catalogBytes.data() + cursor, len);
+            cursor += len;
+        }
+    }
+
+    // 4. MDB scalars.
+    putBE16(raw, 0x400 + 0x0c, static_cast<uint16_t>(m_mdb.numFiles - 1));
+    putBE16(raw, 0x400 + 0x22,
+            static_cast<uint16_t>(m_mdb.freeAllocBlocks + freedBlocks));
+
+    m_disk->setRawData(raw);
+    m_childrenByParent.clear();
+    m_byCNID.clear();
+    m_extentsOverflow.clear();
+    parseMdb();
+    walkExtentsOverflowLeaves();
+    walkCatalogLeaves();
+    return true;
 }
-bool MacintoshHFSHandler::renameFile(const std::string&, const std::string&) {
-    throw NotImplementedException("Macintosh HFS rename support is not yet implemented (Phase 2)");
+
+bool MacintoshHFSHandler::renameFile(const std::string& oldName,
+                                       const std::string& newName) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+    const CatalogChild* target = lookupByPath(oldName);
+    if (!target) return false;
+    if (target->isDirectory) {
+        throw NotImplementedException("Macintosh HFS rename of folders is out of M10 scope");
+    }
+
+    std::string newLeaf = newName;
+    while (!newLeaf.empty() && newLeaf.front() == '/') newLeaf.erase(newLeaf.begin());
+    if (newLeaf.find('/') != std::string::npos) {
+        throw NotImplementedException("Macintosh HFS rename across directories is out of M10 scope");
+    }
+    if (newLeaf.empty() || newLeaf.size() > 31) return false;
+    if (lookupByPath(newLeaf) != nullptr) return false;
+
+    // Rename in HFS = key change. The new key length differs whenever the
+    // new name length differs, which means the record size changes and
+    // potentially crosses node boundaries. M10 minimal scope: do it as a
+    // delete-then-add. This works as long as the leaf still has room and
+    // the new name doesn't overflow the catalog. Both branches are already
+    // protected by the existing M7/M10 guards.
+    //
+    // Snapshot the file's data fork before deletion so we can re-create it
+    // with the new name. Resource fork support is intentionally limited to
+    // empty rsrc forks here (target files added via M7 writeFile have no
+    // rsrc fork; existing files with rsrc forks fall through to the
+    // out-of-scope branch in deleteFile).
+    if (target->rsrcLogical != 0) {
+        throw NotImplementedException("Macintosh HFS rename of files with resource forks is out of M10 scope");
+    }
+    std::vector<uint8_t> dataFork = extractFork(target->cnid, 0x00);
+    if (!deleteFile(oldName)) return false;
+    FileMetadata md;
+    md.targetName = newLeaf;
+    return writeFile(newLeaf, dataFork, md);
 }
 bool MacintoshHFSHandler::format(const std::string&) {
     throw NotImplementedException("Macintosh HFS format support is not yet implemented (Phase 2)");
