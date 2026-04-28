@@ -1,16 +1,18 @@
 # RDE Disk Tool (Retro Developer Environment Disk Tool)
 
-A cross-platform command-line tool for manipulating disk images used by retro computer emulators. Supports Apple II, MSX, and X68000 disk formats.
+A cross-platform command-line tool for manipulating disk images used by retro computer emulators. Supports Apple II, MSX, X68000, and classic Macintosh (System 6/7) disk formats.
 
 ## Features
 
-- **Multi-platform support**: Apple II, MSX, and X68000 disk images
-- **File operations**: List, extract, add, and delete files
-- **Subdirectory support**: Full subdirectory operations for ProDOS, MSX-DOS, and Human68k
-- **Format conversion**: Convert between compatible disk formats
+- **Multi-platform support**: Apple II, MSX, X68000, and classic Macintosh disk images
+- **File operations**: List, extract, add, delete, and rename files
+- **Subdirectory support**: Full subdirectory operations for ProDOS, MSX-DOS, Human68k, and HFS
+- **Format conversion**: Convert between compatible disk formats (incl. `mac_img ↔ mac_dc42`)
 - **XSA compression**: Compress/decompress MSX disk images (LZ77 + Huffman, ~99% compression)
-- **Disk creation**: Create new formatted disk images
-- **Validation**: Verify disk image integrity
+- **Macintosh forks**: AppleDouble v2 (`._<basename>` sidecar) and MacBinary v1 export preserves resource forks + Finder info
+- **Disk creation**: Create new formatted disk images (incl. empty 800K / 1440K HFS and 400K MFS volumes)
+- **Boot disk protection**: Multi-condition policy guards System / Finder files on bootable Macintosh / Apple II / MSX / X68000 disks
+- **Validation**: Verify disk image integrity (incl. DC42 ROR32+BE16 checksum)
 - **Sector dump**: Raw sector/track data inspection
 
 ## Supported Formats
@@ -44,9 +46,9 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 | Format | Extension | Description |
 |--------|-----------|-------------|
 | Raw Image | .img, .dsk | Raw 512-byte-sector stream (400K / 720K / 800K / 1.44M) |
-| Apple Disk Copy 4.2 | .image, .dc42 | 0x54-byte header + raw payload + optional tag bytes, validated by data/tag checksum |
+| Apple Disk Copy 4.2 | .image, .dc42 | 0x54-byte header + raw payload + optional tag bytes, validated by data/tag ROR32+BE16 checksum |
 
-> **Note**: Macintosh support is **read-only** in Phase 1 (`info`, `list`, `extract`, `validate`). Adding / deleting files, formatting, and container conversion (`MacIMG ↔ MacDC42`) are scoped for later phases. Both HFS and MFS are detected automatically by the MDB signature at sector 2.
+> **Note**: Both HFS and MFS are detected automatically by the MDB signature at sector 2. Bidirectional `mac_img ↔ mac_dc42` conversion is supported via the `convert` command. `mac_dc42` cannot be created from scratch — make a `mac_img` first, then convert.
 
 ## Supported File Systems
 
@@ -56,8 +58,8 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 | ProDOS | Apple II | Yes | Block-based allocation, up to 32MB |
 | MSX-DOS | MSX | Yes | FAT12, MSX-DOS 1/2 compatible |
 | Human68k | X68000 | Yes | FAT12-based, 1024-byte sectors, 8.3 filenames |
-| HFS | Macintosh | Yes | Hierarchical File System with catalog B-tree + extents overflow (read-only) |
-| MFS | Macintosh | No | Flat directory + 12-bit allocation map (read-only) |
+| HFS | Macintosh | Yes | Hierarchical File System: catalog B-tree (auto leaf-split), extents overflow read, 800K / 1440K format, mkdir/rmdir/rename incl. resource-fork preservation |
+| MFS | Macintosh | No | Flat directory + 12-bit allocation map; full read/write/format on 400K floppies (800K MFS read-only — exceeds the 12-bit map for `create`) |
 
 ## Build & Installation
 
@@ -410,6 +412,7 @@ rdedisktool create <file> -f <format> [--fs <filesystem>] [-n <volume>] [-g <geo
 | Apple II | do, po, nib, nb2, woz, woz1, woz2 |
 | MSX | msxdsk, dmk |
 | X68000 | xdf, dim |
+| Macintosh | mac_img |
 
 Examples:
 ```bash
@@ -428,6 +431,15 @@ rdedisktool create x68k.xdf -f xdf --fs human68k -n X68KDISK
 # Create X68000 DIM disk with Human68k filesystem
 rdedisktool create x68k.dim -f dim --fs human68k -n X68KDISK
 
+# Create Macintosh HFS volume (1440K default)
+rdedisktool create mac.img -f mac_img --fs hfs -n MyVolume
+
+# Create Macintosh HFS volume (800K)
+rdedisktool create mac.img -f mac_img --fs hfs -n V -g 80:2:10:512
+
+# Create Macintosh MFS volume (400K floppy)
+rdedisktool create mfs.img -f mac_img --fs mfs -n V -g 80:1:10:512
+
 # Create disk with custom geometry
 rdedisktool create custom.do -f do -g 40:1:16:256
 
@@ -435,7 +447,9 @@ rdedisktool create custom.do -f do -g 40:1:16:256
 rdedisktool create blank.po -f po
 ```
 
-> **Note**: Created disks are not bootable (no boot code included).
+> **Note**: Created Apple II / MSX / X68000 disks are not bootable (no boot code). Macintosh HFS volumes carry a halt-loop boot block scaffold; they become runtime-bootable only after real `System` and `Finder` files are added.
+
+> **Note**: `mac_dc42` cannot be created from scratch — make a `mac_img` first, then `convert mac.img mac.image -f mac_dc42`. MFS 800K is in-the-wild but exceeds the 12-bit allocation map; use an emulator or `hfsutils` for that geometry.
 
 생성 검증(스크립트 권장):
 ```bash
@@ -454,6 +468,8 @@ rdedisktool info x68k.xdf | rg -q "File System: Human68k"
 - Apple ProDOS: `File System: ProDOS`
 - MSX: `File System: MSX-DOS` (MSX-DOS 1/2 공통 부분 문자열)
 - X68000: `File System: Human68k`
+- Macintosh HFS: `File System: HFS`
+- Macintosh MFS: `File System: MFS`
 
 #### convert - Convert disk image format
 ```bash
@@ -477,6 +493,12 @@ rdedisktool convert game.xsa game.dsk -f msxdsk
 
 # Convert between MSX formats
 rdedisktool convert game.dsk game.dmk -f dmk
+
+# Wrap a raw Macintosh image with a DC42 header
+rdedisktool convert mac.img mac.image -f mac_dc42
+
+# Strip a DC42 header to recover the raw image
+rdedisktool convert mac.image mac.img -f mac_img
 ```
 
 **Supported format conversions:**
@@ -490,6 +512,8 @@ rdedisktool convert game.dsk game.dmk -f dmk
 | DMK | DSK | DMK to sector |
 | DO | PO | Apple II order swap |
 | PO | DO | Apple II order swap |
+| mac_img | mac_dc42 | Wrap with fresh DC42 header (ROR32+BE16 checksum) |
+| mac_dc42 | mac_img | Strip DC42 header + tag bytes |
 
 #### validate - Validate disk image integrity
 ```bash
@@ -707,9 +731,9 @@ rdedisktool add disk.po ./HELLO HELLO --type B --addr 0x0803
 
 ### Working with Subdirectories
 
-Subdirectory operations are supported for file systems that support directories: **ProDOS**, **MSX-DOS**, and **Human68k**.
+Subdirectory operations are supported for file systems that support directories: **ProDOS**, **MSX-DOS**, **Human68k**, and **HFS**.
 
-> **Note**: DOS 3.3 does not support subdirectories.
+> **Note**: DOS 3.3 and MFS do not support subdirectories.
 
 #### MSX-DOS Subdirectory Example
 
@@ -790,6 +814,70 @@ rdedisktool extract mydisk.xdf GAMES/ACTION/SHOOTER.X
 rdedisktool delete mydisk.xdf GAMES/ACTION/SHOOTER.X
 rdedisktool rmdir mydisk.xdf GAMES/ACTION
 ```
+
+#### HFS Subdirectory Example
+
+```bash
+# Create a new 1440K HFS volume
+rdedisktool create mac.img -f mac_img --fs hfs -n MyVolume
+
+# Nested mkdir — HFS catalog B-tree auto-splits as needed
+rdedisktool mkdir mac.img "Documents"
+rdedisktool mkdir mac.img "Documents/Reports"
+
+# Add files into nested folders
+rdedisktool add mac.img ./readme.txt "Documents/README"
+rdedisktool add mac.img ./report.txt "Documents/Reports/Q1"
+
+# Rename a folder (children stay attached — CNID is preserved)
+rdedisktool rename mac.img "Documents" "Archive"
+
+# rmdir requires the folder to be empty (POSIX semantics)
+rdedisktool delete mac.img "Archive/Reports/Q1"
+rdedisktool rmdir  mac.img "Archive/Reports"
+```
+
+> **Note**: HFS volume names allow spaces and any MacRoman character. Quote them in the shell.
+
+### Working with Macintosh Disks
+
+```bash
+# Create a 1440K HFS volume (default geometry)
+rdedisktool create mac.img -f mac_img --fs hfs -n MyVolume
+
+# Create an 800K HFS volume
+rdedisktool create mac800.img -f mac_img --fs hfs -n V -g 80:2:10:512
+
+# Create a 400K MFS volume (single-sided floppy)
+rdedisktool create mfs.img -f mac_img --fs mfs -n V -g 80:1:10:512
+
+# Get info, including DC42 / HFS / MFS detection
+rdedisktool info mac.img
+
+# List the volume root
+rdedisktool list mac.img
+
+# List a subdirectory (HFS)
+rdedisktool list mac.img "System Folder"
+
+# Add / extract a data-fork-only file
+rdedisktool add     mac.img ./hello.txt "Hello.txt"
+rdedisktool extract mac.img "Hello.txt" ./out.txt
+
+# Extract a file with its resource fork preserved (AppleDouble v2 sidecar)
+rdedisktool extract mac.img "TeachText" --apple-double ./out/
+
+# Extract as MacBinary v1 (single .bin with both forks + Finder info)
+rdedisktool extract mac.img "TeachText" --macbinary ./TeachText.bin
+
+# Convert containers
+rdedisktool convert mac.image mac.img  -f mac_img    # DC42 → raw
+rdedisktool convert mac.img   mac.dc42 -f mac_dc42   # raw → DC42 (re-checksums)
+```
+
+> **Resource forks**: `extract` without `--apple-double` / `--macbinary` writes only the data fork. Mac applications and most resource-bearing files require one of those flags to round-trip correctly.
+
+> **Boot disks**: HFS volumes created by `rdedisktool` carry a halt-loop boot block scaffold (LK signature + standard Pascal name fields) but are NOT runtime-bootable until you copy real `System` and `Finder` files into the root. Once both files exist, the boot disk policy treats the volume as bootable and guards the system files against accidental mutation.
 
 ## Technical Details
 
@@ -960,6 +1048,66 @@ XSA (eXtendable Storage Archive) is a compressed disk image format developed by 
 - Write: **Read-only** (XSA images cannot be modified directly)
 - Convert: Bi-directional conversion with DSK and DMK formats
 - File operations: List and extract only (add/delete/modify not supported)
+
+### Macintosh Disk Containers
+
+**Raw Image (`mac_img`)**:
+- A flat 512-byte-sector stream — same byte layout the Mac ROM sees.
+- Auto-detected by the size + the HFS / MFS signature at sector 2 (offset 0x400).
+- Default `create` geometry: 80 × 2 × 18 × 512 = 1440K. Use `-g` for other sizes.
+
+**Apple Disk Copy 4.2 (`mac_dc42`)**:
+- 0x54-byte header followed by raw payload + optional tag bytes.
+- Header carries volume name (Pascal Str63), data size, tag size, and two
+  ROR32+BE16 checksums (data fork + tag bytes).
+- Bidirectional conversion with `mac_img` via the `convert` command.
+  `mac_dc42` cannot be created from scratch.
+
+### Macintosh HFS Structure
+
+- **Master Directory Block (MDB)** at sector 2 (offset 0x400): drSigWord =
+  `BD`, alloc-block layout, catalog / extents file metadata, blessed
+  System Folder CNID (`drFndrInfo[0]`).
+- **Volume Bitmap** starting at `drVBMSt` (default sector 3): MSB-first
+  per Inside Macintosh convention.
+- **Catalog B-tree** holds folder / file / thread records keyed by
+  `(parentCNID, name)`. `rdedisktool` walks the leaf chain on read and
+  splits the leaf automatically on write when full (depth 1→2 root
+  promotion is supported; cascading index split is deferred).
+- **Extents Overflow B-tree** for files whose forks exceed 3 initial
+  extents: read-only at the moment (write is deferred — needs a
+  fragmented fixture for cross-tool verification).
+- **Boot block** (sectors 0..1, 1024 bytes total): `LK` signature +
+  Pascal name fields (System / Finder / Macsbug / etc.) + boot loader
+  code starting at 0x08a. `rdedisktool create --fs hfs` writes a
+  scaffold with a halt-loop (`60 fe`) at the entry point.
+- **Forks**: every file has a data fork and a resource fork (either may
+  be empty). `extract --apple-double` or `extract --macbinary`
+  preserves both forks + Finder info; bare `extract` writes only the
+  data fork.
+
+### Macintosh MFS Structure
+
+- Older flat-directory file system (no subdirectories) used on the
+  earliest Macintosh floppies.
+- MDB at offset 0x400 with a **12-bit allocation map** packed into the
+  bytes immediately after the MDB header. The 12-bit map is the reason
+  `rdedisktool create` only supports 400K MFS — 800K @ 512-byte alloc
+  blocks exceeds the map's 640-entry capacity.
+- Directory entries live in a fixed-size run after the allocation map.
+- Format byte-for-byte parity with Python `mfs-init-empty` (verified
+  via `cmp` in CI).
+
+### Macintosh Boot Disk Policy
+
+A volume is treated as a "boot disk" when **all** of:
+
+1. Boot block carries the `LK` signature
+2. Either root contains both `System` and `Finder` files, OR a `System
+   Folder` subdirectory contains them
+
+In strict mode (`--bootdisk-mode strict`, default), deletes / overwrites
+of those files are blocked. Use `--force-system-file` to override.
 
 ## License
 
