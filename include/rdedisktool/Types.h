@@ -287,6 +287,10 @@ inline DiskFormat stringToFormat(const std::string& s) {
     // X68000 formats
     if (s == "xdf" || s == "x68000xdf" || s == "x68k") return DiskFormat::X68000XDF;
     if (s == "dim" || s == "x68000dim") return DiskFormat::X68000DIM;
+    // Macintosh formats — explicit mac_* prefix to avoid colliding with the
+    // ambiguous .img / .dsk extensions shared with other platforms.
+    if (s == "mac_img" || s == "macimg") return DiskFormat::MacIMG;
+    if (s == "mac_dc42" || s == "macdc42" || s == "dc42") return DiskFormat::MacDC42;
     return DiskFormat::Unknown;
 }
 
