@@ -1,5 +1,6 @@
 #include "rdedisktool/macintosh/MacintoshMOOFImage.h"
 #include "rdedisktool/macintosh/MacGcrDecoder.h"
+#include "rdedisktool/macintosh/MacMfmDecoder.h"
 #include "rdedisktool/DiskImageFactory.h"
 #include "rdedisktool/Exceptions.h"
 
@@ -101,22 +102,25 @@ void MacintoshMOOFImage::load(const std::filesystem::path& path) {
     m_writeProtected = m_info.writeProtected;
     m_fileSystemDetected = false;
 
-    // GCR (400K / 800K) — decode the bitstream tracks into a flat 512B sector
-    // image. MFM (1.44M) is deferred to E2; throw if encountered.
-    if (m_info.diskType == DiskType::DsHdMfm144M) {
-        throw NotImplementedException(
-            "Macintosh MOOF 1.44M MFM decode is deferred to E2.");
-    }
-    if (m_info.diskType != DiskType::SsDdGcr400K &&
-        m_info.diskType != DiskType::DsDdGcr800K) {
-        throw InvalidFormatException(
-            "Macintosh MOOF: unsupported disk type " +
-            std::to_string(static_cast<int>(m_info.diskType)));
+    // Decode the bitstream tracks into a flat 512B sector image.
+    //   GCR 400K / 800K  → MacGcrDecoder (Apple 6-and-2)
+    //   MFM 1.44M        → MacMfmDecoder (IBM PC standard)
+    switch (m_info.diskType) {
+        case DiskType::SsDdGcr400K:
+        case DiskType::DsDdGcr800K:
+            decodeGcrIntoSectorStream();
+            break;
+        case DiskType::DsHdMfm144M:
+            decodeMfmIntoSectorStream();
+            break;
+        case DiskType::Twiggy:
+        case DiskType::Unknown:
+            throw InvalidFormatException(
+                "Macintosh MOOF: unsupported disk type " +
+                std::to_string(static_cast<int>(m_info.diskType)));
     }
 
-    decodeGcrIntoSectorStream();
-
-    m_writeProtected = true;  // E1 is read-only
+    m_writeProtected = true;  // E1/E2 are read-only
 }
 
 void MacintoshMOOFImage::decodeGcrIntoSectorStream() {
@@ -170,6 +174,64 @@ void MacintoshMOOFImage::decodeGcrIntoSectorStream() {
     if (decodedCount == 0) {
         throw InvalidFormatException(
             "Macintosh MOOF: no sectors decoded from any track" +
+            (errAccum.empty() ? std::string() : (" (" + errAccum + ")")));
+    }
+
+    initGeometryFromSize(m_data.size());
+}
+
+void MacintoshMOOFImage::decodeMfmIntoSectorStream() {
+    // 1.44M MFM: 80 cylinders × 2 heads × 18 sectors × 512B = 1,474,560 bytes.
+    constexpr int kCylinders       = 80;
+    constexpr int kHeads           = 2;
+    constexpr int kSectorsPerTrack = 18;
+    const size_t totalSectors =
+        static_cast<size_t>(kCylinders * kHeads * kSectorsPerTrack);
+    m_data.assign(totalSectors * SECTOR_SIZE, 0);
+
+    std::vector<bool> filled(totalSectors, false);
+    std::string errAccum;
+    size_t decodedCount = 0;
+
+    for (int cyl = 0; cyl < kCylinders; ++cyl) {
+        for (int head = 0; head < kHeads; ++head) {
+            const size_t tmapIdx = static_cast<size_t>(cyl * kHeads + head);
+            const uint8_t trkIdx = m_tmap[tmapIdx];
+            if (trkIdx == 0xFF) continue;
+            if (trkIdx >= m_trks.size()) continue;
+
+            const TrkEntry& te = m_trks[trkIdx];
+            if (te.blockCount == 0 || te.bitOrByteCount == 0) continue;
+            const size_t startOff = static_cast<size_t>(te.startBlock) * 512u;
+            const size_t bitCount = static_cast<size_t>(te.bitOrByteCount);
+            const size_t byteLen  = (bitCount + 7) / 8;
+            if (startOff + byteLen > m_fileBytes.size()) {
+                throw InvalidFormatException(
+                    "MOOF TRKS entry " + std::to_string(trkIdx) +
+                    " runs past EOF");
+            }
+
+            auto sectors = decodeMacMfmTrack(
+                m_fileBytes.data() + startOff, bitCount, errAccum);
+            for (const auto& s : sectors) {
+                if (!s.headerCrcOk || !s.dataCrcOk) continue;
+                if (s.cylinder != cyl || s.head != head) continue;
+                if (s.sector < 1 || s.sector > kSectorsPerTrack) continue;
+                if (s.sizeCode != 2) continue;
+                const size_t lin = macMfmLinearBlock(s.cylinder, s.head, s.sector);
+                if (lin >= totalSectors) continue;
+                if (filled[lin]) continue;
+                std::memcpy(m_data.data() + lin * SECTOR_SIZE,
+                            s.data.data(), SECTOR_SIZE);
+                filled[lin] = true;
+                ++decodedCount;
+            }
+        }
+    }
+
+    if (decodedCount == 0) {
+        throw InvalidFormatException(
+            "Macintosh MOOF (MFM): no sectors decoded from any track" +
             (errAccum.empty() ? std::string() : (" (" + errAccum + ")")));
     }
 
@@ -340,8 +402,8 @@ std::string MacintoshMOOFImage::getDiagnostics() const {
         }
     }
     oss << "\n";
-    oss << "MOOF Notice: read-only — GCR 400K/800K decode supported.\n"
-        << "             1.44M MFM read (E2) and write (E3/E4) deferred.\n";
+    oss << "MOOF Notice: read-only — GCR 400K/800K and 1.44M MFM decode\n"
+        << "             supported. Write (E3/E4) deferred.\n";
     return oss.str();
 }
 

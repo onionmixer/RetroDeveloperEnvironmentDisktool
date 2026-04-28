@@ -96,6 +96,9 @@ private:
     // the resulting 512B sectors into m_data. Throws on unrecoverable errors.
     void decodeGcrIntoSectorStream();
 
+    // Same, but for 1.44M MFM (IBM PC standard) tracks via MacMfmDecoder.
+    void decodeMfmIntoSectorStream();
+
     // CRC32-ISO-HDLC (Gary S. Brown 1986) over bytes [12..end). Returns
     // 0 when caller asked to skip (header CRC == 0).
     static uint32_t computeCrc32(const uint8_t* data, size_t len);
