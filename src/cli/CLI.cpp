@@ -65,6 +65,8 @@ rde::FileSystemType fileSystemFromString(const std::string& str) {
     if (s == "msxdos2") return rde::FileSystemType::MSXDOS2;
     if (s == "fat12") return rde::FileSystemType::FAT12;
     if (s == "human68k" || s == "human") return rde::FileSystemType::Human68k;
+    if (s == "hfs") return rde::FileSystemType::HFS;
+    if (s == "mfs") return rde::FileSystemType::MFS;
     return rde::FileSystemType::Unknown;
 }
 
@@ -82,6 +84,9 @@ bool isFileSystemCompatible(rde::DiskFormat format, rde::FileSystemType fsType) 
     // X68000 formats
     bool isX68000 = (format == rde::DiskFormat::X68000XDF ||
                      format == rde::DiskFormat::X68000DIM);
+    // Macintosh formats
+    bool isMac = (format == rde::DiskFormat::MacIMG ||
+                  format == rde::DiskFormat::MacDC42);
 
     if (isApple) {
         return (fsType == rde::FileSystemType::DOS33 ||
@@ -94,6 +99,10 @@ bool isFileSystemCompatible(rde::DiskFormat format, rde::FileSystemType fsType) 
     }
     if (isX68000) {
         return (fsType == rde::FileSystemType::Human68k);
+    }
+    if (isMac) {
+        return (fsType == rde::FileSystemType::HFS ||
+                fsType == rde::FileSystemType::MFS);
     }
     return false;
 }

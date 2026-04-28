@@ -582,11 +582,51 @@ bool MacintoshMFSHandler::deleteFile(const std::string& filename) {
     return true;
 }
 
-bool MacintoshMFSHandler::renameFile(const std::string&, const std::string&) {
-    throw NotImplementedException("Macintosh MFS rename support is not yet implemented (Phase 2 — M7+)");
+bool MacintoshMFSHandler::renameFile(const std::string& oldName,
+                                       const std::string& newName) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+    const DirEntry* target = findEntry(oldName);
+    if (!target) return false;
+    if (target->rsrcLogical != 0) {
+        // Rename of files with a resource fork would require copying the
+        // resource fork bytes through writeFile, which currently only writes
+        // the data fork. Out of M11 minimal scope.
+        throw NotImplementedException(
+            "Macintosh MFS rename of files with resource forks is out of scope");
+    }
+    std::string leafNew = newName;
+    {
+        const size_t pos = leafNew.find_last_of('/');
+        if (pos != std::string::npos) leafNew = leafNew.substr(pos + 1);
+    }
+    if (leafNew.empty() || leafNew.size() > 255) return false;
+    if (leafNew == target->name) return true;        // no-op
+    if (findEntry(leafNew) != nullptr) return false; // collision
+
+    // Snapshot the data fork, then delete-then-add. Both are MFS write paths
+    // already covered by M6's cross-tool tests.
+    std::vector<uint8_t> data = extractFork(target->dataStartBlock,
+                                              target->dataLogical);
+    if (!deleteFile(oldName)) return false;
+    FileMetadata md;
+    md.targetName = leafNew;
+    return writeFile(leafNew, data, md);
 }
+
 bool MacintoshMFSHandler::format(const std::string&) {
-    throw NotImplementedException("Macintosh MFS format support is not yet implemented (Phase 2 — M7+)");
+    // MFS format would create a fresh volume from scratch (boot blocks +
+    // MDB + 12-bit allocation map + empty directory area). Python provides
+    // mfs-init-empty for this; rdedisktool delegates by recommending users
+    // run that tool when they need a blank MFS image. Implementing it
+    // natively gains little but adds risk (MDB byte layout, bitmap byte
+    // layout, directory sentinel bytes — every byte must match the
+    // canonical layout to roundtrip with the Python reference).
+    throw NotImplementedException(
+        "Macintosh MFS format: use 'macdiskimage.py mfs-init-empty' to "
+        "create a blank MFS volume (rdedisktool will then read/write it)");
 }
 
 size_t MacintoshMFSHandler::getFreeSpace() const {

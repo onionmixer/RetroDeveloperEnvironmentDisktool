@@ -1062,7 +1062,42 @@ bool MacintoshHFSHandler::renameFile(const std::string& oldName,
     return writeFile(newLeaf, dataFork, md);
 }
 bool MacintoshHFSHandler::format(const std::string&) {
-    throw NotImplementedException("Macintosh HFS format support is not yet implemented (Phase 2)");
+    // HFS format would require materializing every B-tree from scratch
+    // (boot blocks + MDB + volume bitmap + Catalog B-tree header & first
+    // leaf with the root folder + thread records + Extents Overflow B-tree
+    // header). Inside Mac File Manager defines the layout, but no Python
+    // reference exists for cross-tool byte-for-byte parity, so a native
+    // implementation would have no safety net. Use an external tool to
+    // create the blank volume and let rdedisktool read/write it.
+    throw NotImplementedException(
+        "Macintosh HFS format: not implemented — no reference tool exists "
+        "for cross-tool byte parity verification. Create a blank HFS volume "
+        "with an emulator (Mini vMac, BasiliskII) or hfsutils (mkfs.hfs) "
+        "and rdedisktool will then read/write it.");
+}
+
+bool MacintoshHFSHandler::createDirectory(const std::string& /*path*/) {
+    // mkdir on HFS requires inserting BOTH a folder record (type 0x01) and
+    // its corresponding thread record (type 0x03) into the catalog B-tree.
+    // The two records have keys with different parent CNIDs and may land
+    // in different leaf nodes — atomic insertion across two leaves with
+    // potential split is out of the safe-scope guards M7/M10 carry. Inside
+    // Mac File Manager defines the thread record layout but the Python
+    // reference (macdiskimage.py) intentionally ignores thread records on
+    // read, so cross-tool byte parity cannot be verified for the write side.
+    throw NotImplementedException(
+        "Macintosh HFS createDirectory: not implemented — requires atomic "
+        "insertion of folder + thread records across multiple catalog leaves "
+        "with no cross-tool verification path. Out of safe-scope.");
+}
+
+bool MacintoshHFSHandler::deleteDirectory(const std::string& /*path*/) {
+    // rmdir is the inverse of createDirectory plus a recursive emptiness
+    // check. Same rationale as createDirectory — atomic two-leaf mutation
+    // with no cross-tool verification, deferred for safety.
+    throw NotImplementedException(
+        "Macintosh HFS deleteDirectory: not implemented — same constraint "
+        "as createDirectory (two-leaf mutation, no cross-tool verification).");
 }
 
 size_t MacintoshHFSHandler::getFreeSpace() const {

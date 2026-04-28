@@ -93,4 +93,28 @@ RDE_SHA2=$(sha256sum "$WORK/out2.bin" | awk '{print $1}')
   echo "second round-trip SHA mismatch" >&2; exit 1
 }
 
+# 7. M11: rename round-trip on a fresh MFS volume.
+"$RDEDISKTOOL" --bootdisk-mode off rename "$WORK/test.img" "AfterDelete.txt" "Renamed.txt" \
+    >/dev/null 2>&1 || { echo "MFS rename failed" >&2; exit 1; }
+"$RDEDISKTOOL" list "$WORK/test.img" | rg -q "Renamed.txt" || {
+  echo "Renamed.txt missing after MFS rename" >&2; exit 1
+}
+"$RDEDISKTOOL" list "$WORK/test.img" | rg -q "AfterDelete.txt" && {
+  echo "AfterDelete.txt still present after MFS rename" >&2; exit 1
+} || true
+"$RDEDISKTOOL" extract "$WORK/test.img" "Renamed.txt" "$WORK/renamed_out.bin" \
+    >/dev/null 2>&1
+RENAMED_SHA=$(sha256sum "$WORK/renamed_out.bin" | awk '{print $1}')
+[[ "$INPUT_SHA" == "$RENAMED_SHA" ]] || {
+  echo "MFS rename SHA mismatch: $INPUT_SHA != $RENAMED_SHA" >&2; exit 1
+}
+if [[ "$HAVE_PY" == "1" ]]; then
+  mkdir -p "$WORK/py_renamed"
+  python3 "$PY_TOOL" extract "$WORK/test.img" "$WORK/py_renamed" >/dev/null 2>&1
+  PY_SHA=$(sha256sum "$WORK/py_renamed/Renamed.txt" 2>/dev/null | awk '{print $1}')
+  [[ "$INPUT_SHA" == "$PY_SHA" ]] || {
+    echo "Python read of MFS rename mismatch: $INPUT_SHA != $PY_SHA" >&2; exit 1
+  }
+fi
+
 echo "[PASS] mac mfs write"
