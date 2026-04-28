@@ -1,5 +1,6 @@
 #include "rdedisktool/macintosh/MacintoshIMGImage.h"
 #include "rdedisktool/macintosh/MacintoshDC42Image.h"
+#include "rdedisktool/macintosh/MacintoshMOOFImage.h"
 #include "rdedisktool/DiskImageFactory.h"
 #include "rdedisktool/Exceptions.h"
 
@@ -103,7 +104,8 @@ void MacintoshIMGImage::create(const DiskGeometry& geometry) {
 bool MacintoshIMGImage::canConvertTo(DiskFormat format) const {
     switch (format) {
         case DiskFormat::MacDC42:
-            return true;  // M9 — wrap raw payload with DC42 0x54 header
+        case DiskFormat::MacMOOF:
+            return true;
         case DiskFormat::Unknown:
         case DiskFormat::AppleDO:
         case DiskFormat::ApplePO:
@@ -117,7 +119,6 @@ bool MacintoshIMGImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::X68000XDF:
         case DiskFormat::X68000DIM:
         case DiskFormat::MacIMG:
-        case DiskFormat::MacMOOF:
             return false;
     }
     return false;
@@ -125,10 +126,12 @@ bool MacintoshIMGImage::canConvertTo(DiskFormat format) const {
 
 std::unique_ptr<DiskImage> MacintoshIMGImage::convertTo(DiskFormat format) const {
     if (format == DiskFormat::MacDC42) {
-        // Wrap the raw sector stream with a fresh DC42 header. The DC42 save
-        // path computes the checksum + plausible disk_encoding / format_byte
-        // from the payload size.
         auto out = std::make_unique<MacintoshDC42Image>();
+        out->setRawData(m_data);
+        return out;
+    }
+    if (format == DiskFormat::MacMOOF) {
+        auto out = std::make_unique<MacintoshMOOFImage>();
         out->setRawData(m_data);
         return out;
     }

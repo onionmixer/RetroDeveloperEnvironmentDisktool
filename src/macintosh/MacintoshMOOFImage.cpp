@@ -1,6 +1,10 @@
 #include "rdedisktool/macintosh/MacintoshMOOFImage.h"
 #include "rdedisktool/macintosh/MacGcrDecoder.h"
+#include "rdedisktool/macintosh/MacGcrEncoder.h"
 #include "rdedisktool/macintosh/MacMfmDecoder.h"
+#include "rdedisktool/macintosh/MacMfmEncoder.h"
+#include "rdedisktool/macintosh/MacintoshIMGImage.h"
+#include "rdedisktool/macintosh/MacintoshDC42Image.h"
 #include "rdedisktool/DiskImageFactory.h"
 #include "rdedisktool/Exceptions.h"
 
@@ -31,6 +35,19 @@ inline uint32_t readLE32(const uint8_t* p) {
            (static_cast<uint32_t>(p[1]) <<  8) |
            (static_cast<uint32_t>(p[2]) << 16) |
            (static_cast<uint32_t>(p[3]) << 24);
+}
+inline void appendLE16(std::vector<uint8_t>& out, uint16_t v) {
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+}
+inline void appendLE32(std::vector<uint8_t>& out, uint32_t v) {
+    out.push_back(static_cast<uint8_t>(v & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 8) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 16) & 0xFF));
+    out.push_back(static_cast<uint8_t>((v >> 24) & 0xFF));
+}
+inline void appendBytes(std::vector<uint8_t>& out, const uint8_t* p, size_t n) {
+    out.insert(out.end(), p, p + n);
 }
 
 // CRC32-ISO-HDLC table, polynomial 0xEDB88320 (Gary S. Brown 1986). Same
@@ -329,19 +346,257 @@ void MacintoshMOOFImage::parseChunks(const std::vector<uint8_t>& bytes) {
     }
 }
 
-void MacintoshMOOFImage::save(const std::filesystem::path& /*path*/) {
-    throw NotImplementedException(
-        "Macintosh MOOF save: deferred to E3 (GCR encode + chunk emit).");
+void MacintoshMOOFImage::save(const std::filesystem::path& path) {
+    const std::filesystem::path target = path.empty() ? m_filePath : path;
+    if (target.empty()) {
+        throw InvalidFormatException("Macintosh MOOF save: no destination path");
+    }
+
+    // Determine geometry from m_data size if disk type is unset (typical
+    // when convertTo() seeded m_data without populating m_info).
+    InfoChunk info = m_info;
+    if (info.diskType == DiskType::Unknown) {
+        if      (m_data.size() == SIZE_400K)  info.diskType = DiskType::SsDdGcr400K;
+        else if (m_data.size() == SIZE_800K)  info.diskType = DiskType::DsDdGcr800K;
+        else if (m_data.size() == SIZE_1440K) info.diskType = DiskType::DsHdMfm144M;
+        else {
+            throw InvalidFormatException(
+                "Macintosh MOOF save: cannot infer disk type from " +
+                std::to_string(m_data.size()) + " bytes (need 400K/800K/1440K)");
+        }
+    }
+    if (info.optimalBitTiming == 0) {
+        info.optimalBitTiming = (info.diskType == DiskType::DsHdMfm144M) ? 8 : 16;
+    }
+    if (info.creator.empty()) {
+        info.creator = std::string("rdedisktool");
+    }
+    if (info.version == 0) info.version = 1;
+
+    const int sides = (info.diskType == DiskType::DsDdGcr800K ||
+                        info.diskType == DiskType::DsHdMfm144M) ? 2 : 1;
+
+    // Build per-track byte streams + bit counts.
+    struct EncodedTrack {
+        std::vector<uint8_t> bits;  // byte-packed (MSB-first)
+        uint32_t bitCount = 0;
+    };
+    std::vector<EncodedTrack> tracks(80 * 2);  // [track*2+side]; entries with no data have bitCount=0
+    uint16_t largestTrackBlocks = 0;
+
+    for (int track = 0; track < 80; ++track) {
+        for (int side = 0; side < sides; ++side) {
+            EncodedTrack et;
+            if (info.diskType == DiskType::SsDdGcr400K ||
+                info.diskType == DiskType::DsDdGcr800K) {
+                auto bytes = encodeMacGcrTrack(m_data.data(), m_data.size(),
+                                                 sides, track, side);
+                // GCR encoder is byte-aligned: 8 bits per byte.
+                et.bits     = std::move(bytes);
+                et.bitCount = static_cast<uint32_t>(et.bits.size()) * 8u;
+            } else {
+                auto enc = encodeMacMfmTrack(m_data.data(), m_data.size(),
+                                               track, side);
+                et.bits     = std::move(enc.bits);
+                et.bitCount = static_cast<uint32_t>(enc.bitCount);
+            }
+            // 512-byte block count, rounded up.
+            const uint32_t blockCount = (et.bitCount == 0) ? 0u :
+                ((static_cast<uint32_t>(et.bits.size()) + 511u) / 512u);
+            if (blockCount > largestTrackBlocks) {
+                largestTrackBlocks = static_cast<uint16_t>(blockCount);
+            }
+            tracks[track * 2 + side] = std::move(et);
+        }
+    }
+
+    // ---- Layout: assemble file in memory, then patch CRC at offset 8 ----
+    // Header (12) + INFO chunk (8+60=68) + TMAP (8+160=168) + TRKS header
+    // (8+1280=1288). Sum = 12+68+168+1288 = 1536 = 3 × 512, so first track
+    // data starts at block 3.
+    std::vector<uint8_t> out;
+
+    static constexpr uint8_t kMagic[8] = {'M','O','O','F',0xff,0x0a,0x0d,0x0a};
+    appendBytes(out, kMagic, 8);
+    appendLE32(out, 0);                       // CRC placeholder, patched later
+
+    // INFO
+    appendBytes(out, reinterpret_cast<const uint8_t*>("INFO"), 4);
+    appendLE32(out, 60);
+    {
+        const size_t before = out.size();
+        out.push_back(info.version);
+        out.push_back(static_cast<uint8_t>(info.diskType));
+        out.push_back(info.writeProtected ? 1 : 0);
+        out.push_back(info.synchronized ? 1 : 0);
+        out.push_back(info.optimalBitTiming);
+        // Creator: 32 bytes, space-padded.
+        std::string c = info.creator;
+        if (c.size() > 32) c.resize(32);
+        else c.resize(32, ' ');
+        out.insert(out.end(), c.begin(), c.end());
+        out.push_back(0);                                 // pay[37] reserved
+        appendLE16(out, largestTrackBlocks);              // pay[38..40]
+        appendLE16(out, 0);                                // fluxBlock
+        appendLE16(out, 0);                                // largestFluxTrackBlocks
+        // Pad remainder of the 60-byte payload.
+        while (out.size() - before < 60) out.push_back(0);
+    }
+
+    // TMAP — track-major / side-minor (track*2 + side).
+    appendBytes(out, reinterpret_cast<const uint8_t*>("TMAP"), 4);
+    appendLE32(out, 160);
+    {
+        std::array<uint8_t, 160> tmap{};
+        tmap.fill(0xFF);
+        uint8_t nextTrkIdx = 0;
+        for (int track = 0; track < 80; ++track) {
+            for (int side = 0; side < 2; ++side) {
+                if (side >= sides) continue;
+                if (tracks[track * 2 + side].bitCount == 0) continue;
+                tmap[track * 2 + side] = nextTrkIdx++;
+            }
+        }
+        appendBytes(out, tmap.data(), tmap.size());
+    }
+
+    // TRKS — 160 entries × 8 bytes header. Compute layout.
+    const size_t trksHeaderStart = out.size();
+    appendBytes(out, reinterpret_cast<const uint8_t*>("TRKS"), 4);
+    appendLE32(out, 0);                       // chunk size patched later
+    const size_t trksPayloadStart = out.size();
+
+    // Reserve 1280 bytes for entries; fill later.
+    out.resize(out.size() + 160 * 8, 0);
+
+    // After the 1280-byte entries block, the file is at offset 1536 (12 + 68
+    // + 168 + 8 + 1280). Verify alignment to 512.
+    if (out.size() % 512 != 0) {
+        // Pad with zero bytes to next 512 boundary.
+        out.resize((out.size() + 511) & ~size_t(511), 0);
+    }
+    const size_t baseBlockOffset = out.size() / 512;
+
+    // Append per-track data (each pre-padded to 512-byte block) and patch
+    // entries.
+    std::array<TrkEntry, 160> entries{};
+    uint8_t trkIdx = 0;
+    for (int track = 0; track < 80; ++track) {
+        for (int side = 0; side < 2; ++side) {
+            if (side >= sides) continue;
+            const auto& et = tracks[track * 2 + side];
+            if (et.bitCount == 0) continue;
+
+            const size_t startBlk = out.size() / 512;
+            appendBytes(out, et.bits.data(), et.bits.size());
+            // Pad to 512-byte block.
+            if (out.size() % 512 != 0) {
+                out.resize((out.size() + 511) & ~size_t(511), 0);
+            }
+            const size_t blockCount = (out.size() / 512) - startBlk;
+            (void)baseBlockOffset;  // baseBlockOffset is just a check value
+
+            entries[trkIdx].startBlock     = static_cast<uint16_t>(startBlk);
+            entries[trkIdx].blockCount     = static_cast<uint16_t>(blockCount);
+            entries[trkIdx].bitOrByteCount = et.bitCount;
+            ++trkIdx;
+        }
+    }
+
+    // Patch TRKS entries.
+    {
+        size_t cursor = trksPayloadStart;
+        for (size_t i = 0; i < 160; ++i) {
+            out[cursor + 0] = static_cast<uint8_t>(entries[i].startBlock & 0xFF);
+            out[cursor + 1] = static_cast<uint8_t>((entries[i].startBlock >> 8) & 0xFF);
+            out[cursor + 2] = static_cast<uint8_t>(entries[i].blockCount & 0xFF);
+            out[cursor + 3] = static_cast<uint8_t>((entries[i].blockCount >> 8) & 0xFF);
+            const uint32_t bb = entries[i].bitOrByteCount;
+            out[cursor + 4] = static_cast<uint8_t>(bb & 0xFF);
+            out[cursor + 5] = static_cast<uint8_t>((bb >> 8) & 0xFF);
+            out[cursor + 6] = static_cast<uint8_t>((bb >> 16) & 0xFF);
+            out[cursor + 7] = static_cast<uint8_t>((bb >> 24) & 0xFF);
+            cursor += 8;
+        }
+    }
+    // Patch TRKS chunk size.
+    {
+        const uint32_t trksChunkSize =
+            static_cast<uint32_t>(out.size() - trksPayloadStart);
+        out[trksHeaderStart + 4] = static_cast<uint8_t>(trksChunkSize & 0xFF);
+        out[trksHeaderStart + 5] = static_cast<uint8_t>((trksChunkSize >> 8) & 0xFF);
+        out[trksHeaderStart + 6] = static_cast<uint8_t>((trksChunkSize >> 16) & 0xFF);
+        out[trksHeaderStart + 7] = static_cast<uint8_t>((trksChunkSize >> 24) & 0xFF);
+    }
+
+    // META — emit any meta key/value pairs, tab-separated, newline-terminated.
+    if (!m_meta.empty()) {
+        std::string metaRaw;
+        for (const auto& [k, v] : m_meta) {
+            metaRaw += k;
+            metaRaw += '\t';
+            metaRaw += v;
+            metaRaw += '\n';
+        }
+        appendBytes(out, reinterpret_cast<const uint8_t*>("META"), 4);
+        appendLE32(out, static_cast<uint32_t>(metaRaw.size()));
+        out.insert(out.end(), metaRaw.begin(), metaRaw.end());
+    }
+
+    // Patch CRC32 over bytes [12..end).
+    const uint32_t crc = computeCrc32(out.data() + 12, out.size() - 12);
+    out[8]  = static_cast<uint8_t>(crc & 0xFF);
+    out[9]  = static_cast<uint8_t>((crc >> 8) & 0xFF);
+    out[10] = static_cast<uint8_t>((crc >> 16) & 0xFF);
+    out[11] = static_cast<uint8_t>((crc >> 24) & 0xFF);
+
+    std::ofstream of(target, std::ios::binary | std::ios::trunc);
+    if (!of) {
+        throw InvalidFormatException("MOOF save: cannot open " + target.string());
+    }
+    of.write(reinterpret_cast<const char*>(out.data()),
+             static_cast<std::streamsize>(out.size()));
+    if (!of) {
+        throw InvalidFormatException("MOOF save: write failed: " + target.string());
+    }
+
+    m_filePath = target;
+    m_modified = false;
+    m_fileBytes = std::move(out);
+    m_info      = info;
 }
 
-void MacintoshMOOFImage::create(const DiskGeometry& /*geometry*/) {
-    throw NotImplementedException(
-        "Macintosh MOOF create: deferred to E3 (cannot generate empty MOOF "
-        "without GCR/MFM encoder).");
+void MacintoshMOOFImage::create(const DiskGeometry& geometry) {
+    const size_t bytes = static_cast<size_t>(geometry.tracks) *
+                         static_cast<size_t>(geometry.sides) *
+                         static_cast<size_t>(geometry.sectorsPerTrack) *
+                         static_cast<size_t>(geometry.bytesPerSector);
+    m_data.assign(bytes, 0);
+
+    m_info = InfoChunk{};
+    m_info.version = 1;
+    if      (bytes == SIZE_400K)  { m_info.diskType = DiskType::SsDdGcr400K; m_info.optimalBitTiming = 16; }
+    else if (bytes == SIZE_800K)  { m_info.diskType = DiskType::DsDdGcr800K; m_info.optimalBitTiming = 16; }
+    else if (bytes == SIZE_1440K) { m_info.diskType = DiskType::DsHdMfm144M; m_info.optimalBitTiming = 8; }
+    else {
+        throw InvalidFormatException(
+            "Macintosh MOOF create: geometry must total 400K, 800K, or 1440K (got " +
+            std::to_string(bytes) + ")");
+    }
+    m_info.creator = "rdedisktool";
+
+    m_geometry = geometry;
+    m_writeProtected = false;
+    m_modified       = true;
+    m_fileSystemDetected = false;
+    m_filePath.clear();
 }
 
 bool MacintoshMOOFImage::canConvertTo(DiskFormat format) const {
     switch (format) {
+        case DiskFormat::MacIMG:
+        case DiskFormat::MacDC42:
+            return true;
         case DiskFormat::Unknown:
         case DiskFormat::AppleDO:
         case DiskFormat::ApplePO:
@@ -354,8 +609,6 @@ bool MacintoshMOOFImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::MSXXSA:
         case DiskFormat::X68000XDF:
         case DiskFormat::X68000DIM:
-        case DiskFormat::MacIMG:
-        case DiskFormat::MacDC42:
         case DiskFormat::MacMOOF:
             return false;
     }
@@ -363,9 +616,18 @@ bool MacintoshMOOFImage::canConvertTo(DiskFormat format) const {
 }
 
 std::unique_ptr<DiskImage> MacintoshMOOFImage::convertTo(DiskFormat format) const {
+    if (format == DiskFormat::MacIMG) {
+        auto out = std::make_unique<MacintoshIMGImage>();
+        out->setRawData(m_data);
+        return out;
+    }
+    if (format == DiskFormat::MacDC42) {
+        auto out = std::make_unique<MacintoshDC42Image>();
+        out->setRawData(m_data);
+        return out;
+    }
     throw NotImplementedException("Macintosh MOOF convertTo " +
-                                   std::string(formatToString(format)) +
-                                   " (deferred — E1-γ adds mac_img target).");
+                                   std::string(formatToString(format)));
 }
 
 bool MacintoshMOOFImage::validate() const {
