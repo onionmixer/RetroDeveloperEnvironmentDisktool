@@ -426,6 +426,28 @@ MacintoshHFSHandler::lookupByPath(const std::string& path) const {
     return resolvePath(path);
 }
 
+MacintoshHFSHandler::ParentResolved
+MacintoshHFSHandler::resolveParentForMutation(const std::string& path) const {
+    std::string p = path;
+    while (!p.empty() && p.front() == '/') p.erase(p.begin());
+    while (!p.empty() && p.back()  == '/') p.pop_back();
+
+    const auto slash = p.rfind('/');
+    if (slash == std::string::npos) {
+        return {HFS_ROOT_CNID, p};
+    }
+    const std::string parentPath = p.substr(0, slash);
+    const std::string leaf       = p.substr(slash + 1);
+
+    const CatalogChild* parent = resolvePath(parentPath);
+    if (!parent || !parent->isDirectory) {
+        throw NotImplementedException(
+            "Macintosh HFS mutation: parent path '" + parentPath +
+            "' does not resolve to an existing folder");
+    }
+    return {parent->cnid, leaf};
+}
+
 std::vector<FileEntry> MacintoshHFSHandler::listFiles(const std::string& path) {
     std::vector<FileEntry> out;
     uint32_t parent = HFS_ROOT_CNID;
@@ -562,20 +584,25 @@ inline void bumpMdbWriteMetadata(std::vector<uint8_t>& raw,
     }
 }
 
-// Walk catalog leaves searching for the root folder record (parent CNID = 1,
-// recType = 0x01). When found, adjust its valence (body offset 0x04, BE u16)
-// by `delta`, clamped at 0. Returns true if updated, false when no such
-// record exists (some volumes have no root folder record — only the root
-// thread). Mutates `raw` in place.
+// Walk catalog leaves searching for the folder record whose body.cnid
+// matches `targetCNID` (recType = 0x01). When found, adjust its valence
+// (body offset 0x04, BE u16) by `delta`, clamped at [0, 0xFFFF]. Returns
+// true if updated, false when no such record exists (some volumes lack an
+// explicit folder record — only the thread). Mutates `raw` in place.
+//
+// For the root folder (CNID=2) the matching record's KEY has parent=1.
+// For other folders, the KEY uses the actual parent CNID; we don't filter
+// on the key here because body.cnid is unique across the catalog tree.
 //
 // Body layout per Inside Mac (HFS folder record):
 //   0x00 recType (0x01) | 0x01 reserved | 0x02 flags(u16) | 0x04 valence(u16)
 //   0x06 cnid(u32)      | 0x0a crDate    | 0x0e mdDate     | 0x12 backup
-inline bool applyRootFolderValenceDelta(
+inline bool applyFolderValenceByCNID(
         std::vector<uint8_t>& raw,
         uint16_t firstAllocBlock,
         uint32_t allocBlockSize,
         const std::array<uint16_t, 6>& catalogExtents,
+        uint32_t targetCNID,
         int32_t delta) {
     if (delta == 0) return true;  // nothing to do — treat as success
     if (allocBlockSize == 0) return false;
@@ -628,21 +655,20 @@ inline bool applyRootFolderValenceDelta(
             const size_t recLen = static_cast<size_t>(end) - off;
             const uint8_t kl = p[off];
             if (1U + kl > recLen) continue;
-            // Key: kl(1) reserved(1) parentCNID(4) nameLen(1) name(...).
             if (kl < 6) continue;
-            const uint32_t parentCNID =
-                (static_cast<uint32_t>(p[off + 0x02]) << 24) |
-                (static_cast<uint32_t>(p[off + 0x03]) << 16) |
-                (static_cast<uint32_t>(p[off + 0x04]) <<  8) |
-                 static_cast<uint32_t>(p[off + 0x05]);
-            if (parentCNID != 1) continue;
             size_t dataOff = 1U + kl;
             if (dataOff & 1U) dataOff += 1;
-            if (dataOff + 0x06 > recLen) continue;
+            if (dataOff + 0x0a > recLen) continue;  // need recType + valence + cnid
             const uint8_t recType = p[off + dataOff];
             if (recType != 0x01) continue;  // not a folder record
+            const uint32_t bodyCNID =
+                (static_cast<uint32_t>(p[off + dataOff + 0x06]) << 24) |
+                (static_cast<uint32_t>(p[off + dataOff + 0x07]) << 16) |
+                (static_cast<uint32_t>(p[off + dataOff + 0x08]) <<  8) |
+                 static_cast<uint32_t>(p[off + dataOff + 0x09]);
+            if (bodyCNID != targetCNID) continue;
 
-            // Found the root folder record. Adjust valence at body+0x04.
+            // Found the folder record. Adjust valence at body+0x04.
             const size_t valenceOff = off + dataOff + 0x04;
             if (valenceOff + 1 >= nodeSize) continue;
             const uint16_t cur =
@@ -687,16 +713,15 @@ bool MacintoshHFSHandler::writeFile(const std::string& filename,
     if (m_disk->isWriteProtected()) {
         throw WriteProtectedException();
     }
-    // M7 scope: parent dir = root only. Reject paths with separators.
-    std::string leaf = filename;
-    while (!leaf.empty() && leaf.front() == '/') leaf.erase(leaf.begin());
-    if (leaf.find('/') != std::string::npos) {
-        throw NotImplementedException("Macintosh HFS write currently only supports root-level files (no subdirectories)");
-    }
+    // C1: resolve parent path → parent CNID. For pure leaf "Hello.txt"
+    // this returns root; for "Sub/Hello.txt" it walks the catalog.
+    ParentResolved pr = resolveParentForMutation(filename);
+    const uint32_t parentCNID = pr.parentCNID;
+    std::string leaf = pr.leafName;
     if (leaf.empty() || leaf.size() > 31) {
         return false;
     }
-    if (lookupByPath(leaf) != nullptr) {
+    if (lookupByPath(filename) != nullptr) {
         return false;  // already exists; caller does delete-then-add
     }
     if (m_mdb.allocBlockSize == 0) return false;
@@ -796,8 +821,7 @@ bool MacintoshHFSHandler::writeFile(const std::string& filename,
     }
 
     // 4. Build the catalog key: keyLen + reserved + parentCNID + name(p-string).
-    constexpr uint32_t HFS_ROOT_CNID = 2;
-    const uint32_t parentCNID = HFS_ROOT_CNID;
+    //    parentCNID was resolved at function entry (C1: nested write).
     const size_t nameLen = leaf.size();
     // keyLen excludes itself: reserved(1) + parentCNID(4) + nameLen(1) + name(N)
     const uint8_t keyLen = static_cast<uint8_t>(6 + nameLen);
@@ -977,20 +1001,25 @@ bool MacintoshHFSHandler::writeFile(const std::string& filename,
         }
     }
 
-    // 10. Update MDB scalars + write-side bookkeeping (drLsMod / drWrCnt /
-    //      drFilCnt) and the root folder valence. Inside Mac File Manager
-    //      requires these for cross-tool consistency (BasiliskII / hfsutils
-    //      validate them; Python read silently ignores them).
-    putBE16(raw, 0x400 + 0x0c, static_cast<uint16_t>(m_mdb.numFiles + 1));
+    // 10. Update MDB scalars + write-side bookkeeping. Inside Mac File
+    //      Manager: drNmFls (0x0c) is the *root-direct* file count, so only
+    //      bumps when parentCNID == root; drFilCnt (recursive total) bumps
+    //      regardless. The parent folder's valence increments in either
+    //      case (root or otherwise).
+    if (parentCNID == HFS_ROOT_CNID) {
+        putBE16(raw, 0x400 + 0x0c,
+                static_cast<uint16_t>(m_mdb.numFiles + 1));
+    }
     putBE32(raw, 0x400 + 0x1e, m_mdb.nextCNID + 1);
     putBE16(raw, 0x400 + 0x22,
             static_cast<uint16_t>(m_mdb.freeAllocBlocks - needed));
 
     const std::time_t unixNow = metadata.timestamp.value_or(std::time(nullptr));
     bumpMdbWriteMetadata(raw, +1, 0, 0, toMacEpoch(unixNow));
-    applyRootFolderValenceDelta(raw, m_mdb.firstAllocBlock,
-                                  m_mdb.allocBlockSize,
-                                  m_mdb.catalogExtents, +1);
+    applyFolderValenceByCNID(raw, m_mdb.firstAllocBlock,
+                              m_mdb.allocBlockSize,
+                              m_mdb.catalogExtents,
+                              parentCNID, +1);
 
     // 11. Commit.
     m_disk->setRawData(raw);
@@ -1013,6 +1042,11 @@ bool MacintoshHFSHandler::deleteFile(const std::string& filename) {
     const CatalogChild* victim = lookupByPath(filename);
     if (!victim) return false;
     if (victim->isDirectory) return false;
+
+    // C1: capture the victim's actual parent so MDB / valence updates target
+    // the right folder for nested files.
+    const ParentResolved pr = resolveParentForMutation(filename);
+    const uint32_t victimParent = pr.parentCNID;
 
     // M10 safety: only handle files whose forks fit entirely in their initial
     // 3 catalog extents (no Extents Overflow B-tree updates). Files larger
@@ -1176,16 +1210,20 @@ bool MacintoshHFSHandler::deleteFile(const std::string& filename) {
         }
     }
 
-    // 4. MDB scalars + write-side bookkeeping (drLsMod / drWrCnt / drFilCnt)
-    //    and the root folder valence. See writeFile for rationale.
-    putBE16(raw, 0x400 + 0x0c, static_cast<uint16_t>(m_mdb.numFiles - 1));
+    // 4. MDB scalars + write-side bookkeeping. drNmFls (root-direct file
+    //    count) only changes when the deleted file lived directly at root.
+    if (victimParent == HFS_ROOT_CNID) {
+        putBE16(raw, 0x400 + 0x0c,
+                static_cast<uint16_t>(m_mdb.numFiles - 1));
+    }
     putBE16(raw, 0x400 + 0x22,
             static_cast<uint16_t>(m_mdb.freeAllocBlocks + freedBlocks));
 
     bumpMdbWriteMetadata(raw, -1, 0, 0, toMacEpoch(std::time(nullptr)));
-    applyRootFolderValenceDelta(raw, m_mdb.firstAllocBlock,
-                                  m_mdb.allocBlockSize,
-                                  m_mdb.catalogExtents, -1);
+    applyFolderValenceByCNID(raw, m_mdb.firstAllocBlock,
+                              m_mdb.allocBlockSize,
+                              m_mdb.catalogExtents,
+                              victimParent, -1);
 
     m_disk->setRawData(raw);
     m_childrenByParent.clear();
@@ -1819,17 +1857,12 @@ bool MacintoshHFSHandler::createDirectory(const std::string& path) {
         throw WriteProtectedException();
     }
 
-    // B2 scope: parent dir = root only. Reject anything with separators.
-    std::string leaf = path;
-    while (!leaf.empty() && leaf.front() == '/') leaf.erase(leaf.begin());
-    while (!leaf.empty() && leaf.back()  == '/') leaf.pop_back();
-    if (leaf.find('/') != std::string::npos) {
-        throw NotImplementedException(
-            "Macintosh HFS createDirectory: B2 scope is root-only "
-            "(no nested mkdir).");
-    }
+    // C1: resolve parent path → parent CNID (returns root for plain leaf).
+    ParentResolved pr = resolveParentForMutation(path);
+    const uint32_t parentCNID = pr.parentCNID;
+    const std::string& leaf = pr.leafName;
     if (leaf.empty() || leaf.size() > 31) return false;
-    if (lookupByPath(leaf) != nullptr) return false;
+    if (lookupByPath(path) != nullptr) return false;
     if (m_mdb.allocBlockSize == 0) return false;
     if (m_mdb.catalogExtents[1] == 0) {
         throw NotImplementedException("HFS createDirectory: catalog file empty");
@@ -1838,7 +1871,6 @@ bool MacintoshHFSHandler::createDirectory(const std::string& path) {
     std::vector<uint8_t> raw = m_disk->getRawData();
 
     const uint32_t newCNID = m_mdb.nextCNID;
-    constexpr uint32_t kRoot = 2;
     const uint32_t macNow = toMacEpoch(std::time(nullptr));
 
     // 1. Folder record (recType=0x01, 70-byte body per Inside Mac).
@@ -1855,10 +1887,10 @@ bool MacintoshHFSHandler::createDirectory(const std::string& path) {
         const uint8_t kl = static_cast<uint8_t>(6 + leaf.size());
         folderKey.push_back(kl);
         folderKey.push_back(0);
-        folderKey.push_back(static_cast<uint8_t>((kRoot >> 24) & 0xFF));
-        folderKey.push_back(static_cast<uint8_t>((kRoot >> 16) & 0xFF));
-        folderKey.push_back(static_cast<uint8_t>((kRoot >> 8) & 0xFF));
-        folderKey.push_back(static_cast<uint8_t>(kRoot & 0xFF));
+        folderKey.push_back(static_cast<uint8_t>((parentCNID >> 24) & 0xFF));
+        folderKey.push_back(static_cast<uint8_t>((parentCNID >> 16) & 0xFF));
+        folderKey.push_back(static_cast<uint8_t>((parentCNID >> 8) & 0xFF));
+        folderKey.push_back(static_cast<uint8_t>(parentCNID & 0xFF));
         folderKey.push_back(static_cast<uint8_t>(leaf.size()));
         folderKey.insert(folderKey.end(), leaf.begin(), leaf.end());
     }
@@ -1867,11 +1899,10 @@ bool MacintoshHFSHandler::createDirectory(const std::string& path) {
     folderRecord.insert(folderRecord.end(), folderBody.begin(), folderBody.end());
 
     // 2. Folder thread record (recType=0x03, 46-byte body per §22.2 sample
-    //    + Inside Mac CatThreadRec).
+    //    + Inside Mac CatThreadRec). thdParID = the actual parent.
     std::vector<uint8_t> threadBody(46, 0);
     threadBody[0x00] = 0x03;  // folder thread
-    // 0x01 reserved, 0x02..0x09 reserved (8 bytes)
-    putBE32(threadBody, 0x0a, kRoot);  // thdParID = root
+    putBE32(threadBody, 0x0a, parentCNID);  // thdParID
     threadBody[0x0e] = static_cast<uint8_t>(leaf.size());
     std::memcpy(threadBody.data() + 0x0f, leaf.data(),
                 std::min<size_t>(leaf.size(), 31));
@@ -1893,17 +1924,20 @@ bool MacintoshHFSHandler::createDirectory(const std::string& path) {
 
     // 3. Insert both records. Either insertion may throw (split required) —
     //    in that case `raw` is dropped without commit, leaving disk untouched.
-    if (!insertCatalogLeafRecord(raw, kRoot, leaf, folderRecord)) return false;
+    if (!insertCatalogLeafRecord(raw, parentCNID, leaf, folderRecord)) return false;
     if (!insertCatalogLeafRecord(raw, newCNID, std::string(), threadRecord)) {
         return false;
     }
 
-    // 4. MDB updates.
+    // 4. MDB updates. drNmRtDirs (root-direct dir count) only bumps when the
+    //    new directory is at root; drDirCnt (recursive total) always bumps.
+    const int32_t rootDirsDelta = (parentCNID == HFS_ROOT_CNID) ? +1 : 0;
     putBE32(raw, 0x400 + 0x1e, m_mdb.nextCNID + 1);  // drNxtCNID
-    bumpMdbWriteMetadata(raw, 0, +1, +1, macNow);     // drDirCnt+1, drNmRtDirs+1
-    applyRootFolderValenceDelta(raw, m_mdb.firstAllocBlock,
-                                  m_mdb.allocBlockSize,
-                                  m_mdb.catalogExtents, +1);
+    bumpMdbWriteMetadata(raw, 0, +1, rootDirsDelta, macNow);
+    applyFolderValenceByCNID(raw, m_mdb.firstAllocBlock,
+                              m_mdb.allocBlockSize,
+                              m_mdb.catalogExtents,
+                              parentCNID, +1);
 
     // 5. Commit.
     m_disk->setRawData(raw);
@@ -1924,16 +1958,13 @@ bool MacintoshHFSHandler::deleteDirectory(const std::string& path) {
         throw WriteProtectedException();
     }
 
-    std::string leaf = path;
-    while (!leaf.empty() && leaf.front() == '/') leaf.erase(leaf.begin());
-    while (!leaf.empty() && leaf.back()  == '/') leaf.pop_back();
-    if (leaf.find('/') != std::string::npos) {
-        throw NotImplementedException(
-            "Macintosh HFS deleteDirectory: B2 scope is root-only.");
-    }
+    // C1: resolve parent → parent CNID, allowing nested rmdir.
+    ParentResolved pr = resolveParentForMutation(path);
+    const uint32_t parentCNID = pr.parentCNID;
+    const std::string& leaf = pr.leafName;
     if (leaf.empty()) return false;
 
-    const CatalogChild* victim = lookupByPath(leaf);
+    const CatalogChild* victim = lookupByPath(path);
     if (!victim) return false;
     if (!victim->isDirectory) return false;
 
@@ -1943,12 +1974,12 @@ bool MacintoshHFSHandler::deleteDirectory(const std::string& path) {
         return false;  // non-empty — POSIX rmdir semantics
     }
 
-    constexpr uint32_t kRoot = 2;
     std::vector<uint8_t> raw = m_disk->getRawData();
 
-    // Drop the folder record (key parent=2, name=leaf) AND its thread record
-    // (key parent=victim.cnid, name=""). Either failure aborts before commit.
-    if (!removeCatalogLeafRecord(raw, kRoot, leaf)) return false;
+    // Drop the folder record (key parent=parentCNID, name=leaf) AND its
+    // thread record (key parent=victim.cnid, name=""). Either failure
+    // aborts before commit.
+    if (!removeCatalogLeafRecord(raw, parentCNID, leaf)) return false;
     if (!removeCatalogLeafRecord(raw, victim->cnid, std::string())) {
         // First removal succeeded in our snapshot but second didn't —
         // drop the snapshot and throw so the on-disk image is untouched.
@@ -1958,10 +1989,13 @@ bool MacintoshHFSHandler::deleteDirectory(const std::string& path) {
             "that omits thread records).");
     }
 
-    bumpMdbWriteMetadata(raw, 0, -1, -1, toMacEpoch(std::time(nullptr)));
-    applyRootFolderValenceDelta(raw, m_mdb.firstAllocBlock,
-                                  m_mdb.allocBlockSize,
-                                  m_mdb.catalogExtents, -1);
+    const int32_t rootDirsDelta = (parentCNID == HFS_ROOT_CNID) ? -1 : 0;
+    bumpMdbWriteMetadata(raw, 0, -1, rootDirsDelta,
+                         toMacEpoch(std::time(nullptr)));
+    applyFolderValenceByCNID(raw, m_mdb.firstAllocBlock,
+                              m_mdb.allocBlockSize,
+                              m_mdb.catalogExtents,
+                              parentCNID, -1);
 
     m_disk->setRawData(raw);
 
