@@ -527,6 +527,31 @@ int compareCatalogKey(uint32_t parentA, const std::string& nameA,
     return 0;
 }
 
+// Cleanup helper: keep the BT header rec's `leafRecords` field in sync
+// with the actual count of records across all leaves. Pre-cleanup, all
+// write paths (M7 / B2 / B3 / C1..C4) silently left this stale; Python
+// read walks the leaf chain and ignored it, so the gap was invisible.
+// BasiliskII / hfsutils validate the field, so keeping it accurate
+// matters for cross-emulator compatibility.
+inline void bumpLeafRecordsCount(std::vector<uint8_t>& catalogBytes,
+                                   int32_t delta) {
+    if (catalogBytes.size() < 14 + 0x0a) return;
+    const size_t off = 14 + 0x06;  // BT header rec leafRecords field (u32 BE)
+    const uint32_t v =
+        (static_cast<uint32_t>(catalogBytes[off    ]) << 24) |
+        (static_cast<uint32_t>(catalogBytes[off + 1]) << 16) |
+        (static_cast<uint32_t>(catalogBytes[off + 2]) <<  8) |
+         static_cast<uint32_t>(catalogBytes[off + 3]);
+    int64_t v2 = static_cast<int64_t>(v) + delta;
+    if (v2 < 0) v2 = 0;
+    if (v2 > 0xFFFFFFFFLL) v2 = 0xFFFFFFFFLL;
+    const uint32_t out = static_cast<uint32_t>(v2);
+    catalogBytes[off    ] = static_cast<uint8_t>((out >> 24) & 0xFF);
+    catalogBytes[off + 1] = static_cast<uint8_t>((out >> 16) & 0xFF);
+    catalogBytes[off + 2] = static_cast<uint8_t>((out >>  8) & 0xFF);
+    catalogBytes[off + 3] = static_cast<uint8_t>(out & 0xFF);
+}
+
 // C4 helper: allocate a free B-tree node by scanning the header node's
 // map record (offset 248..nodeSize-8). On success, sets the bit and
 // decrements freeNodes in the BT header rec; returns the new node index.
@@ -1351,6 +1376,10 @@ bool MacintoshHFSHandler::writeFile(const std::string& filename,
 
     } // if (!didSplit)
 
+    // Cleanup: keep BT header rec leafRecords consistent (covers both the
+    // direct-insert and split-insert paths above).
+    bumpLeafRecordsCount(catalogBytes, +1);
+
     // 9. Spread catalog bytes back into the disk image (extents).
     {
         size_t cursor = 0;
@@ -1549,6 +1578,12 @@ bool MacintoshHFSHandler::deleteFile(const std::string& filename) {
             }
             // Decrement record count.
             putBE16(catalogBytes, nodeOff + 0x0a, static_cast<uint16_t>(numRecs - 1));
+            // Cleanup: BT header rec leafRecords -1, and if we removed
+            // record 0 the leaf's first key changed → sync index entry.
+            bumpLeafRecordsCount(catalogBytes, -1);
+            if (i == 0) {
+                syncIndexEntryForLeaf(catalogBytes, nodeSize, node);
+            }
             removed = true;
             break;
         }
@@ -2413,6 +2448,8 @@ bool MacintoshHFSHandler::insertCatalogLeafRecord(
                                         parentCNID, name, fullRecord)) {
             return false;
         }
+        // Cleanup: bump leafRecords (+1 for the new record).
+        bumpLeafRecordsCount(catalogBytes, +1);
         // Spread the post-split catalog back into raw and return.
         size_t cursor = 0;
         for (size_t i = 0; i < 3 && cursor < catalogBytes.size(); ++i) {
@@ -2481,6 +2518,8 @@ bool MacintoshHFSHandler::insertCatalogLeafRecord(
     if (insertIdx == 0) {
         syncIndexEntryForLeaf(catalogBytes, nodeSize, targetNode);
     }
+    // Cleanup: bump leafRecords for the direct-insert path.
+    bumpLeafRecordsCount(catalogBytes, +1);
 
     // Spread catalog bytes back into raw.
     size_t cursor = 0;
@@ -3034,6 +3073,12 @@ bool MacintoshHFSHandler::removeCatalogLeafRecord(
                 p[pos + 1] = static_cast<uint8_t>(offsets[k] & 0xFF);
             }
             putBE16(catalogBytes, nodeOff + 0x0a, static_cast<uint16_t>(numRecs - 1));
+            // Cleanup: BT header rec leafRecords -1, and if we removed
+            // record 0 the leaf's first key changed → sync index entry.
+            bumpLeafRecordsCount(catalogBytes, -1);
+            if (i == 0) {
+                syncIndexEntryForLeaf(catalogBytes, nodeSize, node);
+            }
             removed = true;
             break;
         }

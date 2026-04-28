@@ -195,4 +195,39 @@ EOF
   echo "C4: leaf chain integrity check failed: $chain_ok" >&2; exit 1
 }
 
+# 6. Cleanup invariant: BT header rec leafRecords must equal the actual
+#    record count summed across the leaf chain. Pre-cleanup the field
+#    was stale across all writes; post-cleanup it tracks every op.
+expected=$(python3 - "$WORK/v.img" <<'EOF'
+import sys, struct
+data = open(sys.argv[1],'rb').read()
+mdb = data[0x400:0x500]
+ctBlk = struct.unpack('>H', mdb[0x96:0x98])[0]
+drAlBlSt = struct.unpack('>H', mdb[0x1c:0x1e])[0]
+drAlBlkSiz = struct.unpack('>I', mdb[0x14:0x18])[0]
+ctOff = drAlBlSt*512 + ctBlk*drAlBlkSiz
+hdr = data[ctOff+14:ctOff+14+0x66]
+nodeSize = struct.unpack('>H', hdr[0x12:0x14])[0]
+n = struct.unpack('>I', hdr[0x0a:0x0e])[0]
+seen = set(); count = 0
+while n and n not in seen:
+    seen.add(n)
+    base = ctOff + n*nodeSize
+    count += struct.unpack('>H', data[base+0x0a:base+0x0c])[0]
+    n = struct.unpack('>I', data[base:base+4])[0]
+print(count)
+EOF
+)
+field=$(python3 -c "
+import struct
+d=open('$WORK/v.img','rb').read()
+mdb=d[0x400:0x500]
+ctOff = struct.unpack('>H',mdb[0x1c:0x1e])[0]*512 + struct.unpack('>H',mdb[0x96:0x98])[0]*struct.unpack('>I',mdb[0x14:0x18])[0]
+print(struct.unpack('>I', d[ctOff+14+6:ctOff+14+10])[0])
+")
+[[ "$field" == "$expected" ]] || {
+  echo "Cleanup: BT header rec leafRecords field=$field but actual=$expected" >&2
+  exit 1
+}
+
 echo "[PASS] mac hfs leaf split (C4)"
