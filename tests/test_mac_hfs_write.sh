@@ -130,4 +130,25 @@ rg -q "split not implemented" /tmp/rdedisktool_test.log || {
   exit 1
 }
 
+# 7. M10: rename and delete cycle on the non-bootable image.
+"$RDEDISKTOOL" --bootdisk-mode off rename "$WORK/nonboot.img" "Hello.txt" "World.txt" \
+    >/dev/null 2>&1 || { echo "rename failed" >&2; exit 1; }
+"$RDEDISKTOOL" list "$WORK/nonboot.img" | rg -q "World.txt" || {
+  echo "World.txt missing after rename" >&2; exit 1
+}
+"$RDEDISKTOOL" list "$WORK/nonboot.img" | rg -q "Hello.txt" && {
+  echo "Hello.txt still present after rename" >&2; exit 1
+} || true
+"$RDEDISKTOOL" --bootdisk-mode off delete "$WORK/nonboot.img" "World.txt" \
+    >/dev/null 2>&1 || { echo "delete failed" >&2; exit 1; }
+"$RDEDISKTOOL" list "$WORK/nonboot.img" | rg -q "World.txt" && {
+  echo "World.txt still present after delete" >&2; exit 1
+} || true
+# Cross-tool: Python must see the cleaned-up state too.
+if [[ "$HAVE_PY" == "1" ]]; then
+  python3 "$PY_TOOL" detect "$WORK/nonboot.img" >/dev/null 2>&1 || {
+    echo "Python detect rejects post-delete HFS image" >&2; exit 1
+  }
+fi
+
 echo "[PASS] mac hfs write"
