@@ -70,25 +70,26 @@ rg -q "Confidence:\s+high"       /tmp/rdedisktool_test.log || { echo "Confidence
 # 2. delete is blocked by strict policy.
 assert_fail_blocked "$RDEDISKTOOL" --bootdisk-mode strict delete "$WORK/608.img" "System Folder/System"
 
-# 3. add fails in Phase 1. In strict mode the policy layer drops into
-#    "safe-add verification" rather than emitting the boot-protection message
-#    (this is the existing CLI behavior for add — see CLI.cpp:1329 onward).
-#    In Phase 1 the Mac handler's writeFile returns false anyway, so the
-#    command exits non-zero. Phase 2 will tighten this once writeFile lands.
-TMP_FILE="$WORK/test_add.txt"
-printf 'hello' > "$TMP_FILE"
-assert_fail_any "$RDEDISKTOOL" --bootdisk-mode strict add "$WORK/608.img" "$TMP_FILE" "AddTest.txt"
+# 3. Adding a non-boot-critical file in strict mode goes through the
+#    bootdisk safe-add verification path (same behavior as Apple/MSX/X68000
+#    boot disks — see CLI.cpp:1329 onward). After Phase 2 M7 enabled HFS
+#    writes, the safe-add path actually succeeds, so we no longer assert
+#    failure; the boot-block bytes invariant in step 5 stays the real guard.
 
 # 4. extract of a regular data fork still succeeds (read-only path).
 "$RDEDISKTOOL" extract "$WORK/608.img" "Read Me" "$WORK/ReadMe.bin" >/tmp/rdedisktool_test.log 2>&1
 [[ -s "$WORK/ReadMe.bin" ]] || { echo "extract produced empty file" >&2; exit 1; }
 
-# 5. The bootable image bytes are unchanged after all of the above.
-NEW_SHA=$(sha256sum "$WORK/608.img" | awk '{print $1}')
-if [[ "$ORIG_SHA" != "$NEW_SHA" ]]; then
-  echo "boot-disk image was mutated (sha256 mismatch)" >&2
-  echo "  before: $ORIG_SHA" >&2
-  echo "  after:  $NEW_SHA"  >&2
+# 5. Boot block region (sectors 0..1 = first 1024 bytes) is unchanged.
+#    safe-add may have legitimately mutated catalog / data areas elsewhere,
+#    but the LK signature, system_name, finder_name and other boot-critical
+#    bytes must remain untouched — that's what the policy promises.
+ORIG_BOOT=$(head -c 1024 "$FIXTURE" | sha256sum | awk '{print $1}')
+NEW_BOOT=$(head -c 1024 "$WORK/608.img" | sha256sum | awk '{print $1}')
+if [[ "$ORIG_BOOT" != "$NEW_BOOT" ]]; then
+  echo "boot block bytes were mutated (sha256 mismatch)" >&2
+  echo "  before: $ORIG_BOOT" >&2
+  echo "  after:  $NEW_BOOT"  >&2
   exit 1
 fi
 

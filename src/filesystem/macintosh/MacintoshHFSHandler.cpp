@@ -64,10 +64,12 @@ bool MacintoshHFSHandler::parseMdb() {
 
     m_mdb.createDate       = be32(p + 0x02);
     m_mdb.modifyDate       = be32(p + 0x06);
-    m_mdb.numFiles         = be16(p + 0x06 + 0x06);  // drNmFls @ 0x0c
+    m_mdb.numFiles         = be16(p + 0x0c);          // drNmFls
+    m_mdb.bitmapStart      = be16(p + 0x0e);          // drVBMSt
     m_mdb.numAllocBlocks   = be16(p + 0x12);
     m_mdb.allocBlockSize   = be32(p + 0x14);
     m_mdb.firstAllocBlock  = be16(p + 0x1c);
+    m_mdb.nextCNID         = be32(p + 0x1e);          // drNxtCNID
     m_mdb.freeAllocBlocks  = be16(p + 0x22);
 
     // Volume name: Pascal string, length byte at MDB offset 0x24, up to 27 chars
@@ -457,12 +459,386 @@ std::vector<uint8_t> MacintoshHFSHandler::readFile(const std::string& filename) 
     return extractFork(f->cnid, HFS_FORK_DATA);
 }
 
-bool MacintoshHFSHandler::writeFile(const std::string&, const std::vector<uint8_t>&,
-                                     const FileMetadata&) {
-    throw NotImplementedException("Macintosh HFS write support is not yet implemented (Phase 2)");
+// HFS volume bitmap helpers. Bitmap occupies sectors starting at drVBMSt;
+// inside each byte the MSB (bit 7) maps to the first allocation block in that
+// byte (Inside Mac File Manager). bit==1 means used, 0 means free.
+namespace {
+
+inline bool bitmapBit(const std::vector<uint8_t>& raw,
+                       uint64_t bitmapByteBase, uint16_t allocBlock) {
+    const size_t off = bitmapByteBase + (allocBlock / 8);
+    if (off >= raw.size()) return true;  // out of range = treat as used
+    const uint8_t mask = static_cast<uint8_t>(1u << (7 - (allocBlock & 7)));
+    return (raw[off] & mask) != 0;
 }
+
+inline void setBitmapBit(std::vector<uint8_t>& raw,
+                          uint64_t bitmapByteBase, uint16_t allocBlock,
+                          bool used) {
+    const size_t off = bitmapByteBase + (allocBlock / 8);
+    if (off >= raw.size()) return;
+    const uint8_t mask = static_cast<uint8_t>(1u << (7 - (allocBlock & 7)));
+    if (used) raw[off] |= mask;
+    else      raw[off] &= static_cast<uint8_t>(~mask);
+}
+
+// Compare HFS catalog keys: parent CNID first (BE u32), then case-folded
+// (Mac-Roman simple) name byte-wise. Returns <0 / 0 / >0 like memcmp.
+int compareCatalogKey(uint32_t parentA, const std::string& nameA,
+                       uint32_t parentB, const std::string& nameB) {
+    if (parentA != parentB) return (parentA < parentB) ? -1 : 1;
+    // Inside Mac uses a Mac-Roman case-insensitive comparison; for the
+    // M7 minimal scope (single new file at the root) plain byte comparison
+    // is sufficient — we never produce records that conflict with existing
+    // ones.
+    const size_t n = std::min(nameA.size(), nameB.size());
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char a = static_cast<unsigned char>(nameA[i]);
+        unsigned char b = static_cast<unsigned char>(nameB[i]);
+        if (a >= 'a' && a <= 'z') a = static_cast<unsigned char>(a - 'a' + 'A');
+        if (b >= 'a' && b <= 'z') b = static_cast<unsigned char>(b - 'a' + 'A');
+        if (a != b) return (a < b) ? -1 : 1;
+    }
+    if (nameA.size() != nameB.size()) {
+        return (nameA.size() < nameB.size()) ? -1 : 1;
+    }
+    return 0;
+}
+
+inline void putBE16(std::vector<uint8_t>& raw, size_t off, uint16_t v) {
+    raw[off]     = static_cast<uint8_t>((v >> 8) & 0xFF);
+    raw[off + 1] = static_cast<uint8_t>(v & 0xFF);
+}
+inline void putBE32(std::vector<uint8_t>& raw, size_t off, uint32_t v) {
+    raw[off]     = static_cast<uint8_t>((v >> 24) & 0xFF);
+    raw[off + 1] = static_cast<uint8_t>((v >> 16) & 0xFF);
+    raw[off + 2] = static_cast<uint8_t>((v >> 8) & 0xFF);
+    raw[off + 3] = static_cast<uint8_t>(v & 0xFF);
+}
+
+} // namespace
+
+bool MacintoshHFSHandler::writeFile(const std::string& filename,
+                                     const std::vector<uint8_t>& data,
+                                     const FileMetadata& metadata) {
+    if (!m_disk) return false;
+    if (m_disk->isWriteProtected()) {
+        throw WriteProtectedException();
+    }
+    // M7 scope: parent dir = root only. Reject paths with separators.
+    std::string leaf = filename;
+    while (!leaf.empty() && leaf.front() == '/') leaf.erase(leaf.begin());
+    if (leaf.find('/') != std::string::npos) {
+        throw NotImplementedException("Macintosh HFS write currently only supports root-level files (no subdirectories)");
+    }
+    if (leaf.empty() || leaf.size() > 31) {
+        return false;
+    }
+    if (lookupByPath(leaf) != nullptr) {
+        return false;  // already exists; caller does delete-then-add
+    }
+    if (m_mdb.allocBlockSize == 0) return false;
+
+    // Compute needed allocation blocks. Out-of-scope: forks larger than
+    // 3 initial extents (= no Extents Overflow B-tree update yet).
+    const uint32_t blockSize = m_mdb.allocBlockSize;
+    const uint32_t needed = data.empty() ? 0u :
+        static_cast<uint32_t>((data.size() + blockSize - 1) / blockSize);
+    if (needed > 0xFFFFu) {
+        throw NotImplementedException("Macintosh HFS write: data fork too large for a single extent");
+    }
+
+    // Snapshot the disk image. All mutations happen in this buffer; we commit
+    // atomically via setRawData() at the end.
+    std::vector<uint8_t> raw = m_disk->getRawData();
+
+    // 1. Find a contiguous run of free allocation blocks in the volume bitmap.
+    const uint64_t bitmapByteBase =
+        static_cast<uint64_t>(m_mdb.bitmapStart) * 512ULL;
+    uint16_t firstFree = 0;
+    uint16_t runStart = 0;
+    uint16_t runLen = 0;
+    if (needed > 0) {
+        uint16_t bestLen = 0;
+        for (uint16_t b = 0; b < m_mdb.numAllocBlocks; ++b) {
+            if (!bitmapBit(raw, bitmapByteBase, b)) {
+                if (bestLen == 0) firstFree = b;
+                ++bestLen;
+                if (bestLen >= needed) {
+                    runStart = firstFree;
+                    runLen = bestLen;
+                    break;
+                }
+            } else {
+                bestLen = 0;
+            }
+        }
+        if (runLen < needed) {
+            throw NotImplementedException(
+                "Macintosh HFS write: no contiguous free run for " +
+                std::to_string(needed) + " allocation blocks (fragmented free space; "
+                "Extents Overflow B-tree updates not implemented yet)");
+        }
+    }
+
+    // 2. Write the data fork.
+    const uint64_t firstAllocByte =
+        static_cast<uint64_t>(m_mdb.firstAllocBlock) * 512ULL;
+    if (needed > 0) {
+        const uint64_t startOff =
+            firstAllocByte + static_cast<uint64_t>(runStart) * blockSize;
+        if (startOff + static_cast<uint64_t>(runLen) * blockSize > raw.size()) {
+            return false;
+        }
+        for (uint32_t i = 0; i < needed; ++i) {
+            const uint64_t off = firstAllocByte +
+                static_cast<uint64_t>(runStart + i) * blockSize;
+            const size_t srcOff = static_cast<size_t>(i) * blockSize;
+            const size_t take = std::min<size_t>(blockSize, data.size() - srcOff);
+            std::memcpy(raw.data() + off, data.data() + srcOff, take);
+            if (take < blockSize) {
+                std::memset(raw.data() + off + take, 0, blockSize - take);
+            }
+        }
+        // Mark the run as used in the volume bitmap.
+        for (uint32_t i = 0; i < needed; ++i) {
+            setBitmapBit(raw, bitmapByteBase, runStart + i, true);
+        }
+    }
+
+    // 3. Build the new catalog file record. SPEC §1463 layout.
+    const uint32_t newCNID = m_mdb.nextCNID;
+    std::vector<uint8_t> recordData(102, 0);  // catalog file record body length
+    recordData[0x00] = 0x02;  // recType = file
+    // Optional: fileType + creator from metadata are not exposed by the
+    // FileSystemHandler interface; defaults to four-zero bytes.
+    putBE32(recordData, 0x14, newCNID);
+    if (needed > 0) {
+        // dataExtents at 0x4a — 3 extents × (start, count). We only fill
+        // the first.
+        putBE16(recordData, 0x4a, runStart);
+        putBE16(recordData, 0x4c, static_cast<uint16_t>(needed));
+    }
+    putBE32(recordData, 0x1a, static_cast<uint32_t>(data.size()));   // dataLogical
+    putBE32(recordData, 0x1e, static_cast<uint32_t>(needed) * blockSize); // dataPhysical
+    putBE32(recordData, 0x2c, metadata.timestamp.value_or(0) ?
+        static_cast<uint32_t>(*metadata.timestamp + 2082844800LL) : 0);  // create
+    putBE32(recordData, 0x30, recordData[0x2c] | (recordData[0x2c+1] << 8));  // modify (same)
+    // Restore modify offset properly:
+    {
+        uint32_t cdate = (static_cast<uint32_t>(recordData[0x2c]) << 24) |
+                          (static_cast<uint32_t>(recordData[0x2c + 1]) << 16) |
+                          (static_cast<uint32_t>(recordData[0x2c + 2]) << 8) |
+                           static_cast<uint32_t>(recordData[0x2c + 3]);
+        putBE32(recordData, 0x30, cdate);
+    }
+
+    // 4. Build the catalog key: keyLen + reserved + parentCNID + name(p-string).
+    constexpr uint32_t HFS_ROOT_CNID = 2;
+    const uint32_t parentCNID = HFS_ROOT_CNID;
+    const size_t nameLen = leaf.size();
+    // keyLen excludes itself: reserved(1) + parentCNID(4) + nameLen(1) + name(N)
+    const uint8_t keyLen = static_cast<uint8_t>(6 + nameLen);
+    std::vector<uint8_t> recordKey;
+    recordKey.reserve(1 + keyLen);
+    recordKey.push_back(keyLen);
+    recordKey.push_back(0);  // reserved
+    recordKey.push_back(static_cast<uint8_t>((parentCNID >> 24) & 0xFF));
+    recordKey.push_back(static_cast<uint8_t>((parentCNID >> 16) & 0xFF));
+    recordKey.push_back(static_cast<uint8_t>((parentCNID >> 8) & 0xFF));
+    recordKey.push_back(static_cast<uint8_t>(parentCNID & 0xFF));
+    recordKey.push_back(static_cast<uint8_t>(nameLen));
+    recordKey.insert(recordKey.end(), leaf.begin(), leaf.end());
+
+    // 5. Concatenate key + (padding to even) + data.
+    std::vector<uint8_t> fullRecord = recordKey;
+    if (fullRecord.size() & 1U) fullRecord.push_back(0);
+    fullRecord.insert(fullRecord.end(), recordData.begin(), recordData.end());
+
+    // 6. Locate the catalog file's bytes in the disk image. M7 scope:
+    // catalog must fit entirely in its initial 3 extents (no overflow).
+    if (m_mdb.catalogExtents[1] == 0) {
+        throw NotImplementedException("Macintosh HFS write: catalog file is empty");
+    }
+    // We re-use the same buffer logic as walkBTreeLeaves but rebuild against
+    // the post-write state. For minimum-impact approach we only mutate the
+    // single leaf node that should host this key.
+    std::vector<uint8_t> catalogBytes;
+    for (size_t i = 0; i < 3; ++i) {
+        const uint16_t start = m_mdb.catalogExtents[i * 2];
+        const uint16_t count = m_mdb.catalogExtents[i * 2 + 1];
+        if (count == 0) continue;
+        const uint64_t off = firstAllocByte +
+            static_cast<uint64_t>(start) * blockSize;
+        const uint64_t len = static_cast<uint64_t>(count) * blockSize;
+        if (off + len > raw.size()) {
+            throw NotImplementedException("Macintosh HFS write: catalog extents past EOF");
+        }
+        catalogBytes.insert(catalogBytes.end(),
+            raw.begin() + off, raw.begin() + off + len);
+    }
+    if (catalogBytes.size() < 14 + 2 * 0x20) {
+        throw NotImplementedException("Macintosh HFS write: catalog too small to parse");
+    }
+    const uint16_t nodeSize = (static_cast<uint16_t>(catalogBytes[0x20]) << 8) |
+                                catalogBytes[0x21];
+    if (nodeSize == 0 || nodeSize > 16384 ||
+        catalogBytes.size() % nodeSize != 0) {
+        throw NotImplementedException("Macintosh HFS write: catalog node size not divisible");
+    }
+
+    // 7. Walk leaves to find the right leaf node for our key. M7 scope:
+    // we only insert when the chosen leaf has enough free space; otherwise
+    // we explicitly fail so disk content remains unchanged.
+    const uint32_t firstLeaf = (static_cast<uint32_t>(catalogBytes[0x18]) << 24) |
+                                (static_cast<uint32_t>(catalogBytes[0x19]) << 16) |
+                                (static_cast<uint32_t>(catalogBytes[0x1a]) << 8) |
+                                 static_cast<uint32_t>(catalogBytes[0x1b]);
+    uint32_t targetNode = firstLeaf;
+    while (true) {
+        const size_t nodeOff = static_cast<size_t>(targetNode) * nodeSize;
+        if (nodeOff + nodeSize > catalogBytes.size()) {
+            throw NotImplementedException("Macintosh HFS write: leaf walk out of bounds");
+        }
+        const uint8_t* p = catalogBytes.data() + nodeOff;
+        const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+        if (numRecs == 0) break;
+        // Last record's key in this node:
+        const uint16_t lastOff =
+            (static_cast<uint16_t>(p[nodeSize - 2 * (numRecs - 1) - 1]) |
+             (static_cast<uint16_t>(p[nodeSize - 2 * (numRecs - 1) - 2]) << 8));
+        const uint8_t lastKeyLen = p[lastOff];
+        if (lastOff + 1U + 6U > nodeSize) break;
+        const uint32_t lastParent = (static_cast<uint32_t>(p[lastOff + 0x02]) << 24) |
+                                     (static_cast<uint32_t>(p[lastOff + 0x03]) << 16) |
+                                     (static_cast<uint32_t>(p[lastOff + 0x04]) << 8) |
+                                      static_cast<uint32_t>(p[lastOff + 0x05]);
+        const uint8_t lastNameLen = p[lastOff + 0x06];
+        const std::string lastName(reinterpret_cast<const char*>(p + lastOff + 0x07),
+                                    std::min<size_t>(lastNameLen,
+                                        static_cast<size_t>(lastKeyLen >= 6 ? lastKeyLen - 6 : 0)));
+        if (compareCatalogKey(parentCNID, leaf, lastParent, lastName) <= 0) {
+            break;  // our key fits in this node (≤ last key)
+        }
+        const uint32_t fLink = (static_cast<uint32_t>(p[0x00]) << 24) |
+                                (static_cast<uint32_t>(p[0x01]) << 16) |
+                                (static_cast<uint32_t>(p[0x02]) << 8) |
+                                 static_cast<uint32_t>(p[0x03]);
+        if (fLink == 0) break;
+        targetNode = fLink;
+    }
+
+    // 8. Insert into the chosen leaf node. Key-sorted insertion.
+    const size_t nodeOff = static_cast<size_t>(targetNode) * nodeSize;
+    uint8_t* p = catalogBytes.data() + nodeOff;
+    const uint16_t numRecs = (static_cast<uint16_t>(p[0x0a]) << 8) | p[0x0b];
+
+    // Free space in the node = node end − offset table − last record end.
+    const size_t offsetTableBytes = static_cast<size_t>(numRecs + 1) * 2U;
+    auto recOff = [&](uint16_t idx) -> uint16_t {
+        const size_t pos = nodeSize - 2 * (idx + 1);
+        return (static_cast<uint16_t>(p[pos]) << 8) | p[pos + 1];
+    };
+    const uint16_t freePtr = recOff(numRecs);  // start of free space
+    const size_t freeSpace = (nodeSize - offsetTableBytes) - freePtr;
+    if (fullRecord.size() + 2 > freeSpace) {
+        throw NotImplementedException("Macintosh HFS write: target leaf node full (split not implemented)");
+    }
+
+    // Find the insertion index.
+    size_t insertIdx = numRecs;
+    for (uint16_t i = 0; i < numRecs; ++i) {
+        const uint16_t ko = recOff(i);
+        const uint8_t kl = p[ko];
+        if (ko + 1U + 6U > nodeSize) break;
+        const uint32_t pCnid = (static_cast<uint32_t>(p[ko + 0x02]) << 24) |
+                                 (static_cast<uint32_t>(p[ko + 0x03]) << 16) |
+                                 (static_cast<uint32_t>(p[ko + 0x04]) << 8) |
+                                  static_cast<uint32_t>(p[ko + 0x05]);
+        const uint8_t nl = p[ko + 0x06];
+        const std::string nm(reinterpret_cast<const char*>(p + ko + 0x07),
+                              std::min<size_t>(nl,
+                                static_cast<size_t>(kl >= 6 ? kl - 6 : 0)));
+        if (compareCatalogKey(parentCNID, leaf, pCnid, nm) < 0) {
+            insertIdx = i;
+            break;
+        }
+    }
+
+    // Where the new record will start, and what offset records after it have.
+    const uint16_t newRecStart = (insertIdx == numRecs) ? freePtr : recOff(static_cast<uint16_t>(insertIdx));
+    const size_t shiftLen = freePtr - newRecStart;
+
+    // Move trailing record bytes forward.
+    if (shiftLen > 0) {
+        std::memmove(p + newRecStart + fullRecord.size(),
+                     p + newRecStart, shiftLen);
+    }
+    // Write the new record.
+    std::memcpy(p + newRecStart, fullRecord.data(), fullRecord.size());
+
+    // Rebuild the offset table with the inserted record.
+    std::vector<uint16_t> offsets;
+    offsets.reserve(numRecs + 2);
+    for (uint16_t i = 0; i < numRecs; ++i) offsets.push_back(recOff(i));
+    offsets.insert(offsets.begin() + insertIdx,
+                   static_cast<uint16_t>(newRecStart));
+    // Bump every offset that was after the insertion point.
+    for (size_t i = insertIdx + 1; i < offsets.size(); ++i) {
+        offsets[i] = static_cast<uint16_t>(offsets[i] + fullRecord.size());
+    }
+    offsets.push_back(static_cast<uint16_t>(freePtr + fullRecord.size()));  // new free-ptr
+    // Write offsets back: the first entry (closest to node end) is record 0.
+    for (size_t i = 0; i < offsets.size(); ++i) {
+        const size_t pos = nodeSize - 2 * (i + 1);
+        p[pos]     = static_cast<uint8_t>((offsets[i] >> 8) & 0xFF);
+        p[pos + 1] = static_cast<uint8_t>(offsets[i] & 0xFF);
+    }
+    // Bump record count.
+    putBE16(catalogBytes, nodeOff + 0x0a, static_cast<uint16_t>(numRecs + 1));
+
+    // 9. Spread catalog bytes back into the disk image (extents).
+    {
+        size_t cursor = 0;
+        for (size_t i = 0; i < 3 && cursor < catalogBytes.size(); ++i) {
+            const uint16_t start = m_mdb.catalogExtents[i * 2];
+            const uint16_t count = m_mdb.catalogExtents[i * 2 + 1];
+            if (count == 0) continue;
+            const uint64_t off = firstAllocByte +
+                static_cast<uint64_t>(start) * blockSize;
+            const size_t len = std::min<size_t>(
+                static_cast<size_t>(count) * blockSize,
+                catalogBytes.size() - cursor);
+            std::memcpy(raw.data() + off,
+                        catalogBytes.data() + cursor, len);
+            cursor += len;
+        }
+    }
+
+    // 10. Update MDB scalars.
+    putBE16(raw, 0x400 + 0x0c, static_cast<uint16_t>(m_mdb.numFiles + 1));
+    putBE32(raw, 0x400 + 0x1e, m_mdb.nextCNID + 1);
+    putBE16(raw, 0x400 + 0x22,
+            static_cast<uint16_t>(m_mdb.freeAllocBlocks - needed));
+
+    // 11. Commit.
+    m_disk->setRawData(raw);
+
+    // Refresh caches.
+    m_childrenByParent.clear();
+    m_byCNID.clear();
+    m_extentsOverflow.clear();
+    parseMdb();
+    walkExtentsOverflowLeaves();
+    walkCatalogLeaves();
+    return true;
+}
+
 bool MacintoshHFSHandler::deleteFile(const std::string&) {
-    throw NotImplementedException("Macintosh HFS delete support is not yet implemented (Phase 2)");
+    // M7 scope: write/create only. Delete requires re-packing the leaf node
+    // and freeing the volume bitmap, which we skip here to keep the surface
+    // minimal and safe for Phase 2 review.
+    throw NotImplementedException("Macintosh HFS delete is not implemented in Phase 2 (writeFile create-only scope)");
 }
 bool MacintoshHFSHandler::renameFile(const std::string&, const std::string&) {
     throw NotImplementedException("Macintosh HFS rename support is not yet implemented (Phase 2)");

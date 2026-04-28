@@ -33,9 +33,11 @@ public:
         uint32_t createDate = 0;      // drCrDate
         uint32_t modifyDate = 0;      // drLsMod
         uint16_t numFiles = 0;        // drNmFls
-        uint16_t firstAllocBlock = 0; // drAlBlSt   (first allocation block in 512B sectors)
+        uint16_t bitmapStart = 0;     // drVBMSt   (first volume bitmap sector)
+        uint16_t firstAllocBlock = 0; // drAlBlSt  (first allocation block in 512B sectors)
         uint16_t numAllocBlocks = 0;  // drNmAlBlks
         uint32_t allocBlockSize = 0;  // drAlBlkSiz
+        uint32_t nextCNID = 0;        // drNxtCNID  (next unused catalog node ID)
         uint16_t freeAllocBlocks = 0; // drFreeBks
         std::string volumeName;       // drVN  (Pascal, max 27 bytes, MacRoman)
         uint32_t catalogFileSize = 0; // drCTFlSize
