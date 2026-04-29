@@ -1,5 +1,6 @@
 # Build directories
 build/
+build_local/
 cmake-build-*/
 
 # IDE files
@@ -39,6 +40,7 @@ Thumbs.db
 
 # Planning documents (local working drafts)
 PLAN_*
+FIX_*
 
 # Disk image files
 # Apple II
