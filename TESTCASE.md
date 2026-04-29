@@ -212,7 +212,7 @@ README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이
 - **목적**: bootdisk 보호 정책(`strict` + `--force-bootdisk`)이 Apple II/MSX/X68000에서 공통적으로 동작하는지 자동 검증한다.
 - **커버리지**: `info -v`의 bootdisk 인식, `strict` safe-add 검증, 기존 시스템 파일 보존, `--force-bootdisk` 우회 가능 여부(정책 차단 해제 확인).
 - **준비**:
-  - `RetroDeveloperEnvironmentDisktool/build_local/rdedisktool` 또는 `build/rdedisktool` 빌드 완료
+  - `RetroDeveloperEnvironmentDisktool/build/rdedisktool` 빌드 완료
   - `diskwork/bootdisk/*` 원본 이미지 존재
 
 | 단계 | 절차 | 기대 결과 |
@@ -242,7 +242,7 @@ README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이
 | 단계 | 절차 | 기대 결과 |
 |------|------|------------|
 |1|`mkdir -p /tmp/rdedisktool_guard && cp diskwork/bootdisk/AppleII/dos33.dsk /tmp/rdedisktool_guard/ && cp diskwork/bootdisk/AppleII/prodos242.dsk /tmp/rdedisktool_guard/ && cp diskwork/bootdisk/msx/msxdos23.dsk /tmp/rdedisktool_guard/ && cp diskwork/bootdisk/x68000/HUMAN302.XDF /tmp/rdedisktool_guard/`|원본 보존 상태에서 테스트용 복제본 준비.|
-|2|`cd RetroDeveloperEnvironmentDisktool && ./build_local/rdedisktool --bootdisk-mode strict add /tmp/rdedisktool_guard/msxdos23.dsk ./tests/fixtures/README.TXT README.TXT`|safe-add 검증 메시지와 함께 추가 성공(또는 명확한 실패 사유) 확인.|
+|2|`cd RetroDeveloperEnvironmentDisktool && ./build/rdedisktool --bootdisk-mode strict add /tmp/rdedisktool_guard/msxdos23.dsk ./tests/fixtures/README.TXT README.TXT`|safe-add 검증 메시지와 함께 추가 성공(또는 명확한 실패 사유) 확인.|
 |3|`BOOT_DISK=/tmp/rdedisktool_guard/dos33.dsk ./run_applewin_dos33.sh`|Apple DOS 3.3 부팅 화면/프롬프트 확인, 로그 기록.|
 |4|`BOOT_DISK=/tmp/rdedisktool_guard/prodos242.dsk ./run_applewin_prodos.sh`|Apple ProDOS 부팅 화면/프롬프트 확인, 로그 기록.|
 |5|`BOOT_DISK=/tmp/rdedisktool_guard/msxdos23.dsk ./run_openmsx_msxdos2.sh`|MSX-DOS2 부팅 및 명령 프롬프트 확인, 로그 기록.|

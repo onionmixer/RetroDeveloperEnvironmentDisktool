@@ -7,7 +7,7 @@
 
 - Git tag: `pre-mac` (commit `a770ef0fcbb9a5019fd8d5b57248efb72806ed9b`)
 - 커밋 메시지: `chore: remove temporary analysis documents` (2026-04-09)
-- 빌드: `build/rdedisktool` (806104 bytes), `build_local/rdedisktool` (797040 bytes)
+- 빌드: `build/rdedisktool` (806104 bytes)
 
 ## 픽스처 4종
 
@@ -39,4 +39,4 @@ PROJ_ROOT="$(cd ../.. && pwd)"
 
 - baseline 은 **기존 기능의 동결된 동작 명세**다. Macintosh PR 머지 시점까지 변경 금지.
 - Macintosh 머지 후, Mac 추가로 인해 기존 출력이 정당하게 바뀌어야 하는 경우(예: `--list-formats` 출력에 Mac 포맷 추가) 별도 갱신 commit 으로 처리하고 PR 설명에 사유 명시.
-- 갱신 시에는 항상 **build_local/rdedisktool** 또는 **build/rdedisktool** 의 최신 빌드로 재캡처.
+- 갱신 시에는 항상 **build/rdedisktool** 의 최신 빌드로 재캡처.

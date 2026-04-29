@@ -16,10 +16,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-RDEDISKTOOL="${RDEDISKTOOL:-$TOOL_ROOT/build_local/rdedisktool}"
-if [[ ! -x "$RDEDISKTOOL" ]]; then
-  RDEDISKTOOL="$TOOL_ROOT/build/rdedisktool"
-fi
+RDEDISKTOOL="${RDEDISKTOOL:-$TOOL_ROOT/build/rdedisktool}"
 [[ -x "$RDEDISKTOOL" ]] || { echo "missing rdedisktool binary" >&2; exit 1; }
 
 FX="$TOOL_ROOT/tests/fixtures/macintosh/608_SystemTools.img"
