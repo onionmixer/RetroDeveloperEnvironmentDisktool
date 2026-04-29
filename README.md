@@ -1074,6 +1074,26 @@ XSA (eXtendable Storage Archive) is a compressed disk image format developed by 
 - Bidirectional conversion with `mac_img` via the `convert` command.
   `mac_dc42` cannot be created from scratch.
 
+**Applesauce MOOF (`mac_moof`)**:
+- Bitstream / flux Macintosh floppy image — the format Applesauce hardware
+  emits and the snow emulator reads/writes. Full read+write support for
+  GCR (400K single-sided / 800K double-sided) and MFM (1.44M IBM PC
+  standard) variants. Flux tracks (FLUX chunk) are not currently
+  decoded — pure bitstream MOOFs only.
+- Auto-detected by the 8-byte magic `MOOF\xff\x0a\x0d\x0a` + CRC32-
+  ISO-HDLC over the chunk stream.
+- Bidirectional conversion with `mac_img` and `mac_dc42` via `convert`.
+  `create -f mac_moof` produces a blank GCR/MFM image.
+
+> **Reference**: The MOOF chunk loader, the GCR 6-and-2 sector encoder,
+> and the MFM bit-window / sync-marker / CRC16-CCITT constants were
+> cross-validated against [snow](https://github.com/twvd/snow) (MIT, by
+> Thomas W.) — specifically `floppy/src/loaders/moof.rs`,
+> `floppy/src/macformat.rs`, and the SWIM2/ISM emulation in
+> `core/src/mac/swim/ism.rs`. Snow itself adapts encoder logic from
+> Greaseweazle / FluxEngine / MESS. The format definition follows the
+> [Applesauce MOOF Disk Image Reference](https://applesaucefdc.com/moof-reference/).
+
 ### Macintosh HFS Structure
 
 - **Master Directory Block (MDB)** at sector 2 (offset 0x400): drSigWord =
