@@ -152,6 +152,8 @@ private:
     int cmdCreate(const std::vector<std::string>& args);
     int cmdConvert(const std::vector<std::string>& args);
     int cmdDump(const std::vector<std::string>& args);
+    int cmdPutRaw(const std::vector<std::string>& args);
+    int cmdGetRaw(const std::vector<std::string>& args);
     int cmdRename(const std::vector<std::string>& args);
     int cmdValidate(const std::vector<std::string>& args);
     int cmdListFormats(const std::vector<std::string>& args);

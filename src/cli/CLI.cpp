@@ -390,6 +390,16 @@ void CLI::initCommands() {
         "Dump sector/track data",
         "dump <image_file> -t <track> -s <sector> [--side <n>] [-f <format>]");
 
+    registerCommand("putraw",
+        [this](const std::vector<std::string>& args) { return cmdPutRaw(args); },
+        "Write a raw host file to fixed track/sector (AppleDO .do only)",
+        "putraw <image_file> <hostfile> -t <track> -s <sector> [--max-sectors <n>] [-f do]");
+
+    registerCommand("getraw",
+        [this](const std::vector<std::string>& args) { return cmdGetRaw(args); },
+        "Read raw sectors to a host file (AppleDO .do only)",
+        "getraw <image_file> -o <out_file> -t <track> -s <sector> --count <n> [--force]");
+
     registerCommand("validate",
         [this](const std::vector<std::string>& args) { return cmdValidate(args); },
         "Validate disk image integrity",
@@ -2501,6 +2511,214 @@ int CLI::cmdDump(const std::vector<std::string>& args) {
         printError(e.what());
         return 1;
     }
+}
+
+// ── putraw / getraw : raw sector write/read for Apple II direct-boot disks ──
+//    (UPDATE_PUTRAW_DIRECTBOOT.md). Minimal additive; reuse existing primitives.
+namespace {
+// N1: strict non-negative integer (digits only; no sign/space/junk), full-string, size_t range.
+bool parseUSizeStrict(const std::string& s, size_t& out) {
+    if (s.empty()) return false;
+    for (char c : s) { if (c < '0' || c > '9') return false; }
+    try {
+        size_t pos = 0;
+        unsigned long long v = std::stoull(s, &pos);
+        if (pos != s.size()) return false;
+        out = static_cast<size_t>(v);
+        if (static_cast<unsigned long long>(out) != v) return false;  // size_t overflow guard
+        return true;
+    } catch (...) { return false; }
+}
+
+// DKFS build marker at T0S15: magic(9) "DKFS20RAW" + version(1) + inverse-magic(9).
+// Full-field match (magic + inverse) so a foreign DOS33/ProDOS sector cannot collide.
+bool hasDkfsMarker(const SectorBuffer& sec) {
+    static const char MAGIC[9] = {'D','K','F','S','2','0','R','A','W'};
+    if (sec.size() < 19) return false;
+    for (int i = 0; i < 9; ++i) if (sec[i] != static_cast<uint8_t>(MAGIC[i])) return false;
+    for (int i = 0; i < 9; ++i) if (sec[10 + i] != static_cast<uint8_t>(MAGIC[i] ^ 0xFF)) return false;
+    return true;
+}
+
+std::string lowerExt(const std::string& path) {
+    std::string e = std::filesystem::path(path).extension().string();
+    std::transform(e.begin(), e.end(), e.begin(), [](unsigned char c){ return std::tolower(c); });
+    return e;
+}
+} // anonymous namespace (putraw/getraw helpers)
+
+int CLI::cmdPutRaw(const std::vector<std::string>& args) {
+    rdedisktool::CommandOptions opts;
+    opts.addValue("track", {"-t", "--track"});
+    opts.addValue("sector", {"-s", "--sector"});
+    opts.addValue("max-sectors", {"--max-sectors"});
+    opts.addValue("format", {"-f", "--format"});  // hint only; autodetect is authoritative
+    std::string parseError;
+    if (!opts.parse(args, &parseError)) { printError(parseError); printCommandHelp("putraw"); return 1; }
+    if (opts.positionalCount() < 2) {
+        printError("Usage: putraw <image> <hostfile> -t <track> -s <sector>");
+        printCommandHelp("putraw"); return 1;
+    }
+    const std::string imagePath = opts.getPositional(0);
+    const std::string hostPath  = opts.getPositional(1);
+
+    // N1: strict numeric parse before any disk action.
+    size_t track = 0, sector = 0, maxSectors = 0;
+    const bool hasMax = !opts.getValue("max-sectors").empty();
+    if (!parseUSizeStrict(opts.getValue("track"), track))   { printError("Invalid --track (non-negative integer required)"); return 1; }
+    if (!parseUSizeStrict(opts.getValue("sector"), sector)) { printError("Invalid --sector (non-negative integer required)"); return 1; }
+    if (hasMax && !parseUSizeStrict(opts.getValue("max-sectors"), maxSectors)) { printError("Invalid --max-sectors"); return 1; }
+    if (!opts.getValue("format").empty() && opts.getValue("format") != "do") { printError("putraw only supports --format do"); return 1; }
+
+    // Format/geometry fence: .do extension + AppleDO + exactly 35/1/16/256.
+    if (lowerExt(imagePath) != ".do") { printError("putraw requires a .do image"); return 1; }
+    LoadedDisk disk = loadDiskImageOnly(imagePath);
+    if (!disk.hasImage()) return 1;  // loadDiskImageOnly already printed
+    if (disk.format != DiskFormat::AppleDO) { printError("putraw only supports AppleDO (.do) images"); return 1; }
+    const DiskGeometry geom = disk.image->getGeometry();
+    if (geom.tracks != 35 || geom.sides != 1 || geom.sectorsPerTrack != 16 || geom.bytesPerSector != 256) {
+        printError("putraw requires standard 35/1/16/256 AppleDO geometry"); return 1;
+    }
+    const size_t spt = geom.sectorsPerTrack;     // 16
+    const size_t bps = geom.bytesPerSector;      // 256
+    const size_t total = geom.totalSectors();    // 560
+
+    // N2: start (track,sector) independent bounds, then linear start.
+    if (track >= geom.tracks || sector >= spt) { printError("Start track/sector out of range"); return 1; }
+    const size_t linearStart = track * spt + sector;
+
+    // Raw-write guard + DKFS marker (geometry validated → T0S15 exists).
+    try {
+        const SectorBuffer markerSec = disk.image->readSector(0, 0, 15);
+        const bool allow = hasDkfsMarker(markerSec)
+                        || disk.image->getFileSystemType() == FileSystemType::Unknown
+                        || m_forceBootDisk;
+        if (!allow) {
+            printError("putraw: image has a recognized filesystem and no DKFS marker (use --force-bootdisk to override)");
+            return 1;
+        }
+    } catch (const std::exception& e) { printError(std::string("putraw: marker read failed: ") + e.what()); return 1; }
+
+    // N5: stat byteLen → preflight (N4/N3/max) → then read whole file.
+    std::error_code ec;
+    const std::uintmax_t fsz = std::filesystem::file_size(hostPath, ec);
+    if (ec) { printError("putraw: cannot stat hostfile: " + hostPath); return 1; }
+    const size_t byteLen = static_cast<size_t>(fsz);
+    if (static_cast<std::uintmax_t>(byteLen) != fsz) { printError("putraw: hostfile too large"); return 1; }
+    if (byteLen == 0) { printError("putraw: hostfile is empty (0 bytes)"); return 1; }  // N4
+    const size_t sectorCount = (byteLen + bps - 1) / bps;
+    if (hasMax && sectorCount > maxSectors) { printError("putraw: data exceeds --max-sectors"); return 1; }
+    if (sectorCount > total - linearStart) { printError("putraw: data does not fit on disk from start position"); return 1; }  // N3
+
+    std::vector<uint8_t> data(byteLen);
+    {
+        std::ifstream in(hostPath, std::ios::binary);
+        if (!in) { printError("putraw: cannot open hostfile: " + hostPath); return 1; }
+        in.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(byteLen));
+        if (!in || static_cast<size_t>(in.gcount()) != byteLen) { printError("putraw: hostfile read failed"); return 1; }
+    }
+
+    // N6: all-or-nothing write loop. writeSector may throw → return before saveDiskImage → on-disk file unchanged.
+    try {
+        for (size_t i = 0; i < sectorCount; ++i) {
+            const size_t linear = linearStart + i;
+            const size_t off = i * bps;
+            const size_t chunk = std::min(bps, byteLen - off);
+            const SectorBuffer buf(data.begin() + off, data.begin() + off + chunk);  // writeSector zero-pads short buf
+            disk.image->writeSector(linear / spt, 0, linear % spt, buf);
+        }
+    } catch (const std::exception& e) { printError(std::string("putraw: write failed: ") + e.what()); return 1; }
+
+    // N7: save (false → nonzero; original preserved by saveDiskImage temp+rename).
+    if (!saveDiskImage(disk.image.get(), "putraw")) return 1;
+
+    // Success contract = exit 0. Optional audit TSV line.
+    std::cout << "PUTRAW\t" << track << "\t" << sector << "\t" << sectorCount << "\t" << byteLen << "\n";
+    return 0;
+}
+
+int CLI::cmdGetRaw(const std::vector<std::string>& args) {
+    rdedisktool::CommandOptions opts;
+    opts.addValue("track", {"-t", "--track"});
+    opts.addValue("sector", {"-s", "--sector"});
+    opts.addValue("count", {"--count"});
+    opts.addValue("output", {"-o", "--output"});
+    opts.addValue("format", {"-f", "--format"});
+    opts.addFlag("force", {"--force"});
+    std::string parseError;
+    if (!opts.parse(args, &parseError)) { printError(parseError); printCommandHelp("getraw"); return 1; }
+    if (opts.positionalCount() < 1) {
+        printError("Usage: getraw <image> -o <out_file> -t <track> -s <sector> --count <n>");
+        printCommandHelp("getraw"); return 1;
+    }
+    const std::string imagePath = opts.getPositional(0);
+    const std::string outPath   = opts.getValue("output");
+    if (outPath.empty()) { printError("getraw: missing -o <out_file>"); return 1; }
+
+    // N1: strict numeric parse.
+    size_t track = 0, sector = 0, count = 0;
+    if (!parseUSizeStrict(opts.getValue("track"), track))   { printError("Invalid --track"); return 1; }
+    if (!parseUSizeStrict(opts.getValue("sector"), sector)) { printError("Invalid --sector"); return 1; }
+    if (!parseUSizeStrict(opts.getValue("count"), count))   { printError("Invalid --count"); return 1; }
+    if (count == 0) { printError("getraw: --count must be > 0"); return 1; }  // N4
+    if (!opts.getValue("format").empty() && opts.getValue("format") != "do") { printError("getraw only supports --format do"); return 1; }
+
+    if (lowerExt(imagePath) != ".do") { printError("getraw requires a .do image"); return 1; }
+
+    // N11: -o must not be the input image (canonical); existing output requires --force; no parent mkdir.
+    std::error_code ec1, ec2;
+    const auto canonOut = std::filesystem::weakly_canonical(std::filesystem::path(outPath), ec1);
+    const auto canonImg = std::filesystem::weakly_canonical(std::filesystem::path(imagePath), ec2);
+    if (!ec1 && !ec2 && canonOut == canonImg) { printError("getraw: -o must not be the input image"); return 1; }
+    if (std::filesystem::exists(outPath) && !opts.hasFlag("force")) { printError("getraw: output exists (use --force to overwrite)"); return 1; }
+
+    try {
+        LoadedDisk disk = loadDiskImageOnly(imagePath);
+        if (!disk.hasImage()) return 1;
+        if (disk.format != DiskFormat::AppleDO) { printError("getraw only supports AppleDO (.do) images"); return 1; }
+        const DiskGeometry geom = disk.image->getGeometry();
+        if (geom.tracks != 35 || geom.sides != 1 || geom.sectorsPerTrack != 16 || geom.bytesPerSector != 256) {
+            printError("getraw requires standard 35/1/16/256 AppleDO geometry"); return 1;
+        }
+        const size_t spt = geom.sectorsPerTrack;
+        const size_t bps = geom.bytesPerSector;
+        const size_t total = geom.totalSectors();
+        if (track >= geom.tracks || sector >= spt) { printError("getraw: start track/sector out of range"); return 1; }
+        const size_t linearStart = track * spt + sector;
+        if (count > total - linearStart) { printError("getraw: count exceeds disk from start position"); return 1; }  // N3
+
+        // N11: write to temp then rename.
+        const std::string tmpPath = outPath + ".tmp.rdedisktool";
+        {
+            std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+            if (!out) { printError("getraw: cannot open output: " + outPath); return 1; }
+            for (size_t i = 0; i < count; ++i) {
+                const size_t linear = linearStart + i;
+                const SectorBuffer sd = disk.image->readSector(linear / spt, 0, linear % spt);
+                out.write(reinterpret_cast<const char*>(sd.data()), static_cast<std::streamsize>(bps));
+                if (!out) {
+                    out.close();
+                    std::error_code rmec; std::filesystem::remove(tmpPath, rmec);
+                    printError("getraw: output write failed"); return 1;
+                }
+            }
+            // Explicit flush+close so a deferred I/O error (e.g. disk full) is caught
+            // here — not silently swallowed by the destructor after rename.
+            out.flush();
+            out.close();
+            if (!out) {
+                std::error_code rmec; std::filesystem::remove(tmpPath, rmec);
+                printError("getraw: output flush/close failed"); return 1;
+            }
+        }
+        std::error_code rec;
+        std::filesystem::rename(tmpPath, outPath, rec);
+        if (rec) {
+            std::error_code rmec; std::filesystem::remove(tmpPath, rmec);
+            printError("getraw: rename failed: " + rec.message()); return 1;
+        }
+        return 0;
+    } catch (const std::exception& e) { printError(std::string("getraw: ") + e.what()); return 1; }
 }
 
 int CLI::cmdValidate(const std::vector<std::string>& args) {
