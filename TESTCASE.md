@@ -162,6 +162,24 @@ README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이
 
 ---
 
+## 시나리오 9-1. 원시 섹터 쓰기/읽기(`putraw`/`getraw`, Apple II direct-boot)
+- **목적**: Apple II `.do` 이미지에 고정 트랙/섹터로 원시 바이트를 기록(`putraw`)하고 다시 읽어(`getraw`) byte-exact 왕복과 마커 가드·경계·출력 안전성을 검증한다.
+- **커버리지**: `putraw`/`getraw` 왕복, 트랙 경계 횡단, 마지막 섹터 zero-pad, DKFS 마커 가드(blank 허용·실 DOS33 거부·`--force-bootdisk` 우회·마커 디스크 허용), 0바이트/`--max-sectors`/범위초과 거부, `getraw -o` 안전성(입력=출력 거부·기존출력 `--force`).
+- **준비**: 빈 `.do` 이미지와 600바이트 더미 페이로드를 생성한다. (`rdedisktool create blank.do -f do --force && head -c 600 /dev/urandom > payload.bin`)
+- **참고**: 자동화 회귀는 `tests/test_putraw_getraw.sh`로도 수행된다. `.do`/AppleDO/`35·1·16·256` 전용이며 (T,S)는 DOS 논리 섹터 기준이다.
+
+| 단계 | 절차 | 기대 결과 |
+|------|------|------------|
+|1|`rdedisktool putraw blank.do payload.bin -t 0 -s 14`|600바이트가 T0S14·T0S15·T1S0(트랙 경계 횡단)에 기록되고 종료 코드 0. `PUTRAW` 감사 라인 출력.|
+|2|`rdedisktool getraw blank.do -o out.bin -t 0 -s 14 --count 3 && cmp <(head -c 600 out.bin) payload.bin`|출력이 정확히 768바이트(3×256)이고 앞 600바이트가 원본과 동일. 끝 168바이트는 0으로 패딩.|
+|3|`: > empty.bin && rdedisktool putraw blank.do empty.bin -t 0 -s 0`|0바이트 파일은 거부, 비-0 종료 코드.|
+|4|`rdedisktool putraw blank.do payload.bin -t 0 -s 0 --max-sectors 1` / `... -t 35 -s 0` / `... -t 34 -s 15`|각각 `--max-sectors` 초과·트랙 범위 초과·디스크 끝 초과로 거부.|
+|5|`rdedisktool create dos33.do -f do --fs dos33 -n DISK --force && rdedisktool putraw dos33.do payload.bin -t 0 -s 0`|인식된 DOS 3.3 파일시스템 + 마커 없음 → 거부(보호 후퇴 방지).|
+|6|`rdedisktool --force-bootdisk putraw dos33.do payload.bin -t 0 -s 0`|전역 `--force-bootdisk`로 가드 우회, 종료 코드 0.|
+|7|`rdedisktool getraw blank.do -o blank.do -t 0 -s 0 --count 1` / 기존 파일에 `--force` 없이 재출력|`-o`가 입력 이미지와 같으면 거부, 기존 출력 파일은 `--force` 없이는 덮어쓰지 않음. `.tmp.rdedisktool` 잔여 파일이 없어야 한다.|
+
+---
+
 ## 시나리오 10. 오류 처리 및 경계값 확인
 - **목적**: 잘못된 작업 시 적절한 오류가 발생하고, 경계 조건(중복 파일명, 가득 찬 디스크, 대용량 파일)이 방어되는지 점검한다.
 - **커버리지**: `add` 중복, 가득 찬 이미지에서 추가 실패, `delete` 대상 없음, `mkdir` 경로 오류, 대용량 파일(T/S list 복수개) 등.

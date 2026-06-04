@@ -14,6 +14,7 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 - **Boot disk protection**: Multi-condition policy guards System / Finder files on bootable Macintosh / Apple II / MSX / X68000 disks
 - **Validation**: Verify disk image integrity (incl. DC42 ROR32+BE16 checksum)
 - **Sector dump**: Raw sector/track data inspection
+- **Raw sector I/O**: `putraw` / `getraw` write and read fixed track/sector ranges on Apple II `.do` images for direct-boot (no-DOS) disk assembly, guarded by the DKFS build marker
 
 ## Supported Formats
 
@@ -562,6 +563,55 @@ rdedisktool dump disk.dsk --track 0 --sector 0 --side 1
 
 # Dump with explicit format
 rdedisktool dump disk.dsk -t 0 -s 0 -f msxdsk
+```
+
+#### putraw - Write a raw host file to fixed track/sector (Apple II direct-boot)
+```bash
+rdedisktool putraw <image_file> <hostfile> -t <track> -s <sector> [--max-sectors <n>] [-f do]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-t, --track <n>` | Start track (0-based, required) |
+| `-s, --sector <n>` | Start sector (0-based, required) |
+| `--max-sectors <n>` | Reject if the file would span more than `<n>` sectors |
+| `-f, --format do` | Format hint (only `do` accepted; autodetect is authoritative) |
+
+Writes a host file verbatim to consecutive logical sectors starting at `(track, sector)`, advancing sector-then-track; the final partial sector is zero-padded to 256 bytes. Intended for laying down `boot0` / `stage2` / RWTS / payload on an **Apple II direct-boot** (no-DOS, raw-sector) disk.
+
+Restrictions (fixed, by design):
+- `.do` extension + AppleDO format + exactly `35/1/16/256` geometry only.
+- **Write guard**: a disk with a recognized filesystem (DOS 3.3 / ProDOS) is refused unless it carries the DKFS build marker (`DKFS20RAW` at track 0 sector 15) or the global `--force-bootdisk` flag is given. Blank / unrecognized `.do` images are accepted.
+- All-or-nothing: a partial/failed write never touches the on-disk image.
+- Empty (0-byte) host files and out-of-range / non-fitting writes are rejected.
+
+Examples:
+```bash
+rdedisktool putraw boot.do boot0.bin   -t 0 -s 0
+rdedisktool putraw boot.do payload.bin -t 1 -s 0 --max-sectors 32
+rdedisktool --force-bootdisk putraw boot.do marker.bin -t 0 -s 15
+```
+
+#### getraw - Read raw sectors to a host file (Apple II direct-boot)
+```bash
+rdedisktool getraw <image_file> -o <out_file> -t <track> -s <sector> --count <n> [--force]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-o, --output <file>` | Output host file (required) |
+| `-t, --track <n>` | Start track (0-based, required) |
+| `-s, --sector <n>` | Start sector (0-based, required) |
+| `--count <n>` | Number of sectors to read (required, > 0) |
+| `--force` | Overwrite `<file>` if it already exists |
+| `-f, --format do` | Format hint (only `do` accepted; autodetect is authoritative) |
+
+Mirror of `putraw`: reads `<count>` consecutive logical sectors from `(track, sector)` and writes them to `<file>`. Output is exactly `count*256` bytes (the trailing sector is not truncated). `.do`/AppleDO/`35/1/16/256` only; `-o` must not be the input image and an existing `-o` needs `--force`; written via a temp file + atomic rename so a failed read leaves no partial output.
+
+Examples:
+```bash
+rdedisktool getraw boot.do -o boot0.out -t 0 -s 0 --count 1
+rdedisktool getraw boot.do -o dump.bin  -t 1 -s 0 --count 32 --force
 ```
 
 ## Bootdisk Disk-Add Smoke Tests

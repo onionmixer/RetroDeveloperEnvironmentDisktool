@@ -785,6 +785,51 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool info game.dsk\n";
         std::cout << "  rdedisktool info game.dsk -v\n";
+    } else if (command == "putraw") {
+        std::cout << "\nOptions:\n";
+        std::cout << "  -t, --track <n>      Start track  (0-based, required)\n";
+        std::cout << "  -s, --sector <n>     Start sector (0-based, required)\n";
+        std::cout << "  --max-sectors <n>    Reject if the file would span more than <n> sectors\n";
+        std::cout << "  -f, --format do      Format hint (only 'do' accepted; autodetect is authoritative)\n";
+        std::cout << "\nDescription:\n";
+        std::cout << "  Writes a host file verbatim to consecutive logical sectors starting at\n";
+        std::cout << "  (track, sector), advancing sector-then-track. The final partial sector\n";
+        std::cout << "  is zero-padded to 256 bytes. Intended for laying down boot0 / stage2 /\n";
+        std::cout << "  RWTS / payload on an Apple II direct-boot (no-DOS, raw-sector) disk.\n";
+        std::cout << "\nRestrictions (fixed, by design):\n";
+        std::cout << "  * .do extension + AppleDO format + exactly 35/1/16/256 geometry only.\n";
+        std::cout << "  * Write guard: a disk with a recognized filesystem (DOS 3.3 / ProDOS)\n";
+        std::cout << "    is REFUSED unless it carries the DKFS build marker (\"DKFS20RAW\" at\n";
+        std::cout << "    track 0 sector 15) or the global --force-bootdisk flag is given.\n";
+        std::cout << "    Blank / unrecognized .do images are accepted.\n";
+        std::cout << "  * All-or-nothing: a partial/failed write never touches the on-disk image.\n";
+        std::cout << "  * Empty (0-byte) host files and out-of-range / non-fitting writes are rejected.\n";
+        std::cout << "\nExamples:\n";
+        std::cout << "  rdedisktool putraw boot.do boot0.bin   -t 0 -s 0\n";
+        std::cout << "  rdedisktool putraw boot.do payload.bin -t 1 -s 0 --max-sectors 32\n";
+        std::cout << "  rdedisktool --force-bootdisk putraw boot.do marker.bin -t 0 -s 15\n";
+        std::cout << "\nNote: pairs with `getraw` for byte-exact round-trip. Sector numbers are\n";
+        std::cout << "      DOS logical order (.do); the runtime RWTS must use the same numbering.\n";
+    } else if (command == "getraw") {
+        std::cout << "\nOptions:\n";
+        std::cout << "  -o, --output <file>  Output host file (required)\n";
+        std::cout << "  -t, --track <n>      Start track  (0-based, required)\n";
+        std::cout << "  -s, --sector <n>     Start sector (0-based, required)\n";
+        std::cout << "  --count <n>          Number of sectors to read (required, > 0)\n";
+        std::cout << "  --force              Overwrite <file> if it already exists\n";
+        std::cout << "  -f, --format do      Format hint (only 'do' accepted; autodetect is authoritative)\n";
+        std::cout << "\nDescription:\n";
+        std::cout << "  Reads <count> consecutive logical sectors starting at (track, sector),\n";
+        std::cout << "  advancing sector-then-track, and writes them to <file>. Output is exactly\n";
+        std::cout << "  count*256 bytes (no truncation of the trailing sector). Mirror of `putraw`.\n";
+        std::cout << "\nRestrictions (fixed, by design):\n";
+        std::cout << "  * .do extension + AppleDO format + exactly 35/1/16/256 geometry only.\n";
+        std::cout << "  * -o must not be the input image; an existing -o needs --force.\n";
+        std::cout << "  * Out-of-range start / count beyond end-of-disk are rejected.\n";
+        std::cout << "  * Written via a temp file + atomic rename; a failed read leaves no partial output.\n";
+        std::cout << "\nExamples:\n";
+        std::cout << "  rdedisktool getraw boot.do -o boot0.out -t 0 -s 0 --count 1\n";
+        std::cout << "  rdedisktool getraw boot.do -o dump.bin  -t 1 -s 0 --count 32 --force\n";
     }
 }
 
