@@ -76,15 +76,18 @@ if rg -q "MacTy|FFlg" "$WORK/plain.out"; then
 fi
 
 # 4. Verbose listing on non-Mac disk: -v has no Mac effect (safe no-op).
-PROJ_ROOT="/mnt/USERS/onion/DATA_ORIGN/Workspace/05_RetroDeveloperEnvironmentProject"
-APPLE_DISK="$PROJ_ROOT/Examples/Tutorial_apple_01/Tutorial_apple_01.do"
-if [[ -f "$APPLE_DISK" ]]; then
-  "$RDEDISKTOOL" -v list "$APPLE_DISK" >"$WORK/apple.out" 2>&1
-  if rg -q "MacTy" "$WORK/apple.out"; then
-    echo "non-Mac disk should NOT trigger Mac columns under -v; got:" >&2
-    cat "$WORK/apple.out" >&2
-    exit 1
-  fi
+# Non-Mac disk (an Apple DOS 3.3 disk made here, so the check never depends
+# on a workspace file): -v list works and shows no Mac columns
+APPLE_DISK="$WORK/apple.do"
+"$RDEDISKTOOL" create "$APPLE_DISK" -f do --fs dos33 >/dev/null
+printf 'apple\n' >"$WORK/apple.txt"
+"$RDEDISKTOOL" add "$APPLE_DISK" "$WORK/apple.txt" NOTE --type T >/dev/null
+"$RDEDISKTOOL" -v list "$APPLE_DISK" >"$WORK/apple.out" 2>&1
+rg -q "^NOTE " "$WORK/apple.out" || { echo "Apple list -v should show NOTE; got:" >&2; cat "$WORK/apple.out" >&2; exit 1; }
+if rg -q "MacTy|Creat|FFlg" "$WORK/apple.out"; then
+  echo "non-Mac disk should NOT trigger Mac columns under -v; got:" >&2
+  cat "$WORK/apple.out" >&2
+  exit 1
 fi
 
 echo "[PASS] mac list verbose"

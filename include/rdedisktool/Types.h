@@ -38,7 +38,10 @@ enum class DiskFormat {
     // Macintosh formats
     MacIMG,         // Raw 512-byte sector image (.img / .dsk)
     MacDC42,        // Apple Disk Copy 4.2 container (.image / .dc42)
-    MacMOOF         // Applesauce MOOF (.moof) — bitstream/flux GCR/MFM
+    MacMOOF,        // Applesauce MOOF (.moof) — bitstream/flux GCR/MFM
+    AppleD13,       // DOS 3.2 13-sector sector image (.d13, read-only use)
+    Apple800PO,     // Apple II 3.5" 800K ProDOS-order block image (.po, 819,200 bytes)
+    Apple800MG      // the same 800K image in a 2MG container (.2mg)
 };
 
 // File system type
@@ -56,7 +59,8 @@ enum class FileSystemType {
     Human68k,       // Human68k file system
     // Macintosh
     HFS,            // Hierarchical File System
-    MFS             // Macintosh File System (flat)
+    MFS,            // Macintosh File System (flat)
+    DOS32           // Apple DOS 3.2 (13 sectors/track, read-only)
 };
 
 // Sector order for Apple II
@@ -137,13 +141,24 @@ struct FileEntry {
     std::optional<std::time_t> modifiedTime;
     bool isDirectory = false;
     bool isDeleted = false;
+    // Apple II: file type as the disk's own catalog shows it ("B", "TXT",
+    // "$F1", "DIR") and its lock state; empty / false elsewhere
+    std::string typeName;
+    bool locked = false;
 };
 
 // File metadata for adding files
 struct FileMetadata {
     std::string targetName;
     uint8_t fileType = 0;
+    // File type as the user wrote it ("T", "BIN", "$06", ...). Apple II
+    // handlers resolve it themselves because DOS 3.3 and ProDOS give the same
+    // numbers different meanings (0x04 is DOS "B" but ProDOS "TXT").
+    std::string fileTypeName;
     uint16_t loadAddress = 0;
+    bool loadAddressSet = false;  // loadAddress was given explicitly
+    // data already holds the on-disk file bytes (DOS 3.3: header included)
+    bool rawData = false;
     uint16_t execAddress = 0;
     uint8_t attributes = 0;
     bool readOnly = false;
@@ -227,6 +242,9 @@ inline const char* formatToString(DiskFormat f) {
         case DiskFormat::MacIMG: return "Macintosh Raw Image";
         case DiskFormat::MacDC42: return "Apple Disk Copy 4.2";
         case DiskFormat::MacMOOF: return "Applesauce MOOF";
+        case DiskFormat::AppleD13: return "Apple II DOS 3.2 (13-sector)";
+        case DiskFormat::Apple800PO: return "Apple II ProDOS 800K";
+        case DiskFormat::Apple800MG: return "Apple II ProDOS 800K (2MG)";
     }
     return "Unknown";
 }
@@ -251,6 +269,9 @@ inline const char* formatToIdentifier(DiskFormat f) {
         case DiskFormat::MacIMG: return "MacIMG";
         case DiskFormat::MacDC42: return "MacDC42";
         case DiskFormat::MacMOOF: return "MacMOOF";
+        case DiskFormat::AppleD13: return "AppleD13";
+        case DiskFormat::Apple800PO: return "Apple800PO";
+        case DiskFormat::Apple800MG: return "Apple800MG";
     }
     return "Unknown";
 }
@@ -272,8 +293,16 @@ inline const char* formatToExtension(DiskFormat f) {
         case DiskFormat::MacIMG: return ".img";
         case DiskFormat::MacDC42: return ".image";
         case DiskFormat::MacMOOF: return ".moof";
+        case DiskFormat::AppleD13: return ".d13";
+        case DiskFormat::Apple800PO: return ".po";
+        case DiskFormat::Apple800MG: return ".2mg";
     }
     return "";
+}
+
+// Apple II 3.5" 800K images (ProDOS only; convert only among themselves)
+inline bool isApple800KFormat(DiskFormat f) {
+    return f == DiskFormat::Apple800PO || f == DiskFormat::Apple800MG;
 }
 
 inline DiskFormat stringToFormat(const std::string& s) {
@@ -282,8 +311,11 @@ inline DiskFormat stringToFormat(const std::string& s) {
     if (s == "po" || s == "prodos" || s == "applepo") return DiskFormat::ApplePO;
     if (s == "nib" || s == "nibble") return DiskFormat::AppleNIB;
     if (s == "nb2" || s == "nibble2") return DiskFormat::AppleNIB2;
-    if (s == "woz" || s == "woz1") return DiskFormat::AppleWOZ1;
-    if (s == "woz2") return DiskFormat::AppleWOZ2;
+    if (s == "woz1") return DiskFormat::AppleWOZ1;
+    if (s == "woz" || s == "woz2") return DiskFormat::AppleWOZ2;
+    if (s == "d13") return DiskFormat::AppleD13;
+    if (s == "800po") return DiskFormat::Apple800PO;
+    if (s == "800mg") return DiskFormat::Apple800MG;
     // MSX formats
     if (s == "dsk" || s == "msxdsk" || s == "msx") return DiskFormat::MSXDSK;
     if (s == "dmk" || s == "msxdmk") return DiskFormat::MSXDMK;
@@ -311,6 +343,7 @@ inline const char* fileSystemTypeToString(FileSystemType f) {
         case FileSystemType::Human68k: return "Human68k";
         case FileSystemType::HFS: return "HFS";
         case FileSystemType::MFS: return "MFS";
+        case FileSystemType::DOS32: return "DOS 3.2";
     }
     return "Unknown";
 }

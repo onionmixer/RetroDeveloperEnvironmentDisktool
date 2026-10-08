@@ -5,7 +5,7 @@ namespace rde {
 
 X68000DiskImage::X68000DiskImage() {
     // Default geometry for XDF format
-    m_geometry.tracks = XDF_TOTAL_TRACKS;
+    m_geometry.tracks = XDF_CYLINDERS;
     m_geometry.sides = XDF_HEADS;
     m_geometry.sectorsPerTrack = XDF_SECTORS_PER_TRACK;
     m_geometry.bytesPerSector = XDF_SECTOR_SIZE;

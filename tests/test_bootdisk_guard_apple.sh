@@ -10,10 +10,12 @@ RDEDISKTOOL="${RDEDISKTOOL:-$TOOL_ROOT/build/rdedisktool}"
 
 DOS33_SRC="$PROJECT_ROOT/diskwork/bootdisk/AppleII/dos33.dsk"
 PRODOS_SRC="$PROJECT_ROOT/diskwork/bootdisk/AppleII/prodos242.dsk"
+PRODOS243_SRC="$PROJECT_ROOT/diskwork/bootdisk/AppleII/ProDOS_2_4_3.po"
 FIXTURE="$TOOL_ROOT/tests/fixtures/README.TXT"
 
 [[ -f "$DOS33_SRC" ]] || { echo "missing $DOS33_SRC" >&2; exit 1; }
 [[ -f "$PRODOS_SRC" ]] || { echo "missing $PRODOS_SRC" >&2; exit 1; }
+[[ -f "$PRODOS243_SRC" ]] || { echo "missing $PRODOS243_SRC" >&2; exit 1; }
 [[ -f "$FIXTURE" ]] || { echo "missing $FIXTURE" >&2; exit 1; }
 
 WORK="${WORK:-/tmp/rdedisktool_boot_guard_apple}"
@@ -21,6 +23,9 @@ rm -rf "$WORK"
 mkdir -p "$WORK"
 cp "$DOS33_SRC" "$WORK/dos33.dsk"
 cp "$PRODOS_SRC" "$WORK/prodos242.dsk"
+cp "$PRODOS243_SRC" "$WORK/prodos243.po"
+# the same boot disk in DOS sector order (boot blocks are DOS sectors 0,14,13,12)
+"$RDEDISKTOOL" convert "$WORK/prodos243.po" "$WORK/prodos243.dsk" -f do >/dev/null
 
 "$RDEDISKTOOL" extract "$WORK/dos33.dsk" INTBASIC "$WORK/INTBASIC_before"
 "$RDEDISKTOOL" extract "$WORK/prodos242.dsk" PRODOS "$WORK/PRODOS_before"
@@ -53,8 +58,39 @@ assert_not_policy_blocked() {
 "$RDEDISKTOOL" --bootdisk-mode strict info "$WORK/prodos242.dsk" -v >/tmp/rdedisktool_test.log 2>&1
 rg -q "BootDisk:\s+yes" /tmp/rdedisktool_test.log || { echo "bootdisk detection missing for prodos" >&2; sed -n '1,120p' /tmp/rdedisktool_test.log; exit 1; }
 
-assert_not_policy_blocked "$RDEDISKTOOL" --bootdisk-mode strict add "$WORK/prodos242.dsk" "$FIXTURE" README.TXT || true
-assert_not_policy_blocked "$RDEDISKTOOL" --bootdisk-mode strict add "$WORK/dos33.dsk" "$FIXTURE" README || true
+# expect_add <rc: ok|fail> <log pattern> <cmd...>: the outcome of an add is judged,
+# not just "not blocked by policy"
+expect_add() {
+  local want=$1 pattern=$2; shift 2
+  local rc=0
+  assert_not_policy_blocked "$@" || rc=$?
+  if [[ $want == ok && $rc -ne 0 ]] || [[ $want == fail && $rc -eq 0 ]]; then
+    echo "expected add to $want (rc=$rc): $*" >&2
+    sed -n '1,120p' /tmp/rdedisktool_test.log >&2
+    exit 1
+  fi
+  rg -q "$pattern" /tmp/rdedisktool_test.log || {
+    echo "expected '$pattern' from: $*" >&2
+    sed -n '1,120p' /tmp/rdedisktool_test.log >&2
+    exit 1
+  }
+}
+
+# prodos242.dsk is full: the add stops before the safe-add check can run
+expect_add fail "Not enough space" "$RDEDISKTOOL" --bootdisk-mode strict add "$WORK/prodos242.dsk" "$FIXTURE" README.TXT
+expect_add ok "Bootdisk safe-add verification enabled" "$RDEDISKTOOL" --bootdisk-mode strict add "$WORK/dos33.dsk" "$FIXTURE" README
+"$RDEDISKTOOL" extract "$WORK/dos33.dsk" README "$WORK/README_dos33"
+cmp "$FIXTURE" "$WORK/README_dos33"
+
+# ProDOS 2.4.3 has free space: safe-add must pass in both sector orders
+for img in prodos243.po prodos243.dsk; do
+  "$RDEDISKTOOL" extract "$WORK/$img" PRODOS "$WORK/PRODOS243_before_$img"
+  expect_add ok "Bootdisk safe-add verification enabled" "$RDEDISKTOOL" --bootdisk-mode strict add "$WORK/$img" "$FIXTURE" README.TXT
+  "$RDEDISKTOOL" extract "$WORK/$img" README.TXT "$WORK/README_$img"
+  cmp "$FIXTURE" "$WORK/README_$img"
+  "$RDEDISKTOOL" extract "$WORK/$img" PRODOS "$WORK/PRODOS243_after_$img"
+  cmp "$WORK/PRODOS243_before_$img" "$WORK/PRODOS243_after_$img"
+done
 
 "$RDEDISKTOOL" extract "$WORK/dos33.dsk" INTBASIC "$WORK/INTBASIC_after"
 cmp "$WORK/INTBASIC_before" "$WORK/INTBASIC_after"
@@ -63,6 +99,6 @@ cmp "$WORK/PRODOS_before" "$WORK/PRODOS_after"
 
 # Force override should bypass policy; filesystem-level failure (e.g. no space)
 # is acceptable in this guard test.
-assert_not_policy_blocked "$RDEDISKTOOL" --bootdisk-mode strict --force-bootdisk add "$WORK/prodos242.dsk" "$FIXTURE" README.TXT || true
+expect_add fail "Not enough space" "$RDEDISKTOOL" --bootdisk-mode strict --force-bootdisk add "$WORK/prodos242.dsk" "$FIXTURE" README.TXT
 
 echo "[PASS] apple bootdisk guard"

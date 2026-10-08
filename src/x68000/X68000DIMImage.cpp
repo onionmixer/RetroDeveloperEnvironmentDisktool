@@ -36,7 +36,7 @@ X68000DIMImage::X68000DIMImage() : X68000DiskImage() {
     std::memset(m_header.trkflag, 1, sizeof(m_header.trkflag));
 
     // Initialize geometry for 2HD
-    initGeometry(154, 2, 8, 1024);
+    initGeometry(77, 2, 8, 1024);  // 2HD: 77 cylinders x 2 heads
 }
 
 void X68000DIMImage::load(const std::filesystem::path& path) {
@@ -75,7 +75,7 @@ void X68000DIMImage::load(const std::filesystem::path& path) {
     size_t sectorSize = SECTOR_SIZES[m_header.type];
     size_t sectorsPerTrack = SECTORS_PER_TRACK[m_header.type];
     size_t maxTracks = MAX_TRACKS[m_header.type];
-    initGeometry(maxTracks, 2, sectorsPerTrack, sectorSize);
+    initGeometry(maxTracks / 2, 2, sectorsPerTrack, sectorSize);  // cylinders x heads
 
     // Calculate expected size and allocate
     size_t trackSize = TRACK_SIZES[m_header.type];
@@ -180,7 +180,7 @@ void X68000DIMImage::create(const DiskGeometry& geometry) {
     size_t sectorSize = SECTOR_SIZES[m_header.type];
     size_t sectorsPerTrack = SECTORS_PER_TRACK[m_header.type];
     size_t maxTracks = MAX_TRACKS[m_header.type];
-    initGeometry(maxTracks, 2, sectorsPerTrack, sectorSize);
+    initGeometry(maxTracks / 2, 2, sectorsPerTrack, sectorSize);  // cylinders x heads
 
     // Allocate data
     size_t trackSize = TRACK_SIZES[m_header.type];
@@ -237,7 +237,10 @@ bool X68000DIMImage::isValidDIMType(uint8_t type) {
 
 SectorBuffer X68000DIMImage::readSector(size_t track, size_t side, size_t sector) {
     // Convert track/side to linear track
-    size_t linearTrack = (track << 1) | (side & 1);
+    if (side > 1) {
+        throw SectorNotFoundException(static_cast<int>(track), 0);
+    }
+    size_t linearTrack = (track << 1) | side;
 
     validateParameters(linearTrack, sector);
 
@@ -263,7 +266,10 @@ void X68000DIMImage::writeSector(size_t track, size_t side, size_t sector,
     }
 
     // Convert track/side to linear track
-    size_t linearTrack = (track << 1) | (side & 1);
+    if (side > 1) {
+        throw SectorNotFoundException(static_cast<int>(track), 0);
+    }
+    size_t linearTrack = (track << 1) | side;
 
     validateParameters(linearTrack, sector);
 
@@ -289,7 +295,10 @@ void X68000DIMImage::writeSector(size_t track, size_t side, size_t sector,
 }
 
 TrackBuffer X68000DIMImage::readTrack(size_t track, size_t side) {
-    size_t linearTrack = (track << 1) | (side & 1);
+    if (side > 1) {
+        throw SectorNotFoundException(static_cast<int>(track), 0);
+    }
+    size_t linearTrack = (track << 1) | side;
     size_t maxTrack = MAX_TRACKS[static_cast<uint8_t>(m_dimType)];
 
     if (linearTrack >= maxTrack) {
@@ -308,7 +317,10 @@ void X68000DIMImage::writeTrack(size_t track, size_t side, const TrackBuffer& da
         throw WriteProtectedException();
     }
 
-    size_t linearTrack = (track << 1) | (side & 1);
+    if (side > 1) {
+        throw SectorNotFoundException(static_cast<int>(track), 0);
+    }
+    size_t linearTrack = (track << 1) | side;
     size_t maxTrack = MAX_TRACKS[static_cast<uint8_t>(m_dimType)];
 
     if (linearTrack >= maxTrack) {
@@ -339,7 +351,7 @@ void X68000DIMImage::setDIMType(X68000DIMType type) {
     size_t sectorSize = SECTOR_SIZES[m_header.type];
     size_t sectorsPerTrack = SECTORS_PER_TRACK[m_header.type];
     size_t maxTracks = MAX_TRACKS[m_header.type];
-    initGeometry(maxTracks, 2, sectorsPerTrack, sectorSize);
+    initGeometry(maxTracks / 2, 2, sectorsPerTrack, sectorSize);  // cylinders x heads
 
     m_modified = true;
 }
@@ -412,6 +424,9 @@ bool X68000DIMImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::MacIMG:
         case DiskFormat::MacDC42:
         case DiskFormat::MacMOOF:
+        case DiskFormat::AppleD13:
+        case DiskFormat::Apple800PO:
+        case DiskFormat::Apple800MG:
             return false;
     }
     return false;
@@ -435,7 +450,8 @@ std::unique_ptr<DiskImage> X68000DIMImage::convertTo(DiskFormat format) const {
                     size_t offset = calculateOffset(track, sector);
                     SectorBuffer sectorData(m_data.begin() + offset,
                                            m_data.begin() + offset + 1024);
-                    xdfImage->writeSector(track, 0, sector, sectorData);
+                    // linear track = cylinder * 2 + head
+                    xdfImage->writeSector(track / 2, track % 2, sector, sectorData);
                 }
             }
         }
@@ -490,6 +506,7 @@ std::string X68000DIMImage::getDiagnostics() const {
         case FileSystemType::Human68k: oss << "Human68k"; break;
         case FileSystemType::Unknown:
         case FileSystemType::DOS33:
+        case FileSystemType::DOS32:
         case FileSystemType::ProDOS:
         case FileSystemType::MSXDOS1:
         case FileSystemType::MSXDOS2:

@@ -1,0 +1,23 @@
+---
+Configuration:
+  Video Emulation: 4
+Configuration\Slot 0:
+  Card type: 17
+Configuration\Slot 1:
+  Card type: 0
+Configuration\Slot 2:
+  Card type: 0
+Configuration\Slot 3:
+  Card type: 0
+  Uthernet Interface:
+Configuration\Slot 4:
+  Card type: 0
+Configuration\Slot 5:
+  Card type: 0
+Configuration\Slot 6:
+  Card type: 1
+Configuration\Slot 7:
+  Card type: 0
+Configuration\Slot Auxiliary:
+  Card type: 13
+  Number of Banks: 1

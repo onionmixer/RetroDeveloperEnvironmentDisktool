@@ -56,16 +56,25 @@ bool AppleProDOSHandler::initialize(DiskImage* disk) {
 // Block I/O
 //=============================================================================
 
+size_t AppleProDOSHandler::imageBlocks() const {
+    return m_disk ? std::min<size_t>(m_disk->getTotalBlocks(), 0xFFFF) : 0;
+}
+
 std::vector<uint8_t> AppleProDOSHandler::readBlock(size_t block) const {
-    if (!m_disk || block >= TOTAL_BLOCKS) {
+    if (!m_disk || block >= imageBlocks()) {
         return {};
     }
     return m_disk->readBlock(block);
 }
 
 void AppleProDOSHandler::writeBlock(size_t block, const std::vector<uint8_t>& data) {
-    if (!m_disk || block >= TOTAL_BLOCKS) {
+    if (!m_disk) {
         return;
+    }
+    // A write outside the image must not vanish silently
+    if (block >= imageBlocks()) {
+        throw WriteException("ProDOS block " + std::to_string(block) + " is outside the image (" +
+                             std::to_string(imageBlocks()) + " blocks)");
     }
     std::vector<uint8_t> blockData = data;
     blockData.resize(BLOCK_SIZE, 0);
@@ -125,8 +134,9 @@ bool AppleProDOSHandler::parseVolumeHeader() {
         m_volumeHeader.entriesPerBlock = ENTRIES_PER_BLOCK;
     }
     if (m_volumeHeader.totalBlocks == 0) {
-        m_volumeHeader.totalBlocks = TOTAL_BLOCKS;
+        m_volumeHeader.totalBlocks = static_cast<uint16_t>(imageBlocks());
     }
+    m_blockLimit = std::min<size_t>(m_volumeHeader.totalBlocks, imageBlocks());
     if (m_volumeHeader.bitmapPointer == 0) {
         m_volumeHeader.bitmapPointer = BITMAP_BLOCK;
     }
@@ -169,10 +179,10 @@ void AppleProDOSHandler::writeVolumeHeader() {
 
 bool AppleProDOSHandler::parseVolumeBitmap() {
     m_bitmap.clear();
-    m_bitmap.resize(m_volumeHeader.totalBlocks, false);
+    m_bitmap.resize(m_blockLimit, false);
 
     // Calculate number of bitmap blocks needed
-    size_t bitsNeeded = m_volumeHeader.totalBlocks;
+    size_t bitsNeeded = m_blockLimit;
     size_t blocksNeeded = (bitsNeeded + (BLOCK_SIZE * 8) - 1) / (BLOCK_SIZE * 8);
 
     for (size_t i = 0; i < blocksNeeded; ++i) {
@@ -184,7 +194,7 @@ bool AppleProDOSHandler::parseVolumeBitmap() {
         for (size_t byte = 0; byte < BLOCK_SIZE; ++byte) {
             for (int bit = 7; bit >= 0; --bit) {
                 size_t blockNum = i * BLOCK_SIZE * 8 + byte * 8 + (7 - bit);
-                if (blockNum < m_volumeHeader.totalBlocks) {
+                if (blockNum < m_blockLimit) {
                     // In ProDOS bitmap, 1 = free, 0 = used
                     m_bitmap[blockNum] = (block[byte] & (1 << bit)) != 0;
                 }
@@ -196,7 +206,7 @@ bool AppleProDOSHandler::parseVolumeBitmap() {
 }
 
 void AppleProDOSHandler::writeVolumeBitmap() {
-    size_t bitsNeeded = m_volumeHeader.totalBlocks;
+    size_t bitsNeeded = m_blockLimit;
     size_t blocksNeeded = (bitsNeeded + (BLOCK_SIZE * 8) - 1) / (BLOCK_SIZE * 8);
 
     for (size_t i = 0; i < blocksNeeded; ++i) {
@@ -206,7 +216,7 @@ void AppleProDOSHandler::writeVolumeBitmap() {
             uint8_t value = 0;
             for (int bit = 7; bit >= 0; --bit) {
                 size_t blockNum = i * BLOCK_SIZE * 8 + byte * 8 + (7 - bit);
-                if (blockNum < m_volumeHeader.totalBlocks && m_bitmap[blockNum]) {
+                if (blockNum < m_blockLimit && m_bitmap[blockNum]) {
                     value |= (1 << bit);
                 }
             }
@@ -324,66 +334,76 @@ std::vector<AppleProDOSHandler::DirectoryEntry> AppleProDOSHandler::readDirector
     return entries;
 }
 
-bool AppleProDOSHandler::writeDirectoryEntry(uint16_t dirKeyBlock, size_t entryIndex, const DirectoryEntry& entry) {
+bool AppleProDOSHandler::locateDirectoryEntry(uint16_t dirKeyBlock, size_t entryIndex,
+                                               uint16_t& block, size_t& slot) const {
+    // Entry indexes skip the header (slot 0 of the key block); later blocks
+    // use all 13 slots. Same order as findFreeDirectoryEntry.
     uint16_t currentBlock = dirKeyBlock;
     size_t entriesSeen = 0;
     bool firstBlock = true;
-
     while (currentBlock != 0) {
-        auto block = readBlock(currentBlock);
-        if (block.size() < BLOCK_SIZE) {
+        auto data = readBlock(currentBlock);
+        if (data.size() < BLOCK_SIZE) {
             return false;
         }
-
-        uint16_t nextBlock = block[2] | (block[3] << 8);
-        size_t startEntry = firstBlock ? 1 : 0;
-
-        for (size_t i = startEntry; i < ENTRIES_PER_BLOCK; ++i) {
+        for (size_t i = firstBlock ? 1 : 0; i < ENTRIES_PER_BLOCK; ++i) {
             if (entriesSeen == entryIndex) {
-                size_t offset = 4 + (i * DIR_ENTRY_SIZE);
-
-                block[offset] = (entry.storageType << 4) | (entry.nameLength & 0x0F);
-                std::memcpy(&block[offset + 1], entry.filename, entry.nameLength);
-                // Pad with zeros
-                for (size_t j = entry.nameLength; j < MAX_FILENAME_LENGTH; ++j) {
-                    block[offset + 1 + j] = 0;
-                }
-
-                block[offset + 0x10] = entry.fileType;
-                block[offset + 0x11] = entry.keyPointer & 0xFF;
-                block[offset + 0x12] = (entry.keyPointer >> 8) & 0xFF;
-                block[offset + 0x13] = entry.blocksUsed & 0xFF;
-                block[offset + 0x14] = (entry.blocksUsed >> 8) & 0xFF;
-                block[offset + 0x15] = entry.eof & 0xFF;
-                block[offset + 0x16] = (entry.eof >> 8) & 0xFF;
-                block[offset + 0x17] = (entry.eof >> 16) & 0xFF;
-                block[offset + 0x18] = entry.creationDateTime & 0xFF;
-                block[offset + 0x19] = (entry.creationDateTime >> 8) & 0xFF;
-                block[offset + 0x1A] = (entry.creationDateTime >> 16) & 0xFF;
-                block[offset + 0x1B] = (entry.creationDateTime >> 24) & 0xFF;
-                block[offset + 0x1C] = entry.version;
-                block[offset + 0x1D] = entry.minVersion;
-                block[offset + 0x1E] = entry.access;
-                block[offset + 0x1F] = entry.auxType & 0xFF;
-                block[offset + 0x20] = (entry.auxType >> 8) & 0xFF;
-                block[offset + 0x21] = entry.lastModDateTime & 0xFF;
-                block[offset + 0x22] = (entry.lastModDateTime >> 8) & 0xFF;
-                block[offset + 0x23] = (entry.lastModDateTime >> 16) & 0xFF;
-                block[offset + 0x24] = (entry.lastModDateTime >> 24) & 0xFF;
-                block[offset + 0x25] = entry.headerPointer & 0xFF;
-                block[offset + 0x26] = (entry.headerPointer >> 8) & 0xFF;
-
-                writeBlock(currentBlock, block);
+                block = currentBlock;
+                slot = i;
                 return true;
             }
             ++entriesSeen;
         }
-
         firstBlock = false;
-        currentBlock = nextBlock;
+        currentBlock = static_cast<uint16_t>(data[2] | (data[3] << 8));
+    }
+    return false;
+}
+
+bool AppleProDOSHandler::writeDirectoryEntry(uint16_t dirKeyBlock, size_t entryIndex, const DirectoryEntry& entry) {
+    uint16_t currentBlock = 0;
+    size_t slot = 0;
+    if (!locateDirectoryEntry(dirKeyBlock, entryIndex, currentBlock, slot)) {
+        return false;
+    }
+    auto block = readBlock(currentBlock);
+    if (block.size() < BLOCK_SIZE) {
+        return false;
+    }
+    const size_t offset = 4 + (slot * DIR_ENTRY_SIZE);
+
+    block[offset] = (entry.storageType << 4) | (entry.nameLength & 0x0F);
+    std::memcpy(&block[offset + 1], entry.filename, entry.nameLength);
+    // Pad with zeros
+    for (size_t j = entry.nameLength; j < MAX_FILENAME_LENGTH; ++j) {
+        block[offset + 1 + j] = 0;
     }
 
-    return false;
+    block[offset + 0x10] = entry.fileType;
+    block[offset + 0x11] = entry.keyPointer & 0xFF;
+    block[offset + 0x12] = (entry.keyPointer >> 8) & 0xFF;
+    block[offset + 0x13] = entry.blocksUsed & 0xFF;
+    block[offset + 0x14] = (entry.blocksUsed >> 8) & 0xFF;
+    block[offset + 0x15] = entry.eof & 0xFF;
+    block[offset + 0x16] = (entry.eof >> 8) & 0xFF;
+    block[offset + 0x17] = (entry.eof >> 16) & 0xFF;
+    block[offset + 0x18] = entry.creationDateTime & 0xFF;
+    block[offset + 0x19] = (entry.creationDateTime >> 8) & 0xFF;
+    block[offset + 0x1A] = (entry.creationDateTime >> 16) & 0xFF;
+    block[offset + 0x1B] = (entry.creationDateTime >> 24) & 0xFF;
+    block[offset + 0x1C] = entry.version;
+    block[offset + 0x1D] = entry.minVersion;
+    block[offset + 0x1E] = entry.access;
+    block[offset + 0x1F] = entry.auxType & 0xFF;
+    block[offset + 0x20] = (entry.auxType >> 8) & 0xFF;
+    block[offset + 0x21] = entry.lastModDateTime & 0xFF;
+    block[offset + 0x22] = (entry.lastModDateTime >> 8) & 0xFF;
+    block[offset + 0x23] = (entry.lastModDateTime >> 16) & 0xFF;
+    block[offset + 0x24] = (entry.lastModDateTime >> 24) & 0xFF;
+    block[offset + 0x25] = entry.headerPointer & 0xFF;
+    block[offset + 0x26] = (entry.headerPointer >> 8) & 0xFF;
+    writeBlock(currentBlock, block);
+    return true;
 }
 
 int AppleProDOSHandler::findDirectoryEntry(uint16_t dirKeyBlock, const std::string& filename) const {
@@ -575,58 +595,45 @@ bool AppleProDOSHandler::updateDirectoryFileCount(uint16_t dirKeyBlock, int delt
 // File I/O Operations
 //=============================================================================
 
-std::vector<uint16_t> AppleProDOSHandler::getFileBlocks(const DirectoryEntry& entry) const {
-    std::vector<uint16_t> blocks;
+std::vector<uint16_t> AppleProDOSHandler::dataBlockSlots(const DirectoryEntry& entry) const {
+    const size_t slots = (entry.eof + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    std::vector<uint16_t> out(slots, 0);
+    auto readIndex = [this](uint16_t block) {
+        auto index = readBlock(block);
+        if (index.size() < BLOCK_SIZE) {
+            throw ReadException("Cannot read ProDOS index block " + std::to_string(block));
+        }
+        return index;
+    };
 
     switch (entry.storageType) {
-        case STORAGE_SEEDLING: {
-            // Single data block
-            if (entry.keyPointer != 0) {
-                blocks.push_back(entry.keyPointer);
+        case STORAGE_SEEDLING:
+            if (slots > 0) {
+                out[0] = entry.keyPointer;
             }
             break;
-        }
 
         case STORAGE_SAPLING: {
-            // Index block pointing to data blocks
-            auto indexBlock = readBlock(entry.keyPointer);
-            if (indexBlock.size() >= BLOCK_SIZE) {
-                size_t numBlocks = (entry.eof + BLOCK_SIZE - 1) / BLOCK_SIZE;
-                for (size_t i = 0; i < numBlocks && i < 256; ++i) {
-                    uint16_t dataBlock = indexBlock[i] | (indexBlock[256 + i] << 8);
-                    if (dataBlock != 0) {
-                        blocks.push_back(dataBlock);
-                    }
-                }
+            // Index block: pointer i = low byte at i, high byte at 256 + i
+            const auto index = readIndex(entry.keyPointer);
+            for (size_t i = 0; i < slots && i < 256; ++i) {
+                out[i] = index[i] | (index[256 + i] << 8);
             }
             break;
         }
 
         case STORAGE_TREE: {
-            // Master index block pointing to index blocks
-            auto masterBlock = readBlock(entry.keyPointer);
-            if (masterBlock.size() >= BLOCK_SIZE) {
-                size_t totalDataBlocks = (entry.eof + BLOCK_SIZE - 1) / BLOCK_SIZE;
-                size_t dataBlocksRead = 0;
-
-                for (size_t mi = 0; mi < 256 && dataBlocksRead < totalDataBlocks; ++mi) {
-                    uint16_t indexBlockNum = masterBlock[mi] | (masterBlock[256 + mi] << 8);
-                    if (indexBlockNum == 0) {
-                        continue;
-                    }
-
-                    auto indexBlock = readBlock(indexBlockNum);
-                    if (indexBlock.size() < BLOCK_SIZE) {
-                        break;
-                    }
-
-                    for (size_t i = 0; i < 256 && dataBlocksRead < totalDataBlocks; ++i) {
-                        uint16_t dataBlock = indexBlock[i] | (indexBlock[256 + i] << 8);
-                        if (dataBlock != 0) {
-                            blocks.push_back(dataBlock);
-                        }
-                        ++dataBlocksRead;
-                    }
+            // Master index: 256 data blocks per index block; a zero index
+            // pointer stands for 256 unallocated data blocks
+            const auto master = readIndex(entry.keyPointer);
+            for (size_t mi = 0; mi * 256 < slots && mi < 256; ++mi) {
+                const uint16_t indexBlock = master[mi] | (master[256 + mi] << 8);
+                if (indexBlock == 0) {
+                    continue;
+                }
+                const auto index = readIndex(indexBlock);
+                for (size_t i = 0; i < 256 && mi * 256 + i < slots; ++i) {
+                    out[mi * 256 + i] = index[i] | (index[256 + i] << 8);
                 }
             }
             break;
@@ -635,7 +642,21 @@ std::vector<uint16_t> AppleProDOSHandler::getFileBlocks(const DirectoryEntry& en
         default:
             break;
     }
+    return out;
+}
 
+std::vector<uint16_t> AppleProDOSHandler::getFileBlocks(const DirectoryEntry& entry) const {
+    // Allocated data blocks only (a seedling's key block always counts)
+    if (entry.storageType == STORAGE_SEEDLING) {
+        return entry.keyPointer != 0 ? std::vector<uint16_t>{entry.keyPointer}
+                                     : std::vector<uint16_t>{};
+    }
+    std::vector<uint16_t> blocks;
+    for (uint16_t b : dataBlockSlots(entry)) {
+        if (b != 0) {
+            blocks.push_back(b);
+        }
+    }
     return blocks;
 }
 
@@ -643,10 +664,16 @@ std::vector<uint8_t> AppleProDOSHandler::readFileData(const DirectoryEntry& entr
     std::vector<uint8_t> data;
     data.reserve(entry.eof);
 
-    auto blocks = getFileBlocks(entry);
-
-    for (uint16_t blockNum : blocks) {
+    // Sparse (zero-pointer) blocks keep their place in the file as zeros
+    for (uint16_t blockNum : dataBlockSlots(entry)) {
+        if (blockNum == 0) {
+            data.insert(data.end(), BLOCK_SIZE, 0);
+            continue;
+        }
         auto block = readBlock(blockNum);
+        if (block.size() < BLOCK_SIZE) {
+            throw ReadException("Cannot read ProDOS data block " + std::to_string(blockNum));
+        }
         data.insert(data.end(), block.begin(), block.end());
     }
 
@@ -983,7 +1010,10 @@ std::string AppleProDOSHandler::fileTypeToString(uint8_t type) const {
         case FILETYPE_REL: return "REL";
         case FILETYPE_SYS: return "SYS";
         case FILETYPE_CMD: return "CMD";
-        default: return "$" + std::to_string(type);
+        default: {
+            static const char hex[] = "0123456789ABCDEF";
+            return std::string("$") + hex[type >> 4] + hex[type & 0x0F];
+        }
     }
 }
 
@@ -996,6 +1026,10 @@ FileEntry AppleProDOSHandler::directoryEntryToFileEntry(const DirectoryEntry& en
     fe.isDirectory = entry.isDirectory();
     fe.isDeleted = entry.isDeleted();
     fe.attributes = entry.access;
+    fe.typeName = entry.isDirectory() ? "DIR" : fileTypeToString(entry.fileType);
+    // BASIC.SYSTEM CAT shows a file as locked ('*') when its write bit is
+    // clear; LOCK sets access $21, UNLOCK $E3
+    fe.locked = (entry.access & 0x02) == 0;
 
     if (entry.creationDateTime != 0) {
         fe.createdTime = unpackDateTime(entry.creationDateTime);
@@ -1090,9 +1124,53 @@ static uint8_t convertDOS33ToProDOSFileType(uint8_t dos33Type) {
     }
 }
 
+// Resolve a user file type for ProDOS: the names SYS/CMD/BIN/TXT/BAS/INT/REL,
+// the DOS 3.3 letters T/I/A/B/R (mapped to their ProDOS equivalents), or a
+// hex ProDOS type code used as is. Callers that pass only a numeric type keep
+// the old DOS 3.3 -> ProDOS mapping.
+static uint8_t resolveProDOSFileType(const FileMetadata& metadata) {
+    std::string name;
+    for (char c : metadata.fileTypeName) {
+        if (!std::isspace(static_cast<unsigned char>(c))) {
+            name += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+    }
+
+    if (name.empty()) {
+        return metadata.fileType != 0 ? convertDOS33ToProDOSFileType(metadata.fileType)
+                                      : AppleConstants::ProDOS::FILETYPE_BIN;
+    }
+
+    if (name == "TXT" || name == "T") return AppleConstants::ProDOS::FILETYPE_TXT;
+    if (name == "BIN" || name == "B") return AppleConstants::ProDOS::FILETYPE_BIN;
+    if (name == "BAS" || name == "A") return AppleConstants::ProDOS::FILETYPE_BAS;
+    if (name == "INT" || name == "I") return AppleConstants::ProDOS::FILETYPE_INT;
+    if (name == "REL" || name == "R") return AppleConstants::ProDOS::FILETYPE_REL;
+    if (name == "SYS") return AppleConstants::ProDOS::FILETYPE_SYS;
+    if (name == "CMD") return AppleConstants::ProDOS::FILETYPE_CMD;
+
+    std::string hex;
+    if (name.size() > 1 && name[0] == '$') {
+        hex = name.substr(1);
+    } else if (name.size() > 2 && name[0] == '0' && name[1] == 'X') {
+        hex = name.substr(2);
+    }
+    if (!hex.empty() && hex.size() <= 2 &&
+        hex.find_first_not_of("0123456789ABCDEF") == std::string::npos) {
+        return static_cast<uint8_t>(std::stoul(hex, nullptr, 16));
+    }
+
+    throw DiskException(DiskError::InvalidParameter, "File type '" + metadata.fileTypeName +
+                                 "' is not available on ProDOS "
+                                 "(use SYS/CMD/BIN/TXT/BAS/INT/REL, T/I/A/B/R or a hex code)");
+}
+
 bool AppleProDOSHandler::writeFile(const std::string& filename,
                                     const std::vector<uint8_t>& data,
                                     const FileMetadata& metadata) {
+    // Resolve the type before anything on the disk changes
+    const uint8_t resolvedType = resolveProDOSFileType(metadata);
+
     // First resolve path to get directory and base filename
     auto [dirBlock, name] = resolvePath(filename);
     if (dirBlock == 0 && name.empty()) {
@@ -1154,9 +1232,7 @@ bool AppleProDOSHandler::writeFile(const std::string& filename,
     std::memset(&entry, 0, sizeof(entry));
     entry.storageType = storageType;
     parseFilename(name, entry.filename, entry.nameLength);
-    // Convert DOS 3.3 file type to ProDOS file type if necessary
-    uint8_t fileType = metadata.fileType != 0 ? metadata.fileType : FILETYPE_BIN;
-    entry.fileType = convertDOS33ToProDOSFileType(fileType);
+    entry.fileType = resolvedType;
     entry.keyPointer = static_cast<uint16_t>(keyBlock);
     entry.blocksUsed = static_cast<uint16_t>(blocksNeeded);
     entry.eof = static_cast<uint32_t>(data.size());
@@ -1305,7 +1381,7 @@ size_t AppleProDOSHandler::getFreeSpace() const {
 size_t AppleProDOSHandler::getTotalSpace() const {
     // Exclude boot blocks, directory blocks, and bitmap blocks
     // Approximate usable space
-    return (m_volumeHeader.totalBlocks - 10) * BLOCK_SIZE;
+    return (m_blockLimit - 10) * BLOCK_SIZE;
 }
 
 bool AppleProDOSHandler::fileExists(const std::string& filename) const {
@@ -1327,9 +1403,11 @@ bool AppleProDOSHandler::format(const std::string& volumeName) {
     std::memset(&m_volumeHeader, 0, sizeof(m_volumeHeader));
     m_volumeHeader.storageType = STORAGE_VOLUME_HEADER;
 
+    // Volume names follow the file name rules (Tech Ref 2.1): 1-15 of A-Z,
+    // 0-9 and '.', starting with a letter; refused rather than cut or kept
     std::string name = volumeName.empty() ? "BLANK" : volumeName;
-    if (name.length() > MAX_FILENAME_LENGTH) {
-        name = name.substr(0, MAX_FILENAME_LENGTH);
+    if (!isValidFilename(name)) {
+        throw InvalidFilenameException(name);
     }
     m_volumeHeader.nameLength = static_cast<uint8_t>(name.length());
     for (size_t i = 0; i < name.length(); ++i) {
@@ -1344,11 +1422,14 @@ bool AppleProDOSHandler::format(const std::string& volumeName) {
     m_volumeHeader.entriesPerBlock = ENTRIES_PER_BLOCK;
     m_volumeHeader.fileCount = 0;
     m_volumeHeader.bitmapPointer = BITMAP_BLOCK;
-    m_volumeHeader.totalBlocks = TOTAL_BLOCKS;
+    // The volume fills the image (140K: 280 blocks, 800K: 1600)
+    m_volumeHeader.totalBlocks = static_cast<uint16_t>(imageBlocks());
+    m_blockLimit = m_volumeHeader.totalBlocks;
+    const size_t bitmapBlocks = (m_blockLimit + 4095) / 4096;  // one per 4096 blocks
 
     // Initialize bitmap - all blocks free except system blocks
     m_bitmap.clear();
-    m_bitmap.resize(TOTAL_BLOCKS, true);
+    m_bitmap.resize(m_blockLimit, true);
 
     // Mark boot blocks as used (0-1)
     m_bitmap[0] = false;
@@ -1359,8 +1440,10 @@ bool AppleProDOSHandler::format(const std::string& volumeName) {
         m_bitmap[i] = false;
     }
 
-    // Mark bitmap block as used
-    m_bitmap[BITMAP_BLOCK] = false;
+    // Mark bitmap blocks as used
+    for (size_t i = 0; i < bitmapBlocks; ++i) {
+        m_bitmap[BITMAP_BLOCK + i] = false;
+    }
 
     // Write boot blocks (zeros)
     std::vector<uint8_t> bootBlock(BLOCK_SIZE, 0);
@@ -1494,13 +1577,7 @@ bool AppleProDOSHandler::createDirectory(const std::string& path) {
     dirBlock[0x25] = 0;
     dirBlock[0x26] = 0;
 
-    // Parent pointer (block number)
-    dirBlock[0x27] = parentBlock & 0xFF;
-    dirBlock[0x28] = (parentBlock >> 8) & 0xFF;
-
-    // Parent entry number (will be set after we know it)
-    // For now, set to 0
-    dirBlock[0x29] = 0;
+    // Parent pointer / entry number: set below, once the entry's place is known
 
     // Parent entry length
     dirBlock[0x2A] = DIR_ENTRY_SIZE;
@@ -1535,8 +1612,17 @@ bool AppleProDOSHandler::createDirectory(const std::string& path) {
         return false;
     }
 
-    // Update parent entry number in subdirectory header
-    dirBlock[0x29] = static_cast<uint8_t>(freeEntry);
+    // Where the entry went (B.2.3): parent_pointer = the directory block that
+    // holds it, parent_entry_number = its slot in that block + 1 (slot 0 of
+    // the key block is the header, entry 1)
+    uint16_t entryBlock = 0;
+    size_t entrySlot = 0;
+    if (!locateDirectoryEntry(parentBlock, static_cast<size_t>(freeEntry), entryBlock, entrySlot)) {
+        return false;
+    }
+    dirBlock[0x27] = entryBlock & 0xFF;
+    dirBlock[0x28] = (entryBlock >> 8) & 0xFF;
+    dirBlock[0x29] = static_cast<uint8_t>(entrySlot + 1);
     writeBlock(newDirBlock, dirBlock);
 
     // Update file count in the parent directory (volume or subdirectory)
@@ -1628,6 +1714,15 @@ bool AppleProDOSHandler::isDirectory(const std::string& path) const {
     return entryOpt->isDirectory();
 }
 
+std::vector<std::string> AppleProDOSHandler::mountWarnings() const {
+    if (m_volumeHeader.totalBlocks > imageBlocks()) {
+        return {"ProDOS total_blocks " + std::to_string(m_volumeHeader.totalBlocks) +
+                " exceeds the image (" + std::to_string(imageBlocks()) + " blocks); using " +
+                std::to_string(m_blockLimit)};
+    }
+    return {};
+}
+
 ValidationResult AppleProDOSHandler::validateExtended() const {
     ValidationResult result;
 
@@ -1654,34 +1749,33 @@ ValidationResult AppleProDOSHandler::validateExtended() const {
     }
 
     // 2. Validate Bitmap Pointer
-    if (m_volumeHeader.bitmapPointer == 0 || m_volumeHeader.bitmapPointer >= TOTAL_BLOCKS) {
+    if (m_volumeHeader.bitmapPointer == 0 || m_volumeHeader.bitmapPointer >= m_blockLimit) {
         result.addError("Invalid bitmap pointer: " + std::to_string(m_volumeHeader.bitmapPointer), "Block 2");
     }
 
     // 3. Validate Total Blocks
-    if (m_volumeHeader.totalBlocks == 0 || m_volumeHeader.totalBlocks > TOTAL_BLOCKS) {
+    if (m_volumeHeader.totalBlocks == 0 || m_volumeHeader.totalBlocks > imageBlocks()) {
         result.addWarning("Unusual total blocks: " + std::to_string(m_volumeHeader.totalBlocks), "Block 2");
     }
 
     // 4. Count used blocks and verify against bitmap
-    std::vector<bool> usedBlocks(TOTAL_BLOCKS, false);
+    std::vector<bool> usedBlocks(m_blockLimit, false);
     usedBlocks[0] = true;  // Boot block 0
     usedBlocks[1] = true;  // Boot block 1
     usedBlocks[2] = true;  // Volume directory key block
 
     // Mark bitmap blocks as used
-    size_t bitmapBlocks = (TOTAL_BLOCKS + 4095) / 4096;  // 4096 bits per block
+    size_t bitmapBlocks = (m_blockLimit + 4095) / 4096;  // 4096 bits per block
     for (size_t i = 0; i < bitmapBlocks; ++i) {
-        if (m_volumeHeader.bitmapPointer + i < TOTAL_BLOCKS) {
+        if (m_volumeHeader.bitmapPointer + i < m_blockLimit) {
             usedBlocks[m_volumeHeader.bitmapPointer + i] = true;
         }
     }
 
     // 5. Validate directory structure and file blocks
-    size_t fileCount = 0;
     std::function<void(uint16_t, const std::string&)> validateDirectory;
     validateDirectory = [&](uint16_t keyBlock, const std::string& path) {
-        if (keyBlock >= TOTAL_BLOCKS) {
+        if (keyBlock >= m_blockLimit) {
             result.addError("Directory key block out of range: " + std::to_string(keyBlock), path);
             return;
         }
@@ -1689,6 +1783,24 @@ ValidationResult AppleProDOSHandler::validateExtended() const {
         usedBlocks[keyBlock] = true;
 
         auto entries = readDirectory(keyBlock);
+
+        // file_count of a directory = its own active entries (B.2.2 / B.2.3)
+        size_t active = 0;
+        for (const auto& entry : entries) {
+            if (!entry.isDeleted() && !entry.isVolumeHeader() && !entry.isSubdirHeader()) {
+                ++active;
+            }
+        }
+        uint16_t headerCount = m_volumeHeader.fileCount;
+        if (keyBlock != VOLUME_DIR_BLOCK) {
+            const auto key = readBlock(keyBlock);
+            headerCount = key.size() >= BLOCK_SIZE ? static_cast<uint16_t>(key[0x25] | (key[0x26] << 8)) : 0;
+        }
+        if (active != headerCount) {
+            result.addWarning("File count mismatch: header says " + std::to_string(headerCount) +
+                              ", found " + std::to_string(active),
+                              path.empty() ? "Volume header" : path);
+        }
         for (const auto& entry : entries) {
             if (entry.isDeleted() || entry.isVolumeHeader() || entry.isSubdirHeader()) {
                 continue;
@@ -1696,10 +1808,9 @@ ValidationResult AppleProDOSHandler::validateExtended() const {
 
             std::string filename = formatFilename(entry.filename, entry.nameLength);
             std::string fullPath = path.empty() ? filename : path + "/" + filename;
-            ++fileCount;
 
             // Validate key pointer
-            if (entry.keyPointer >= TOTAL_BLOCKS) {
+            if (entry.keyPointer >= m_blockLimit) {
                 result.addError("File key block out of range: " + std::to_string(entry.keyPointer), fullPath);
                 continue;
             }
@@ -1708,7 +1819,7 @@ ValidationResult AppleProDOSHandler::validateExtended() const {
             try {
                 auto fileBlocks = getFileBlocks(entry);
                 for (uint16_t block : fileBlocks) {
-                    if (block > 0 && block < TOTAL_BLOCKS) {
+                    if (block > 0 && block < m_blockLimit) {
                         if (usedBlocks[block]) {
                             result.addWarning("Block " + std::to_string(block) + " referenced multiple times", fullPath);
                         }
@@ -1728,14 +1839,10 @@ ValidationResult AppleProDOSHandler::validateExtended() const {
 
     validateDirectory(VOLUME_DIR_BLOCK, "");
 
-    // 6. Compare counted files with header file count
-    if (fileCount != m_volumeHeader.fileCount) {
-        result.addWarning("File count mismatch: header says " + std::to_string(m_volumeHeader.fileCount) +
-                         ", found " + std::to_string(fileCount), "Volume header");
-    }
+    // 6. File counts are compared per directory in validateDirectory
 
     // 7. Verify bitmap matches used blocks
-    for (size_t i = 0; i < TOTAL_BLOCKS; ++i) {
+    for (size_t i = 0; i < m_blockLimit; ++i) {
         bool bitmapSaysFree = isBlockFree(i);
         bool shouldBeFree = !usedBlocks[i];
 

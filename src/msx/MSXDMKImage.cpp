@@ -537,6 +537,9 @@ bool MSXDMKImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::MacIMG:
         case DiskFormat::MacDC42:
         case DiskFormat::MacMOOF:
+        case DiskFormat::AppleD13:
+        case DiskFormat::Apple800PO:
+        case DiskFormat::Apple800MG:
             return false;
     }
     return false;

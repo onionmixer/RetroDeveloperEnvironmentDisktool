@@ -65,3 +65,7 @@ FIX_*
 *.DIM
 *.xdf
 *.XDF
+
+# Python bytecode (tests/tools/a2_nibref.py imported by tests)
+__pycache__/
+*.pyc

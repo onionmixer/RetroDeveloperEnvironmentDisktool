@@ -196,6 +196,7 @@ private:
     // Standard disk sizes for quick identification
     static constexpr size_t APPLE_140K = 143360;     // 35*16*256
     static constexpr size_t APPLE_DOS32 = 116480;    // 35*13*256
+    static constexpr size_t APPLE_800K = 819200;     // 1600*512 (.po / 800po only)
     static constexpr size_t APPLE_NIB = 232960;      // 35*6656
     static constexpr size_t APPLE_NIB2 = 223440;     // 35*6384
 

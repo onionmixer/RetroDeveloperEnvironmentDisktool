@@ -1,4 +1,5 @@
 #include "rdedisktool/apple/NibbleEncoder.h"
+#include "rdedisktool/apple/AppleDiskImage.h"
 #include <algorithm>
 #include <stdexcept>
 
@@ -54,11 +55,6 @@ const std::array<uint8_t, 256> NibbleEncoder::DECODE_TABLE = {
     0xFF, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F  // F8-FF
 };
 
-// Physical sector order on disk (DOS 3.3 interleave)
-const std::array<uint8_t, 16> NibbleEncoder::PHYSICAL_SECTOR_ORDER = {
-    0, 7, 14, 6, 13, 5, 12, 4, 11, 3, 10, 2, 9, 1, 8, 15
-};
-
 const std::array<uint8_t, 64>& NibbleEncoder::getEncodeTable() {
     return ENCODE_TABLE;
 }
@@ -85,55 +81,36 @@ std::vector<uint8_t> NibbleEncoder::encodeSector(const std::vector<uint8_t>& dat
         throw std::invalid_argument("Sector data must be 256 bytes");
     }
 
-    std::vector<uint8_t> result(NIBBLIZED_SIZE);
+    // 6-and-2 as written by DOS 3.3 RWTS (PRENIB16 + WRITE16).
+    // The 342 six-bit values go to disk in this order: 86 auxiliary values,
+    // then the high 6 bits of data[0..255]. Auxiliary value k holds the low
+    // two bits (swapped) of data[k] in bits 1-0, data[k+86] in bits 3-2 and
+    // data[k+172] in bits 5-4. For k = 84, 85 there is no data[k+172];
+    // RWTS puts data[0] / data[1] there (ignored on read).
+    auto swap2 = [](uint8_t b) -> uint8_t {
+        return static_cast<uint8_t>(((b & 0x01) << 1) | ((b & 0x02) >> 1));
+    };
 
-    // Step 1: Pre-nibblize (6-and-2 encoding)
-    // Convert 256 bytes to 342 6-bit values
-
-    // Buffer for 6-bit values (before GCR encoding)
     std::array<uint8_t, 342> buffer;
-
-    // First, handle the auxiliary buffer (86 bytes)
-    // These hold the low 2 bits of each data byte
-    for (int i = 0; i < 86; ++i) {
-        uint8_t aux = 0;
-
-        // For each group of 3 bytes in the auxiliary section
-        // Take 2 bits from bytes at positions i, i+86, i+172
-        if (i < 86) {
-            aux |= ((data[i] & 0x01) << 1) | ((data[i] & 0x02) >> 1);
-        }
-        if (i + 86 < 256) {
-            aux |= ((data[i + 86] & 0x01) << 3) | ((data[i + 86] & 0x02) << 1);
-        }
-        if (i + 172 < 256) {
-            aux |= ((data[i + 172] & 0x01) << 5) | ((data[i + 172] & 0x02) << 3);
-        }
-
-        buffer[i] = aux;
+    for (int k = 0; k < 86; ++k) {
+        const int hiIndex = (k + 172 < 256) ? k + 172 : k - 84;
+        buffer[k] = static_cast<uint8_t>(swap2(data[k]) |
+                                         (swap2(data[k + 86]) << 2) |
+                                         (swap2(data[hiIndex]) << 4));
     }
-
-    // Then, handle the main data (256 bytes, high 6 bits)
     for (int i = 0; i < 256; ++i) {
         buffer[86 + i] = data[i] >> 2;
     }
 
-    // Step 2: XOR checksumming
-    uint8_t checksum = 0;
-    for (int i = 341; i >= 0; --i) {
-        uint8_t val = buffer[i];
-        buffer[i] = val ^ checksum;
-        checksum = val;
-    }
-
-    // Store checksum as the last byte
-    // (before GCR encoding)
-
-    // Step 3: GCR encoding
+    // Each value is written XORed with the previous one; the 343rd nibble
+    // is the last value itself (the checksum).
+    std::vector<uint8_t> result(NIBBLIZED_SIZE);
+    uint8_t prev = 0;
     for (int i = 0; i < 342; ++i) {
-        result[i] = ENCODE_TABLE[buffer[i] & 0x3F];
+        result[i] = ENCODE_TABLE[(buffer[i] ^ prev) & 0x3F];
+        prev = buffer[i];
     }
-    result[342] = ENCODE_TABLE[checksum & 0x3F];
+    result[342] = ENCODE_TABLE[prev & 0x3F];
 
     return result;
 }
@@ -230,7 +207,9 @@ std::vector<uint8_t> NibbleEncoder::encodeAddressField(uint8_t volume, uint8_t t
 
 bool NibbleEncoder::decodeAddressField(const uint8_t* data, uint8_t& volume,
                                        uint8_t& track, uint8_t& sector) {
-    // Decode 4-and-4 encoded values
+    // Decode 4-and-4 encoded values. The fixed 1 bits are not checked on
+    // their own: DOS 3.3 RWTS reads a sector whose address bytes miss a fixed
+    // bit as long as the decoded values and checksum are right (sa2 test).
     volume = decode44(data[0], data[1]);
     track = decode44(data[2], data[3]);
     sector = decode44(data[4], data[5]);
@@ -240,64 +219,336 @@ bool NibbleEncoder::decodeAddressField(const uint8_t* data, uint8_t& volume,
     return (volume ^ track ^ sector) == checksum;
 }
 
-std::vector<uint8_t> NibbleEncoder::buildTrack(
-    const std::array<std::vector<uint8_t>, 16>& sectorData,
-    uint8_t volume, uint8_t track) {
+bool NibbleEncoder::ParsedTrack::allFound() const {
+    for (size_t s = 0; s < sectorCount && s < found.size(); ++s) {
+        if (!found[s]) return false;
+    }
+    return true;
+}
 
-    std::vector<uint8_t> result;
-    result.reserve(TRACK_NIBBLE_SIZE);
+NibbleEncoder::TrackNibbles NibbleEncoder::buildTrackNibbles(
+    const std::array<std::vector<uint8_t>, 16>& sectors,
+    uint8_t volume, uint8_t track, size_t gap1Syncs) {
 
-    // Initial gap
-    for (int i = 0; i < 48; ++i) {
-        result.push_back(SYNC_BYTE);
+    TrackNibbles result;
+    result.nibbles.reserve(gap1Syncs + 16 * SECTOR_NIBBLES);
+    result.isSync.reserve(gap1Syncs + 16 * SECTOR_NIBBLES);
+
+    auto put = [&result](uint8_t nibble, bool sync) {
+        result.nibbles.push_back(nibble);
+        result.isSync.push_back(sync ? 1 : 0);
+    };
+    auto putSyncs = [&put](size_t count) {
+        for (size_t i = 0; i < count; ++i) put(SYNC_BYTE, true);
+    };
+
+    // DOS logical sector stored at each physical position
+    std::array<uint8_t, 16> logicalAt{};
+    for (uint8_t logical = 0; logical < 16; ++logical) {
+        logicalAt[AppleInterleave::DOS33_INTERLEAVE[logical]] = logical;
     }
 
-    // Write sectors in physical order
-    for (int phys = 0; phys < 16; ++phys) {
-        uint8_t sector = PHYSICAL_SECTOR_ORDER[phys];
+    putSyncs(gap1Syncs);
+    for (uint8_t phys = 0; phys < 16; ++phys) {
+        for (uint8_t b : encodeAddressField(volume, track, phys)) put(b, false);
+        putSyncs(GAP2_SYNCS);
 
-        // Sync bytes before address field
-        for (int i = 0; i < 5; ++i) {
-            result.push_back(SYNC_BYTE);
-        }
-
-        // Address field
-        auto addr = encodeAddressField(volume, track, sector);
-        result.insert(result.end(), addr.begin(), addr.end());
-
-        // Gap between address and data
-        for (int i = 0; i < 5; ++i) {
-            result.push_back(SYNC_BYTE);
-        }
-
-        // Data field prologue
-        result.push_back(DATA_PROLOGUE_1);  // D5
-        result.push_back(DATA_PROLOGUE_2);  // AA
-        result.push_back(DATA_PROLOGUE_3);  // AD
-
-        // Encoded sector data
-        auto encoded = encodeSector(sectorData[sector]);
-        result.insert(result.end(), encoded.begin(), encoded.end());
-
-        // Data field epilogue
-        result.push_back(EPILOGUE_1);  // DE
-        result.push_back(EPILOGUE_2);  // AA
-        result.push_back(EPILOGUE_3);  // EB
-
-        // Gap after sector (variable to fill track)
-    }
-
-    // Pad to standard track size
-    while (result.size() < TRACK_NIBBLE_SIZE) {
-        result.push_back(SYNC_BYTE);
-    }
-
-    // Truncate if too long
-    if (result.size() > TRACK_NIBBLE_SIZE) {
-        result.resize(TRACK_NIBBLE_SIZE);
+        put(DATA_PROLOGUE_1, false);
+        put(DATA_PROLOGUE_2, false);
+        put(DATA_PROLOGUE_3, false);
+        for (uint8_t b : encodeSector(sectors[logicalAt[phys]])) put(b, false);
+        put(EPILOGUE_1, false);
+        put(EPILOGUE_2, false);
+        put(EPILOGUE_3, false);
+        putSyncs(GAP3_SYNCS);
     }
 
     return result;
+}
+
+std::vector<uint8_t> NibbleEncoder::buildNibTrack(
+    const std::array<std::vector<uint8_t>, 16>& sectors,
+    uint8_t volume, uint8_t track, size_t trackSize) {
+
+    if (trackSize < 16 * SECTOR_NIBBLES) {
+        throw std::invalid_argument("NIB track size too small for 16 sectors");
+    }
+    return buildTrackNibbles(sectors, volume, track,
+                             trackSize - 16 * SECTOR_NIBBLES).nibbles;
+}
+
+std::vector<uint8_t> NibbleEncoder::nibblesToWozBits(const TrackNibbles& track,
+                                                     uint32_t& bitCount) {
+    std::vector<uint8_t> bits;
+    bits.reserve(track.nibbles.size() * 10 / 8 + 1);
+
+    uint32_t count = 0;
+    auto pushBit = [&bits, &count](int bit) {
+        if ((count & 7) == 0) bits.push_back(0);
+        if (bit) bits.back() |= static_cast<uint8_t>(0x80 >> (count & 7));
+        ++count;
+    };
+
+    for (size_t i = 0; i < track.nibbles.size(); ++i) {
+        for (int b = 7; b >= 0; --b) pushBit((track.nibbles[i] >> b) & 1);
+        if (track.isSync[i]) {
+            pushBit(0);
+            pushBit(0);
+        }
+    }
+
+    bitCount = count;
+    return bits;
+}
+
+std::vector<uint8_t> NibbleEncoder::wozBitsToNibbles(const std::vector<uint8_t>& bits,
+                                                     uint32_t bitCount,
+                                                     int revolutions) {
+    std::vector<uint8_t> result;
+    if (bitCount == 0 || bits.size() * 8 < bitCount || revolutions <= 0) {
+        return result;
+    }
+    result.reserve(static_cast<size_t>(bitCount) / 8 * revolutions);
+
+    uint8_t latch = 0;
+    for (uint64_t k = 0; k < static_cast<uint64_t>(bitCount) * revolutions; ++k) {
+        const uint32_t pos = static_cast<uint32_t>(k % bitCount);
+        const int bit = (bits[pos >> 3] >> (7 - (pos & 7))) & 1;
+        latch = static_cast<uint8_t>((latch << 1) | bit);
+        if (latch & 0x80) {
+            result.push_back(latch);
+            latch = 0;
+        }
+    }
+    return result;
+}
+
+NibbleEncoder::ParsedTrack NibbleEncoder::parseNibbleStream(
+    const std::vector<uint8_t>& nibbles, uint8_t expectedTrack) {
+
+    ParsedTrack result;
+    const size_t n = nibbles.size();
+    constexpr size_t DATA_SEARCH_WINDOW = 32;  // RWTS READ16 gives up after $20 nibbles
+
+    // DOS logical sector stored at each physical position
+    std::array<uint8_t, 16> logicalAt{};
+    for (uint8_t logical = 0; logical < 16; ++logical) {
+        logicalAt[AppleInterleave::DOS33_INTERLEAVE[logical]] = logical;
+    }
+
+    size_t i = 0;
+    while (i + 14 <= n) {
+        if (!(nibbles[i] == ADDR_PROLOGUE_1 && nibbles[i + 1] == ADDR_PROLOGUE_2 &&
+              nibbles[i + 2] == ADDR_PROLOGUE_3)) {
+            ++i;
+            continue;
+        }
+
+        uint8_t volume, track, sector;
+        if (!decodeAddressField(&nibbles[i + 3], volume, track, sector) ||
+            track != expectedTrack || sector >= 16 ||
+            nibbles[i + 11] != EPILOGUE_1 || nibbles[i + 12] != EPILOGUE_2) {
+            ++i;
+            continue;
+        }
+
+        // Data prologue must follow before the next address field
+        size_t dataPos = 0;
+        bool haveData = false;
+        for (size_t j = i + 13; j + 3 <= n && j < i + 13 + DATA_SEARCH_WINDOW; ++j) {
+            if (nibbles[j] == DATA_PROLOGUE_1 && nibbles[j + 1] == DATA_PROLOGUE_2) {
+                if (nibbles[j + 2] == DATA_PROLOGUE_3) {
+                    dataPos = j;
+                    haveData = true;
+                }
+                break;  // D5 AA 96 (next address) or D5 AA AD: stop either way
+            }
+        }
+        if (!haveData || dataPos + 3 + NIBBLIZED_SIZE + 2 > n) {
+            ++i;
+            continue;
+        }
+
+        const size_t nibStart = dataPos + 3;
+        if (nibbles[nibStart + NIBBLIZED_SIZE] != EPILOGUE_1 ||
+            nibbles[nibStart + NIBBLIZED_SIZE + 1] != EPILOGUE_2) {
+            ++i;
+            continue;
+        }
+
+        std::vector<uint8_t> data;
+        try {
+            data = decodeSector(std::vector<uint8_t>(
+                nibbles.begin() + nibStart, nibbles.begin() + nibStart + NIBBLIZED_SIZE));
+        } catch (const std::exception&) {
+            ++i;
+            continue;
+        }
+
+        const uint8_t logical = logicalAt[sector];
+        if (!result.found[logical]) {
+            result.sectors[logical] = std::move(data);
+            result.found[logical] = true;
+            for (size_t k = 0; k < 8; ++k) {
+                if ((nibbles[i + 3 + k] & 0xAA) != 0xAA) {
+                    result.fixedBitsMissing[logical] = true;
+                }
+            }
+            if (!result.volumeKnown) {
+                result.volume = volume;
+                result.volumeKnown = true;
+            }
+        }
+        i = nibStart + NIBBLIZED_SIZE + 2;
+    }
+
+    return result;
+}
+
+namespace {
+    // 5-and-3 translate table: the 32 nibbles DOS 3.2 writes, in value order
+    constexpr std::array<uint8_t, 32> ENCODE53_TABLE = {
+        0xAB, 0xAD, 0xAE, 0xAF, 0xB5, 0xB6, 0xB7, 0xBA, 0xBB, 0xBD, 0xBE, 0xBF, 0xD6, 0xD7, 0xDA, 0xDB,
+        0xDD, 0xDE, 0xDF, 0xEA, 0xEB, 0xED, 0xEE, 0xEF, 0xF5, 0xF6, 0xF7, 0xFA, 0xFB, 0xFD, 0xFE, 0xFF
+    };
+
+    std::array<uint8_t, 256> makeDecode53() {
+        std::array<uint8_t, 256> t{};
+        t.fill(0xFF);
+        for (size_t i = 0; i < ENCODE53_TABLE.size(); ++i) {
+            t[ENCODE53_TABLE[i]] = static_cast<uint8_t>(i);
+        }
+        return t;
+    }
+}
+
+std::vector<uint8_t> NibbleEncoder::decodeSector53(const std::vector<uint8_t>& nibbles) {
+    static const std::array<uint8_t, 256> decode53 = makeDecode53();
+    if (nibbles.size() < NIBBLIZED53_SIZE) {
+        throw std::invalid_argument("Nibble data too short");
+    }
+
+    // 410 five-bit values, each written XORed with the previous one; the
+    // 411th nibble is the last value (checksum)
+    std::array<uint8_t, 410> vals{};
+    uint8_t prev = 0;
+    for (size_t i = 0; i < 410; ++i) {
+        const uint8_t v = decode53[nibbles[i]];
+        if (v == 0xFF) {
+            throw std::runtime_error("Invalid nibble byte in sector data");
+        }
+        prev ^= v;
+        vals[i] = prev;
+    }
+    if (decode53[nibbles[410]] != prev) {
+        throw std::runtime_error("Sector checksum mismatch");
+    }
+
+    // Bytes in groups of five (0..254) plus byte 255. Values 154..408 hold
+    // the high five bits of bytes 250+r-5i; values 1..153 the low three
+    // bits of each group; values 0 and 409 belong to byte 255.
+    std::vector<uint8_t> out(SECTOR_DATA_SIZE, 0);
+    out[255] = static_cast<uint8_t>((vals[0] & 0x07) | ((vals[409] & 0x1F) << 3));
+    for (int third = 0; third < 3; ++third) {
+        for (int g = 1; g <= 51; ++g) {
+            const uint8_t v = vals[third * 51 + g];
+            out[5 * g - 1] |= static_cast<uint8_t>((v & 0x01) << third);
+            out[5 * g - 2] |= static_cast<uint8_t>(((v >> 1) & 0x01) << third);
+            out[5 * g - 3 - third] |= static_cast<uint8_t>((v >> 2) & 0x07);
+        }
+    }
+    for (int r = 0; r < 5; ++r) {
+        for (int i = 0; i < 51; ++i) {
+            out[250 + r - 5 * i] |= static_cast<uint8_t>((vals[154 + 51 * r + i] & 0x1F) << 3);
+        }
+    }
+    return out;
+}
+
+NibbleEncoder::ParsedTrack NibbleEncoder::parseNibbleStream13(
+    const std::vector<uint8_t>& nibbles, uint8_t expectedTrack) {
+
+    ParsedTrack result;
+    result.sectorCount = 13;
+    const size_t n = nibbles.size();
+    constexpr size_t DATA_SEARCH_WINDOW = 32;
+
+    size_t i = 0;
+    while (i + 14 <= n) {
+        if (!(nibbles[i] == ADDR_PROLOGUE_1 && nibbles[i + 1] == ADDR_PROLOGUE_2 &&
+              nibbles[i + 2] == ADDR_PROLOGUE_3_13)) {
+            ++i;
+            continue;
+        }
+
+        uint8_t volume, track, sector;
+        if (!decodeAddressField(&nibbles[i + 3], volume, track, sector) ||
+            track != expectedTrack || sector >= 13 ||
+            nibbles[i + 11] != EPILOGUE_1 || nibbles[i + 12] != EPILOGUE_2) {
+            ++i;
+            continue;
+        }
+
+        size_t dataPos = 0;
+        bool haveData = false;
+        for (size_t j = i + 13; j + 3 <= n && j < i + 13 + DATA_SEARCH_WINDOW; ++j) {
+            if (nibbles[j] == DATA_PROLOGUE_1 && nibbles[j + 1] == DATA_PROLOGUE_2) {
+                if (nibbles[j + 2] == DATA_PROLOGUE_3) {
+                    dataPos = j;
+                    haveData = true;
+                }
+                break;
+            }
+        }
+        if (!haveData || dataPos + 3 + NIBBLIZED53_SIZE + 2 > n) {
+            ++i;
+            continue;
+        }
+
+        const size_t nibStart = dataPos + 3;
+        if (nibbles[nibStart + NIBBLIZED53_SIZE] != EPILOGUE_1 ||
+            nibbles[nibStart + NIBBLIZED53_SIZE + 1] != EPILOGUE_2) {
+            ++i;
+            continue;
+        }
+
+        std::vector<uint8_t> data;
+        try {
+            data = decodeSector53(std::vector<uint8_t>(
+                nibbles.begin() + nibStart, nibbles.begin() + nibStart + NIBBLIZED53_SIZE));
+        } catch (const std::exception&) {
+            ++i;
+            continue;
+        }
+
+        if (!result.found[sector]) {
+            result.sectors[sector] = std::move(data);
+            result.found[sector] = true;
+            for (size_t k = 0; k < 8; ++k) {
+                if ((nibbles[i + 3 + k] & 0xAA) != 0xAA) {
+                    result.fixedBitsMissing[sector] = true;
+                }
+            }
+            if (!result.volumeKnown) {
+                result.volume = volume;
+                result.volumeKnown = true;
+            }
+        }
+        i = nibStart + NIBBLIZED53_SIZE + 2;
+    }
+
+    return result;
+}
+
+bool NibbleEncoder::looksLike13Sector(const std::vector<uint8_t>& nibbles, uint8_t track) {
+    size_t count13 = 0, count16 = 0;
+    const ParsedTrack p13 = parseNibbleStream13(nibbles, track);
+    const ParsedTrack p16 = parseNibbleStream(nibbles, track);
+    for (size_t s = 0; s < 16; ++s) {
+        count13 += p13.found[s] ? 1 : 0;
+        count16 += p16.found[s] ? 1 : 0;
+    }
+    return count13 > count16;
 }
 
 int NibbleEncoder::findAddressField(const std::vector<uint8_t>& data, size_t startPos) {
@@ -320,73 +571,6 @@ int NibbleEncoder::findDataField(const std::vector<uint8_t>& data, size_t startP
         }
     }
     return -1;
-}
-
-std::array<std::vector<uint8_t>, 16> NibbleEncoder::parseTrack(
-    const std::vector<uint8_t>& trackData, uint8_t expectedTrack) {
-
-    std::array<std::vector<uint8_t>, 16> result;
-    std::array<bool, 16> found = {};
-
-    size_t pos = 0;
-    int sectorsFound = 0;
-
-    while (pos < trackData.size() && sectorsFound < 16) {
-        // Find address field
-        int addrPos = findAddressField(trackData, pos);
-        if (addrPos < 0) break;
-
-        // Skip prologue
-        size_t dataStart = addrPos + 3;
-        if (dataStart + 8 > trackData.size()) break;
-
-        // Decode address
-        uint8_t volume, track, sector;
-        if (!decodeAddressField(&trackData[dataStart], volume, track, sector)) {
-            pos = addrPos + 1;
-            continue;
-        }
-
-        // Verify track number
-        if (track != expectedTrack || sector >= 16) {
-            pos = addrPos + 1;
-            continue;
-        }
-
-        // Find data field
-        int dataFieldPos = findDataField(trackData, dataStart + 8);
-        if (dataFieldPos < 0 || dataFieldPos > addrPos + 100) {
-            pos = addrPos + 1;
-            continue;
-        }
-
-        // Extract nibblized data
-        size_t nibbleStart = dataFieldPos + 3;
-        if (nibbleStart + NIBBLIZED_SIZE > trackData.size()) break;
-
-        try {
-            std::vector<uint8_t> nibbles(
-                trackData.begin() + nibbleStart,
-                trackData.begin() + nibbleStart + NIBBLIZED_SIZE);
-
-            result[sector] = decodeSector(nibbles);
-            found[sector] = true;
-            ++sectorsFound;
-        } catch (...) {
-            // Decode error, continue searching
-        }
-
-        pos = nibbleStart + NIBBLIZED_SIZE;
-    }
-
-    // Fill any missing sectors with zeros
-    for (int i = 0; i < 16; ++i) {
-        if (!found[i]) {
-            result[i].resize(SECTOR_DATA_SIZE, 0);
-        }
-    }
-
-    return result;
 }
 
 } // namespace rde

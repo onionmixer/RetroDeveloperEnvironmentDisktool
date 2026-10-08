@@ -165,7 +165,8 @@ rde::DiskFormat FormatDetector::detectByExtension(const std::string& ext, size_t
         return rde::DiskFormat::AppleDO;
     }
     if (ext == ".po") {
-        return rde::DiskFormat::ApplePO;
+        // 1600 x 512: Apple II 3.5" 800K; anything else is the 140K layout
+        return fileSize == APPLE_800K ? rde::DiskFormat::Apple800PO : rde::DiskFormat::ApplePO;
     }
     if (ext == ".nib") {
         if (fileSize == APPLE_NIB) {
@@ -174,6 +175,9 @@ rde::DiskFormat FormatDetector::detectByExtension(const std::string& ext, size_t
         if (fileSize == APPLE_NIB2) {
             return rde::DiskFormat::AppleNIB2;
         }
+    }
+    if (ext == ".d13") {
+        return fileSize == APPLE_DOS32 ? rde::DiskFormat::AppleD13 : rde::DiskFormat::Unknown;
     }
     if (ext == ".nb2") {
         return rde::DiskFormat::AppleNIB2;
@@ -252,6 +256,14 @@ rde::DiskFormat FormatDetector::detectByContent(const std::vector<uint8_t>& data
 
         // Non-standard sizes: analyze content
         return detectDSKByContent(data);
+    }
+
+    // .2mg: the Apple II 800K container. Its header fields (format, block
+    // count, ranges) are checked by the loader so the error names the problem.
+    if (ext == ".2mg") {
+        const bool magic = data.size() >= 4 && data[0] == '2' && data[1] == 'I' &&
+                           data[2] == 'M' && data[3] == 'G';
+        return magic ? rde::DiskFormat::Apple800MG : rde::DiskFormat::Unknown;
     }
 
     return rde::DiskFormat::Unknown;

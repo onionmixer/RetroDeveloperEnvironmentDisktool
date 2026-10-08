@@ -1,8 +1,9 @@
 Directory listing for: Examples/Tutorial_apple_01/Tutorial_apple_01.do
-Volume: DISK VOLUME 0
+Volume: /TUTORIAL
 
 Name                                Size  Type  Attr
 ----------------------------------------------------
+HELLO                               3058   BIN      
 ----------------------------------------------------
-0 file(s), 0 bytes
-Free space: 0 bytes
+1 file(s), 3058 bytes
+Free space: 136192 bytes

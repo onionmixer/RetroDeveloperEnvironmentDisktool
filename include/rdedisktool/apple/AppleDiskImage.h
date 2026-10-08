@@ -101,6 +101,11 @@ public:
     bool isDOS33() const;
 
     /**
+     * Check if this is a DOS 3.2 (13 sectors/track) disk
+     */
+    bool isDOS32() const;
+
+    /**
      * Check if this is a ProDOS formatted disk
      */
     bool isProDOS() const;
@@ -111,8 +116,30 @@ protected:
     // Initialize standard geometry
     void initGeometry(size_t tracks = TRACKS_35, size_t sectors = SECTORS_16);
 
+    // create(): only geometries that load() reads back are allowed — 35
+    // tracks, 1 side, 16 (or, when allow13, 13) sectors of 256 bytes. A zero
+    // field means "default". Throws UnsupportedFormatException otherwise.
+    static void requireLoadableGeometry(const DiskGeometry& geometry, bool allow13);
+
     // Calculate offset into raw data for a given track/sector
     virtual size_t calculateOffset(size_t track, size_t sector) const = 0;
+
+    /**
+     * Sector data laid out linearly ((track * 16 + sector) * 256) in the
+     * image's own sector numbering, used by file system detection.
+     * Sector images return their raw data; nibble/bitstream images return
+     * decoded sectors (unreadable sectors as zeros).
+     */
+    virtual const std::vector<uint8_t>& detectionImage() const { return m_data; }
+
+public:
+    /**
+     * Problems found while reading sectors that did not stop them from being
+     * read (nibble/bitstream images). Computed from the current contents.
+     */
+    virtual std::vector<std::string> readWarnings() const { return {}; }
+
+protected:
 
     // Cached file system type
     mutable FileSystemType m_cachedFileSystem = FileSystemType::Unknown;

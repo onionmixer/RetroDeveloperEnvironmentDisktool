@@ -610,6 +610,9 @@ bool MacintoshMOOFImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::X68000XDF:
         case DiskFormat::X68000DIM:
         case DiskFormat::MacMOOF:
+        case DiskFormat::AppleD13:
+        case DiskFormat::Apple800PO:
+        case DiskFormat::Apple800MG:
             return false;
     }
     return false;

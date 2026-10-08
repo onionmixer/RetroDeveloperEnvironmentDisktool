@@ -50,6 +50,8 @@ public:
     bool createDirectory(const std::string& path) override;
     bool deleteDirectory(const std::string& path) override;
     bool isDirectory(const std::string& path) const override;
+    ValidationResult validateExtended() const override;
+    std::vector<std::string> mountWarnings() const override;
 
     // Cluster information
     struct ClusterInfo {
@@ -75,6 +77,12 @@ private:
     uint8_t m_numberOfFATs = 2;
     uint16_t m_rootEntryCount = 192;      // X68000 standard
     uint16_t m_totalSectors = 0;
+    // BPB total sectors as stored, when it exceeds the image (older
+    // rdedisktool versions wrote twice the real count); 0 = matches
+    uint32_t m_bpbOversizedTotal = 0;
+    bool m_bpbTotal32 = false;     // the count is in the 32-bit field
+    bool m_bpbNeedsRepair = false;
+    void repairOversizedBpb();
     uint8_t m_mediaDescriptor = 0xFE;     // X68000 2HD
     uint16_t m_sectorsPerFAT = 2;
     uint16_t m_sectorsPerTrack = 8;

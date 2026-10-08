@@ -48,6 +48,7 @@ public:
     bool format(const std::string& volumeName = "") override;
     std::string getVolumeName() const override;
     ValidationResult validateExtended() const override;
+    std::vector<std::string> mountWarnings() const override;
 
     // Directory operations (override from FileSystemHandler)
     bool supportsDirectories() const override { return true; }
@@ -65,7 +66,6 @@ private:
     static constexpr size_t DIR_ENTRY_SIZE = AppleConstants::ProDOS::DIR_ENTRY_SIZE;
     static constexpr size_t ENTRIES_PER_BLOCK = AppleConstants::ProDOS::ENTRIES_PER_BLOCK;
     static constexpr size_t MAX_FILENAME_LENGTH = AppleConstants::ProDOS::MAX_FILENAME_LENGTH;
-    static constexpr size_t TOTAL_BLOCKS = AppleConstants::ProDOS::TOTAL_BLOCKS;
 
     // Storage types from AppleConstants::ProDOS
     static constexpr uint8_t STORAGE_DELETED = AppleConstants::ProDOS::STORAGE_DELETED;
@@ -164,6 +164,10 @@ private:
     // Cached volume header
     DirectoryHeader m_volumeHeader;
     std::vector<bool> m_bitmap;       // Block allocation bitmap
+    // Blocks the volume may use: total_blocks, but never more than the image
+    // holds (the header value itself is kept as it is on disk)
+    size_t m_blockLimit = 0;
+    size_t imageBlocks() const;
 
     // Helper methods - Block I/O
     std::vector<uint8_t> readBlock(size_t block) const;
@@ -183,6 +187,8 @@ private:
     void writeVolumeHeader();
     std::vector<DirectoryEntry> readDirectory(uint16_t keyBlock) const;
     std::optional<DirectoryEntry> readDirectoryEntryAt(uint16_t dirKeyBlock, size_t physicalIndex) const;
+    // Directory block and slot (0-12) of entry <entryIndex> (header not counted)
+    bool locateDirectoryEntry(uint16_t dirKeyBlock, size_t entryIndex, uint16_t& block, size_t& slot) const;
     bool writeDirectoryEntry(uint16_t dirKeyBlock, size_t entryIndex, const DirectoryEntry& entry);
     int findDirectoryEntry(uint16_t dirKeyBlock, const std::string& filename) const;
     int findFreeDirectoryEntry(uint16_t dirKeyBlock) const;
@@ -191,6 +197,9 @@ private:
     // Helper methods - File I/O
     std::vector<uint8_t> readFileData(const DirectoryEntry& entry) const;
     std::vector<uint16_t> getFileBlocks(const DirectoryEntry& entry) const;
+    // Pointer of each data block of a file, in file order, ceil(EOF/512)
+    // entries; 0 = unallocated (sparse) block that reads as zeros
+    std::vector<uint16_t> dataBlockSlots(const DirectoryEntry& entry) const;
     bool writeFileData(uint16_t keyBlock, uint8_t storageType, const std::vector<uint8_t>& data);
     void freeFileBlocks(const DirectoryEntry& entry);
 

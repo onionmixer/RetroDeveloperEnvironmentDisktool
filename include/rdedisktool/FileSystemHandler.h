@@ -45,6 +45,15 @@ public:
     virtual std::vector<uint8_t> readFile(const std::string& filename) = 0;
 
     /**
+     * Read a file exactly as stored by the file system, without removing
+     * format headers or trimming (DOS 3.3: B/A/I headers and whole sectors).
+     * Defaults to readFile() where the two are the same.
+     */
+    virtual std::vector<uint8_t> readFileRaw(const std::string& filename) {
+        return readFile(filename);
+    }
+
+    /**
      * Write a file to the disk
      * @param filename File name or path
      * @param data File contents
@@ -109,6 +118,10 @@ public:
      * @return ValidationResult containing all issues found
      */
     virtual ValidationResult validateExtended() const;
+
+    /** Problems found while mounting that the user should see (e.g. a BPB
+     *  that does not match the image); empty for most file systems. */
+    virtual std::vector<std::string> mountWarnings() const { return {}; }
 
     //=========================================================================
     // Directory Operations (optional - may not be supported by all file systems)

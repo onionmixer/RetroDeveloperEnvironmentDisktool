@@ -124,6 +124,9 @@ Platform DiskImageFactory::getPlatformForFormat(DiskFormat format) {
         case DiskFormat::AppleNIB2:
         case DiskFormat::AppleWOZ1:
         case DiskFormat::AppleWOZ2:
+        case DiskFormat::AppleD13:
+        case DiskFormat::Apple800PO:
+        case DiskFormat::Apple800MG:
             return Platform::AppleII;
 
         case DiskFormat::MSXDSK:
@@ -241,6 +244,22 @@ DiskGeometry DiskImageFactory::getDefaultGeometry(DiskFormat format) {
             geom.bytesPerSector = 256;
             break;
 
+        case DiskFormat::AppleD13:
+            geom.tracks = 35;
+            geom.sides = 1;
+            geom.sectorsPerTrack = 13;  // DOS 3.2
+            geom.bytesPerSector = 256;
+            break;
+
+        case DiskFormat::Apple800PO:
+        case DiskFormat::Apple800MG:
+            // 1600 blocks; logical addressing only (see AppleProDOS800Image)
+            geom.tracks = 80;
+            geom.sides = 2;
+            geom.sectorsPerTrack = 10;
+            geom.bytesPerSector = 512;
+            break;
+
         // MSX formats
         case DiskFormat::MSXDSK:
             // Default to 720KB double-sided
@@ -266,7 +285,7 @@ DiskGeometry DiskImageFactory::getDefaultGeometry(DiskFormat format) {
 
         // X68000 formats
         case DiskFormat::X68000XDF:
-            geom.tracks = 154;
+            geom.tracks = 77;   // cylinders (x 2 heads)
             geom.sides = 2;
             geom.sectorsPerTrack = 8;
             geom.bytesPerSector = 1024;
@@ -274,7 +293,7 @@ DiskGeometry DiskImageFactory::getDefaultGeometry(DiskFormat format) {
 
         case DiskFormat::X68000DIM:
             // Default DIM type is 2HD in this project.
-            geom.tracks = 154;
+            geom.tracks = 77;   // cylinders (x 2 heads)
             geom.sides = 2;
             geom.sectorsPerTrack = 8;
             geom.bytesPerSector = 1024;
@@ -329,6 +348,12 @@ std::vector<std::string> DiskImageFactory::getExtensions(DiskFormat format) {
             return {".image", ".dc42"};
         case DiskFormat::MacMOOF:
             return {".moof"};
+        case DiskFormat::AppleD13:
+            return {".d13"};
+        case DiskFormat::Apple800PO:
+            return {".po"};
+        case DiskFormat::Apple800MG:
+            return {".2mg"};
         case DiskFormat::Unknown:
             return {};
     }
@@ -354,7 +379,10 @@ std::vector<DiskFormat> DiskImageFactory::getFormatsForPlatform(Platform platfor
                 DiskFormat::AppleNIB,
                 DiskFormat::AppleNIB2,
                 DiskFormat::AppleWOZ1,
-                DiskFormat::AppleWOZ2
+                DiskFormat::AppleWOZ2,
+                DiskFormat::AppleD13,
+                DiskFormat::Apple800PO,
+                DiskFormat::Apple800MG
             };
             break;
 
@@ -414,6 +442,8 @@ DiskFormat DiskImageFactory::getFormatFromExtension(const std::string& extension
     if (ext == ".po") return DiskFormat::ApplePO;
     if (ext == ".nib") return DiskFormat::AppleNIB;
     if (ext == ".nb2") return DiskFormat::AppleNIB2;
+    if (ext == ".d13") return DiskFormat::AppleD13;
+    if (ext == ".2mg") return DiskFormat::Apple800MG;
     if (ext == ".woz") return DiskFormat::AppleWOZ2;  // Default to v2
     if (ext == ".dmk") return DiskFormat::MSXDMK;
     if (ext == ".xsa") return DiskFormat::MSXXSA;

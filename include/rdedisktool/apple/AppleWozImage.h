@@ -3,6 +3,7 @@
 
 #include "rdedisktool/apple/AppleDiskImage.h"
 #include "rdedisktool/CRC.h"
+#include "rdedisktool/apple/NibbleEncoder.h"
 #include <array>
 #include <map>
 
@@ -18,6 +19,12 @@ namespace rde {
  * Structure:
  * - 12-byte header: "WOZ1" or "WOZ2" + 0xFF 0x0A 0x0D 0x0A + CRC32
  * - Chunks: INFO, TMAP, TRKS (required), META, WRIT (optional)
+ *
+ * readSector/writeSector take DOS 3.3 logical sector numbers (same as .do).
+ * Sectors are decoded from the bitstream of each whole track's quarter track
+ * (4 * track). Writing a sector rebuilds that track as a standard DOS 3.3
+ * track, so it is only allowed when all 16 sectors of the track are readable.
+ * FLUX-encoded tracks (WOZ 2.1) are not supported for sector access.
  */
 class AppleWozImage : public AppleDiskImage {
 public:
@@ -34,6 +41,9 @@ public:
     static constexpr uint32_t CHUNK_TRKS = 0x534B5254;  // "TRKS"
     static constexpr uint32_t CHUNK_META = 0x4154454D;  // "META"
     static constexpr uint32_t CHUNK_WRIT = 0x54495257;  // "WRIT"
+    static constexpr uint32_t CHUNK_FLUX = 0x58554C46;  // "FLUX"
+    static constexpr size_t WOZ1_BITS_SIZE = 6646;      // WOZ1 record: bitstream part
+    static constexpr size_t WOZ2_FIRST_BITS_BLOCK = 3;
 
     AppleWozImage();
     ~AppleWozImage() override = default;
@@ -67,7 +77,13 @@ public:
     // AppleDiskImage Interface
     //=========================================================================
 
-    SectorOrder getSectorOrder() const override { return SectorOrder::Physical; }
+    // DOS 3.3 logical numbers; 13-sector (DOS 3.2) images number physically
+    SectorOrder getSectorOrder() const override {
+        return m_sectors13 ? SectorOrder::Physical : SectorOrder::DOS;
+    }
+
+    /** True when the tracks are 13-sector (DOS 3.2): read-only */
+    bool isThirteenSector() const { return m_sectors13; }
 
     //=========================================================================
     // WOZ-Specific Methods
@@ -118,14 +134,21 @@ public:
 
 protected:
     size_t calculateOffset(size_t track, size_t sector) const override;
+    const std::vector<uint8_t>& detectionImage() const override;
+
+public:
+    std::vector<std::string> readWarnings() const override;
+
+protected:
 
 private:
     // WOZ header and version
     uint8_t m_wozVersion = 2;
 
-    // INFO chunk data
+    // INFO chunk data (write protection uses DiskImage::m_writeProtected)
+    std::vector<uint8_t> m_infoRaw;   // INFO as loaded (template for save)
+    uint8_t m_infoVersion = 2;
     uint8_t m_diskType = 1;           // 1 = 5.25", 2 = 3.5"
-    bool m_writeProtected = false;
     bool m_synchronized = false;
     bool m_cleaned = false;
     std::string m_creator;
@@ -136,22 +159,39 @@ private:
     // TMAP chunk - maps quarter-tracks to TRKS index
     std::array<uint8_t, 160> m_trackMap = {};
 
+    // FLUX chunk (WOZ 2.1) - quarter-tracks stored as flux timing
+    std::array<uint8_t, 160> m_fluxMap = {};
+    bool m_hasFlux = false;
+    bool m_sectors13 = false;      // DOS 3.2 tracks (D5 AA B5, 5-and-3)
+
     // Track data storage
     struct TrackInfo {
-        std::vector<uint8_t> bits;      // Bit stream data
-        uint32_t bitCount = 0;           // Number of valid bits
+        std::vector<uint8_t> bits;      // Bit stream data (MSB first)
+        uint32_t bitCount = 0;           // Number of valid bits (bytes for FLUX)
         uint16_t bytesUsed = 0;          // Bytes of data
         uint16_t startingBlock = 0;      // WOZ2: starting block
         uint16_t blockCount = 0;         // WOZ2: number of blocks
+        uint16_t splicePoint = 0xFFFF;   // WOZ1 write hints (0xFFFF = none)
+        uint8_t spliceNibble = 0;
+        uint8_t spliceBitCount = 0;
     };
     std::vector<TrackInfo> m_tracks;
 
     // Metadata
     std::map<std::string, std::string> m_metadata;
 
-    // Decoded sector cache
-    std::array<std::array<std::vector<uint8_t>, 16>, TRACKS_35> m_decodedSectors;
+    // Chunks kept verbatim on save (WRIT is dropped once a track changes)
+    std::vector<std::pair<uint32_t, std::vector<uint8_t>>> m_otherChunks;
+    bool m_tracksChanged = false;
+
+    // Decoded sector cache (indexed by DOS logical sector)
+    std::array<NibbleEncoder::ParsedTrack, TRACKS_35> m_decodedSectors;
     std::array<bool, TRACKS_35> m_sectorsCached = {};
+    std::array<bool, TRACKS_35> m_trackDirty = {};
+
+    // DOS-order sector image for file system detection
+    mutable std::vector<uint8_t> m_detectionImage;
+    mutable bool m_detectionValid = false;
 
     // Parsing helpers
     void parseWozHeader();
@@ -168,8 +208,14 @@ private:
     std::vector<uint8_t> buildMetaChunk() const;
 
     // Decoding helpers
+    int trackIndexFor(size_t track) const;   // TRKS index of whole track, -1 if none
+    bool isFluxTrack(size_t track) const;
+    NibbleEncoder::ParsedTrack parseTrackBits(size_t track) const;
     void decodeSectorsForTrack(size_t track);
-    std::vector<uint8_t> nibblizeTrack(size_t track) const;
+    void rebuildTrack(size_t track);
+    void invalidateDetection();
+    static TrackInfo makeStandardTrack(const std::array<std::vector<uint8_t>, 16>& sectors,
+                                       uint8_t volume, uint8_t track);
 };
 
 } // namespace rde

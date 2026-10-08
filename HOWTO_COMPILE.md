@@ -188,18 +188,19 @@ make
 
 | CMake Option | Default | Description |
 |--------------|---------|-------------|
-| `CMAKE_BUILD_TYPE` | Debug | Build type: Debug, Release, RelWithDebInfo |
+| `CMAKE_BUILD_TYPE` | Release | Build type: Debug, Release, RelWithDebInfo |
 | `CMAKE_INSTALL_PREFIX` | /usr/local | Installation directory |
-| `BUILD_TESTS` | ON | Build test suite |
+
+| `BUILD_TESTS` | OFF | Register `tests/test_*.sh` as CTest tests |
 
 Example:
 ```bash
-cmake -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF ..
+cmake -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON ..
 ```
 
 ## Post-Build Verification
 
-After building, run core regressions:
+After building, run the regression scripts (see *Running Tests* for all of them):
 
 ```bash
 cd /path/to/RetroDeveloperEnvironmentDisktool
@@ -333,10 +334,27 @@ cmake --build .
 
 ### Running Tests
 
+With `-DBUILD_TESTS=ON`, every `tests/test_*.sh` is a CTest test run against the
+`rdedisktool` of that build directory:
+
 ```bash
 cd build
 ctest --output-on-failure
 ```
+
+The tests are self-contained shell scripts that use `build/rdedisktool` (override with
+`RDEDISKTOOL=/path/to/rdedisktool`; `test_bootdisk_guard_all.sh` only runs the other guard
+scripts, which read it). Each exits 0 on success after a final pass line (`PASS ...`,
+`[PASS] ...` or `PASS: n FAIL: 0`) and exits non-zero on failure. Run them all:
+
+```bash
+cd /path/to/RetroDeveloperEnvironmentDisktool
+for t in tests/test_*.sh; do bash "$t" >/dev/null 2>&1 || echo "FAIL $t"; done
+```
+
+Some tests need `python3` (independent reference checkers in `tests/tools/`) or workspace
+boot disks under `../diskwork/bootdisk/`. `tests/emu/` holds manual emulator checks (isolated
+AppleWin `sa2` + Xvfb) that are not part of this loop — see `tests/emu/README.md`.
 
 ## Project Structure
 
@@ -345,27 +363,24 @@ RetroDeveloperEnvironmentDisktool/
 ├── CMakeLists.txt          # Main CMake configuration
 ├── README.md               # Project documentation
 ├── HOWTO_COMPILE.md        # This file
+├── TESTCASE.md             # Manual test scenarios
+├── cmake/                  # uninstall script template
 ├── include/
-│   └── rdedisktool/        # Public headers
-│       ├── DiskImage.h
-│       ├── DiskImageFactory.h
-│       ├── FileSystemHandler.h
-│       ├── CLI.h
-│       ├── Types.h
-│       ├── Exceptions.h
-│       ├── CRC.h
-│       ├── apple/          # Apple II specific headers
-│       ├── msx/            # MSX specific headers
-│       └── filesystem/     # File system handler headers
+│   └── rdedisktool/        # Public headers (DiskImage, DiskImageFactory, FormatDetector,
+│       │                   #  FileSystemHandler, BootDiskPolicy, CLI, Types, Exceptions, CRC)
+│       ├── apple/          # Apple II formats (DO/PO/NIB/NB2/WOZ/D13, nibble encoder)
+│       ├── msx/            # MSX formats (DSK/DMK/XSA)
+│       ├── x68000/         # X68000 formats (XDF/DIM)
+│       ├── macintosh/      # Macintosh containers (IMG/DC42/MOOF)
+│       ├── filesystem/     # File system handlers (DOS 3.3/3.2, ProDOS, MSX-DOS, Human68k, HFS, MFS)
+│       └── utils/          # Binary reader, option parser, Mac helpers
 ├── src/
-│   ├── DiskImage.cpp
-│   ├── DiskImageFactory.cpp
-│   ├── CRC.cpp
+│   ├── core/              # DiskImage, factory, format detection, boot-disk policy, CRC
 │   ├── cli/               # CLI implementation
-│   ├── apple/             # Apple II format implementations
-│   ├── msx/               # MSX format implementations
+│   ├── apple/ msx/ x68000/ macintosh/   # Format implementations
 │   ├── filesystem/        # File system implementations
 │   └── utils/             # Utility functions
+├── tests/                  # test_*.sh regression scripts, tools/, fixtures/, baselines/, emu/
 └── build/                  # Build output (created during build)
 ```
 

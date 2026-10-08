@@ -84,25 +84,108 @@ public:
     static bool decodeAddressField(const uint8_t* data, uint8_t& volume,
                                    uint8_t& track, uint8_t& sector);
 
-    /**
-     * Build a complete nibblized track
-     * @param sectorData Array of 16 sector buffers (256 bytes each)
-     * @param volume Volume number
-     * @param track Track number
-     * @return Complete nibblized track
-     */
-    static std::vector<uint8_t> buildTrack(
-        const std::array<std::vector<uint8_t>, 16>& sectorData,
-        uint8_t volume, uint8_t track);
+    // Standard DOS 3.3 track layout, in self-sync groups. Gap 2/3 match a
+    // real DOS 3.3 disk captured by Applesauce (6 and 11 syncs); gap 1 for WOZ
+    // makes the whole track 50,034 bits (300 rpm at 4 us is ~50,000 bits).
+    static constexpr size_t GAP2_SYNCS = 6;
+    static constexpr size_t GAP3_SYNCS = 11;
+    static constexpr size_t WOZ_GAP1_SYNCS = 85;
+    // Nibbles per sector: address field 14 + gap2 + data field 349 + gap3.
+    static constexpr size_t SECTOR_NIBBLES = 14 + GAP2_SYNCS + 349 + GAP3_SYNCS;
 
     /**
-     * Parse a nibblized track into sectors
-     * @param trackData Nibblized track data
-     * @param track Expected track number for verification
-     * @return Array of 16 decoded sectors (256 bytes each)
+     * A track as a nibble stream. isSync[i] marks a self-sync $FF, which a
+     * bitstream stores as 10 bits ($FF followed by two zero bits).
      */
-    static std::array<std::vector<uint8_t>, 16> parseTrack(
-        const std::vector<uint8_t>& trackData, uint8_t track);
+    struct TrackNibbles {
+        std::vector<uint8_t> nibbles;
+        std::vector<uint8_t> isSync;
+    };
+
+    /**
+     * Sectors decoded from one track, indexed by DOS 3.3 logical sector.
+     * Address fields carry the physical sector number; the data of physical
+     * sector p is DOS logical sector L where DOS33_INTERLEAVE[L] == p.
+     */
+    struct ParsedTrack {
+        std::array<std::vector<uint8_t>, 16> sectors;   // empty when not found
+        std::array<bool, 16> found = {};
+        // Address field of the accepted copy misses a fixed 1 bit of the
+        // 4-and-4 pattern (DOS 3.3 still reads it; reported as a warning)
+        std::array<bool, 16> fixedBitsMissing = {};
+        uint8_t volume = 254;
+        bool volumeKnown = false;
+        uint8_t sectorCount = 16;   // 13 for DOS 3.2 tracks
+        bool allFound() const;
+    };
+
+    /**
+     * Build a standard 16-sector track.
+     * @param sectors 16 sector buffers indexed by DOS 3.3 logical sector
+     * @param gap1Syncs self-sync count before physical sector 0
+     */
+    static TrackNibbles buildTrackNibbles(
+        const std::array<std::vector<uint8_t>, 16>& sectors,
+        uint8_t volume, uint8_t track, size_t gap1Syncs);
+
+    /**
+     * Build a NIB/NB2 track of exactly trackSize nibbles (gap 1 fills the rest).
+     */
+    static std::vector<uint8_t> buildNibTrack(
+        const std::array<std::vector<uint8_t>, 16>& sectors,
+        uint8_t volume, uint8_t track, size_t trackSize);
+
+    /**
+     * Pack a track into a WOZ bitstream (MSB first, self-sync = 10 bits).
+     * @param bitCount Output: number of valid bits
+     */
+    static std::vector<uint8_t> nibblesToWozBits(const TrackNibbles& track,
+                                                 uint32_t& bitCount);
+
+    /**
+     * Read nibbles from a circular WOZ bitstream the way the Disk II state
+     * machine latches them (shift in bits, a nibble is complete when its high
+     * bit is set). Covers `revolutions` turns so fields spanning the index
+     * point are seen whole. Idealised: no weak bits / MC3470 noise.
+     */
+    static std::vector<uint8_t> wozBitsToNibbles(const std::vector<uint8_t>& bits,
+                                                 uint32_t bitCount,
+                                                 int revolutions = 2);
+
+    /**
+     * Decode a nibble stream into sectors. The stream should cover the track
+     * more than once (fields crossing the end of a circular track). The first
+     * valid copy of each physical sector wins. A sector is valid only with a
+     * correct address field (checksum, matching track, DE AA epilogue)
+     * followed within 32 nibbles by a data field with a correct checksum and
+     * DE AA epilogue - the same checks DOS 3.3 RWTS makes.
+     */
+    static ParsedTrack parseNibbleStream(const std::vector<uint8_t>& nibbles,
+                                         uint8_t track);
+
+    //=========================================================================
+    // DOS 3.2 (13 sectors per track, 5-and-3 encoding) - read only
+    //=========================================================================
+
+    static constexpr uint8_t ADDR_PROLOGUE_3_13 = 0xB5;  // D5 AA B5
+    static constexpr size_t NIBBLIZED53_SIZE = 411;     // 410 values + checksum
+
+    /**
+     * Decode 411 5-and-3 nibbles to 256 bytes (throws on an invalid nibble
+     * or checksum). Bit layout derived from real DOS 3.2 disks.
+     */
+    static std::vector<uint8_t> decodeSector53(const std::vector<uint8_t>& nibbles);
+
+    /**
+     * Decode a nibble stream of a 13-sector track. Sectors are indexed by
+     * their physical number (DOS 3.2 numbers sectors physically). Same
+     * validity rules as parseNibbleStream; sectorCount = 13.
+     */
+    static ParsedTrack parseNibbleStream13(const std::vector<uint8_t>& nibbles,
+                                           uint8_t track);
+
+    /** True when the stream holds more valid 13-sector than 16-sector address fields. */
+    static bool looksLike13Sector(const std::vector<uint8_t>& nibbles, uint8_t track);
 
     /**
      * Get the 6-and-2 GCR encoding table
@@ -146,9 +229,6 @@ private:
 
     // 6-and-2 decoding table (disk byte → 6-bit value, 0xFF = invalid)
     static const std::array<uint8_t, 256> DECODE_TABLE;
-
-    // Physical to DOS 3.3 sector mapping for nibble track layout
-    static const std::array<uint8_t, 16> PHYSICAL_SECTOR_ORDER;
 };
 
 } // namespace rde

@@ -1,8 +1,9 @@
 # Macintosh Test Fixtures
 
 본 디렉토리는 Phase 1 Macintosh 지원 회귀에 사용되는 테스트 픽스처를 보관한다.
-모든 파일은 외부 출처 (`MacDiskcopy/sample/`, `MacDiskcopy/external_fixtures/dc42/`)
-에서 복사되었으며 byte-for-byte 동일성을 SHA256SUMS 로 보장한다.
+HFS/DC42 6 종은 외부 출처 (`MacDiskcopy/sample/`, `MacDiskcopy/external_fixtures/dc42/`)
+에서 복사되었고, MFS 4 종은 Python `mfs-init-empty` 로 만들었다(아래). 모든 파일의
+byte-for-byte 동일성은 SHA256SUMS 로 보장한다.
 
 ## 픽스처 목록
 
@@ -14,8 +15,17 @@
 | `lido.image` | 1,474,644 | DC42 → 1.44M HFS | yes | DC42 컨테이너 회귀 |
 | `systemtools.image` | 819,284 | DC42 → 800K HFS | yes | DC42 컨테이너 회귀 |
 | `stuffit_expander_5_5.image` | 1,474,644 | DC42 → 1.44M HFS | no | DC42 + non-bootable |
+| `empty_mfs.img` | 409,600 | raw MFS 400K (볼륨 `Empty MFS`) | no | `test_mac_mfs_write.sh` |
+| `sample_mfs.img` | 409,600 | raw MFS 400K (볼륨 `Empty MFS`, `Hello.txt` 16 B) | no | 시험 미사용 |
+| `small_boot_mfs.img` | 409,600 | raw MFS 400K (볼륨 `Small Boot`, LK 부트 블록) | no | 시험 미사용 |
+| `big_boot_mfs.img` | 819,200 | raw MFS 800K (볼륨 `Big MFS`, 할당 블록 2048 B, LK 부트 블록) | no | 시험 미사용 |
 
 DC42 파일 크기 = `0x54 + data_size` (tag_size=0).
+
+MFS 4 종은 위 MacDiskcopy 복사본이 아니라 Python `mfs-init-empty` 로 만든 것이다(커밋
+`1b86341`: empty/sample, `83ec81c`: small_boot/big_boot). "부팅" 칸은 `rdedisktool info -v` 의
+`BootDisk` 판정(2026-10-08) — `*_boot_mfs` 는 LK 부트 블록이 있지만 System/Finder 가 없어
+의도적으로 `no` 다. "시험 미사용" 은 `tests/*.sh` 전수 grep 결과.
 
 ## 무결성 검증
 

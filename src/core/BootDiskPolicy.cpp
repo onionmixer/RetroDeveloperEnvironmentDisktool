@@ -39,7 +39,8 @@ bool hasAny(const std::set<std::string>& names, const std::set<std::string>& pro
 
 BootDiskProfile profileFromFS(FileSystemType fsType, DiskFormat format) {
     switch (fsType) {
-        case FileSystemType::DOS33: return BootDiskProfile::DOS33;
+        case FileSystemType::DOS33:
+        case FileSystemType::DOS32: return BootDiskProfile::DOS33;
         case FileSystemType::ProDOS: return BootDiskProfile::ProDOS;
         case FileSystemType::MSXDOS1:
         case FileSystemType::MSXDOS2:

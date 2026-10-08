@@ -41,7 +41,9 @@ public:
 
     Platform getPlatform() const override { return Platform::X68000; }
     FileSystemType getFileSystemType() const override;
+    // tracks = cylinders, sides = heads; sectors are numbered from 1
     DiskGeometry getGeometry() const override { return m_geometry; }
+    size_t firstSectorNumber() const override { return 1; }
     bool isWriteProtected() const override { return m_writeProtected; }
     void setWriteProtected(bool protect) override { m_writeProtected = protect; }
     bool isModified() const override { return m_modified; }

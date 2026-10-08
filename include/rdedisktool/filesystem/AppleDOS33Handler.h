@@ -33,6 +33,7 @@ public:
     bool initialize(DiskImage* disk) override;
     std::vector<FileEntry> listFiles(const std::string& path = "") override;
     std::vector<uint8_t> readFile(const std::string& filename) override;
+    std::vector<uint8_t> readFileRaw(const std::string& filename) override;
     bool writeFile(const std::string& filename,
                   const std::vector<uint8_t>& data,
                   const FileMetadata& metadata = {}) override;
@@ -45,6 +46,16 @@ public:
     bool format(const std::string& volumeName = "") override;
     std::string getVolumeName() const override;
     ValidationResult validateExtended() const override;
+
+    /**
+     * Resolve a user file type for DOS 3.3: T/I/A/B/S/R, the ProDOS names
+     * TXT/INT/BAS/BIN/REL, or a hex DOS 3.3 code ($00 $01 $02 $04 $08 $10
+     * $20 $40). Empty name = B. Throws InvalidFormatException otherwise.
+     */
+    static uint8_t resolveFileType(const FileMetadata& metadata);
+
+    /** Warnings from the last writeFile() (e.g. default load address). */
+    const std::vector<std::string>& lastWriteWarnings() const { return m_lastWriteWarnings; }
 
 private:
     // Constants from AppleConstants::DOS33
@@ -104,6 +115,11 @@ private:
 
     // Cached VTOC
     VTOC m_vtoc;
+    bool m_dos32 = false;  // 13-sector DOS 3.2 disk: read-only
+
+    void requireWritable() const;
+
+    std::vector<std::string> m_lastWriteWarnings;
 
     // Helper methods
     bool parseVTOC();
@@ -115,14 +131,19 @@ private:
     void writeCatalogEntry(size_t track, size_t sector, size_t entryIndex, const CatalogEntry& entry);
     int findCatalogEntry(const std::string& filename) const;
 
+    // Data sector pairs in file order up to the last used one; (0,0) entries
+    // before it are holes (sparse random-access files)
     std::vector<TSPair> readTSList(uint8_t track, uint8_t sector) const;
-    void writeTSList(uint8_t track, uint8_t sector, const std::vector<TSPair>& pairs);
+    // Writes the chain of T/S list sectors `lists` describing `pairs`
+    void writeTSList(const std::vector<TSPair>& lists, const std::vector<TSPair>& pairs);
+    std::vector<uint8_t> readFileBytes(const std::string& filename, uint8_t& fileType) const;
 
     bool isSectorFree(size_t track, size_t sector) const;
     void markSectorUsed(size_t track, size_t sector);
     void markSectorFree(size_t track, size_t sector);
     TSPair allocateSector();
     size_t countFreeSectors() const;
+    size_t markReferencedSectorsUsed();
 
     std::string formatFilename(const char* name) const;
     void parseFilename(const std::string& filename, char* name) const;

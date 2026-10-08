@@ -21,7 +21,7 @@ namespace {
 
 X68000XDFImage::X68000XDFImage() : X68000DiskImage() {
     // XDF fixed geometry
-    initGeometry(XDF_TOTAL_TRACKS, XDF_HEADS, XDF_SECTORS_PER_TRACK, XDF_SECTOR_SIZE);
+    initGeometry(XDF_CYLINDERS, XDF_HEADS, XDF_SECTORS_PER_TRACK, XDF_SECTOR_SIZE);
 }
 
 void X68000XDFImage::load(const std::filesystem::path& path) {
@@ -93,7 +93,7 @@ void X68000XDFImage::create(const DiskGeometry& geometry) {
     (void)geometry;  // XDF has fixed geometry
 
     // Initialize with XDF fixed geometry
-    initGeometry(XDF_TOTAL_TRACKS, XDF_HEADS, XDF_SECTORS_PER_TRACK, XDF_SECTOR_SIZE);
+    initGeometry(XDF_CYLINDERS, XDF_HEADS, XDF_SECTORS_PER_TRACK, XDF_SECTOR_SIZE);
 
     // Create blank disk image filled with 0xE5
     m_data.resize(XDF_FILE_SIZE, 0xE5);
@@ -118,17 +118,18 @@ void X68000XDFImage::validateParameters(size_t track, size_t sector) const {
     }
 }
 
-SectorBuffer X68000XDFImage::readSector(size_t track, size_t side, size_t sector) {
-    // Convert track/side to linear track if needed
-    size_t linearTrack = track;
-    if (side == 0 && track < XDF_CYLINDERS) {
-        // If side is provided separately, calculate linear track
-        linearTrack = (track << 1) | side;
-    } else if (side == 1 && track < XDF_CYLINDERS) {
-        linearTrack = (track << 1) | 1;
+// track = cylinder (0..76), side = head (0..1). Anything else is out of
+// range: treating track >= 77 as an already-linear track used to alias
+// other sectors (a too-large BPB then overwrote existing files).
+static size_t xdfLinearTrack(size_t track, size_t side, size_t sector) {
+    if (track >= X68000DiskImage::XDF_CYLINDERS || side >= X68000DiskImage::XDF_HEADS) {
+        throw SectorNotFoundException(static_cast<int>(track), static_cast<int>(sector));
     }
-    // Otherwise, assume track is already linear
+    return track * X68000DiskImage::XDF_HEADS + side;
+}
 
+SectorBuffer X68000XDFImage::readSector(size_t track, size_t side, size_t sector) {
+    const size_t linearTrack = xdfLinearTrack(track, side, sector);
     validateParameters(linearTrack, sector);
 
     size_t offset = calculateOffset(linearTrack, sector);
@@ -146,14 +147,7 @@ void X68000XDFImage::writeSector(size_t track, size_t side, size_t sector,
         throw WriteProtectedException();
     }
 
-    // Convert track/side to linear track if needed
-    size_t linearTrack = track;
-    if (side == 0 && track < XDF_CYLINDERS) {
-        linearTrack = (track << 1) | side;
-    } else if (side == 1 && track < XDF_CYLINDERS) {
-        linearTrack = (track << 1) | 1;
-    }
-
+    const size_t linearTrack = xdfLinearTrack(track, side, sector);
     validateParameters(linearTrack, sector);
 
     size_t offset = calculateOffset(linearTrack, sector);
@@ -174,11 +168,7 @@ void X68000XDFImage::writeSector(size_t track, size_t side, size_t sector,
 }
 
 TrackBuffer X68000XDFImage::readTrack(size_t track, size_t side) {
-    // Convert to linear track
-    size_t linearTrack = track;
-    if (track < XDF_CYLINDERS && (side == 0 || side == 1)) {
-        linearTrack = (track << 1) | side;
-    }
+    const size_t linearTrack = xdfLinearTrack(track, side, 0);
 
     if (linearTrack >= XDF_TOTAL_TRACKS) {
         throw SectorNotFoundException(static_cast<int>(track), 0);
@@ -196,11 +186,7 @@ void X68000XDFImage::writeTrack(size_t track, size_t side, const TrackBuffer& da
         throw WriteProtectedException();
     }
 
-    // Convert to linear track
-    size_t linearTrack = track;
-    if (track < XDF_CYLINDERS && (side == 0 || side == 1)) {
-        linearTrack = (track << 1) | side;
-    }
+    const size_t linearTrack = xdfLinearTrack(track, side, 0);
 
     if (linearTrack >= XDF_TOTAL_TRACKS) {
         throw SectorNotFoundException(static_cast<int>(track), 0);
@@ -238,6 +224,9 @@ bool X68000XDFImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::MacIMG:
         case DiskFormat::MacDC42:
         case DiskFormat::MacMOOF:
+        case DiskFormat::AppleD13:
+        case DiskFormat::Apple800PO:
+        case DiskFormat::Apple800MG:
             return false;
     }
     return false;
@@ -280,6 +269,7 @@ std::string X68000XDFImage::getDiagnostics() const {
         case FileSystemType::Human68k: oss << "Human68k"; break;
         case FileSystemType::Unknown:
         case FileSystemType::DOS33:
+        case FileSystemType::DOS32:
         case FileSystemType::ProDOS:
         case FileSystemType::MSXDOS1:
         case FileSystemType::MSXDOS2:

@@ -5,11 +5,14 @@
 #include "rdedisktool/FileSystemHandler.h"
 #include "rdedisktool/filesystem/MSXDOSHandler.h"
 #include "rdedisktool/filesystem/AppleProDOSHandler.h"
+#include "rdedisktool/filesystem/AppleDOS33Handler.h"
 #include "rdedisktool/filesystem/MacintoshHFSHandler.h"
 #include "rdedisktool/filesystem/MacintoshMFSHandler.h"
 #include "rdedisktool/macintosh/MacFileExporters.h"
 #include "rdedisktool/macintosh/MacFileImporters.h"
 #include "rdedisktool/apple/AppleConstants.h"
+#include "rdedisktool/apple/AppleDiskImage.h"
+#include "rdedisktool/apple/AppleProDOS800MGImage.h"
 #include "rdedisktool/msx/MSXXSAImage.h"
 #include "rdedisktool/msx/MSXDiskImage.h"
 #include "rdedisktool/utils/CommandOptions.h"
@@ -44,6 +47,9 @@ rde::DiskFormat formatFromString(const std::string& str) {
     if (s == "nb2" || s == "applenib2") return rde::DiskFormat::AppleNIB2;
     if (s == "woz" || s == "woz2" || s == "applewoz2") return rde::DiskFormat::AppleWOZ2;
     if (s == "woz1" || s == "applewoz1") return rde::DiskFormat::AppleWOZ1;
+    if (s == "d13" || s == "appled13") return rde::DiskFormat::AppleD13;
+    if (s == "800po" || s == "apple800po") return rde::DiskFormat::Apple800PO;
+    if (s == "800mg" || s == "apple800mg") return rde::DiskFormat::Apple800MG;
     // MSX formats
     if (s == "msxdsk" || s == "msx") return rde::DiskFormat::MSXDSK;
     if (s == "dmk" || s == "msxdmk") return rde::DiskFormat::MSXDMK;
@@ -57,6 +63,23 @@ rde::DiskFormat formatFromString(const std::string& str) {
     if (s == "mac_dc42" || s == "macdc42" || s == "dc42") return rde::DiskFormat::MacDC42;
     if (s == "mac_moof" || s == "macmoof" || s == "moof") return rde::DiskFormat::MacMOOF;
     return rde::DiskFormat::Unknown;
+}
+
+// 800K images are found again only by extension + size (.po 819,200 B,
+// .2mg with a 2IMG header): any other name gives a file nothing reopens.
+// Returns the reason, or "" when the name fits the format.
+std::string apple800KNameProblem(rde::DiskFormat format, const std::string& path) {
+    if (!rde::isApple800KFormat(format)) {
+        return "";
+    }
+    const std::string want = format == rde::DiskFormat::Apple800PO ? ".po" : ".2mg";
+    const std::string ext = toLower(std::filesystem::path(path).extension().string());
+    if (ext == want) {
+        return "";
+    }
+    return std::string(rde::formatToString(format)) + " images must be named *" + want +
+           " (got '" + (ext.empty() ? std::string("no extension") : ext) +
+           "'): only that name is opened as this format again";
 }
 
 rde::FileSystemType fileSystemFromString(const std::string& str) {
@@ -79,7 +102,9 @@ bool isFileSystemCompatible(rde::DiskFormat format, rde::FileSystemType fsType) 
                     format == rde::DiskFormat::AppleNIB ||
                     format == rde::DiskFormat::AppleNIB2 ||
                     format == rde::DiskFormat::AppleWOZ1 ||
-                    format == rde::DiskFormat::AppleWOZ2);
+                    format == rde::DiskFormat::AppleWOZ2 ||
+                    format == rde::DiskFormat::AppleD13 ||
+                    rde::isApple800KFormat(format));
     // MSX formats
     bool isMSX = (format == rde::DiskFormat::MSXDSK ||
                   format == rde::DiskFormat::MSXDMK);
@@ -91,6 +116,9 @@ bool isFileSystemCompatible(rde::DiskFormat format, rde::FileSystemType fsType) 
                   format == rde::DiskFormat::MacDC42 ||
                   format == rde::DiskFormat::MacMOOF);
 
+    if (rde::isApple800KFormat(format)) {
+        return fsType == rde::FileSystemType::ProDOS;  // no DOS 3.3 on 800K
+    }
     if (isApple) {
         return (fsType == rde::FileSystemType::DOS33 ||
                 fsType == rde::FileSystemType::ProDOS);
@@ -225,11 +253,9 @@ bool readSectorLinear(rde::DiskImage& image,
     const uint32_t track = linearSector / sectorsPerTrackAllSides;
     const uint32_t rem = linearSector % sectorsPerTrackAllSides;
     const uint32_t side = rem / geom.sectorsPerTrack;
-    uint32_t sector = rem % geom.sectorsPerTrack;
-
-    if (format == rde::DiskFormat::X68000XDF || format == rde::DiskFormat::X68000DIM) {
-        sector += 1; // X68000 DiskImage sector is 1-indexed.
-    }
+    (void)format;
+    const uint32_t sector = rem % geom.sectorsPerTrack +
+                            static_cast<uint32_t>(image.firstSectorNumber());
 
     try {
         out = image.readSector(track, side, sector);
@@ -237,6 +263,33 @@ bool readSectorLinear(rde::DiskImage& image,
     } catch (...) {
         return false;
     }
+}
+
+// Message for an Apple II image without a usable file system. A ProDOS
+// volume header that is found but cannot be read usually means the image is
+// stored in the other sector order (e.g. a ProDOS-order image named .do).
+std::string appleNoFileSystemMessage(rde::DiskImage& image) {
+    if (image.getFileSystemType() == rde::FileSystemType::ProDOS) {
+        return "ProDOS volume found but its directory could not be read - the sector "
+               "order may be wrong (a ProDOS-order image needs the .po extension)";
+    }
+    return "No DOS 3.3 or ProDOS file system found on this disk";
+}
+
+// ProDOS boot blocks 0-1 are ProDOS-order sectors 0-3 of track 0. Images that
+// number sectors in DOS 3.3 order (.do/.dsk/.nib/.woz) keep them elsewhere.
+uint32_t protectedSectorInImage(rde::DiskImage& image,
+                                rde::BootDiskProfile profile,
+                                uint32_t linearSector) {
+    auto* apple = dynamic_cast<rde::AppleDiskImage*>(&image);
+    if (!apple || profile != rde::BootDiskProfile::ProDOS ||
+        apple->getSectorOrder() == rde::SectorOrder::ProDOS) {
+        return linearSector;
+    }
+    const uint32_t track = linearSector / 16;
+    const uint32_t prodosSector = linearSector % 16;
+    const size_t physical = rde::AppleInterleave::PRODOS_INTERLEAVE[prodosSector];
+    return track * 16 + static_cast<uint32_t>(apple->physicalToLogical(physical));
 }
 
 std::vector<std::pair<uint32_t, uint32_t>> protectedLinearRanges(const rde::DiskGeometry& geom,
@@ -263,10 +316,14 @@ std::vector<std::pair<uint32_t, uint32_t>> protectedLinearRanges(const rde::Disk
             // Boot protection only: Track 0 bootstrap sectors.
             addRange(0, spt > 0 ? (spt - 1) : 0);
             break;
-        case rde::BootDiskProfile::ProDOS:
-            // ProDOS boot blocks 0..1 (4 x 256-byte sectors on Apple II).
-            addRange(0, 3);
+        case rde::BootDiskProfile::ProDOS: {
+            // ProDOS boot blocks 0..1 = the first 1024 bytes: 4 x 256-byte
+            // sectors on 5.25" images, 2 x 512 on 800K (block 2 is the
+            // volume directory and must stay writable).
+            const uint32_t bps = static_cast<uint32_t>(geom.bytesPerSector);
+            addRange(0, bps == 0 ? 3 : (1024 + bps - 1) / bps - 1);
             break;
+        }
         case rde::BootDiskProfile::MSXDOS:
             // MSX boot sector only; FAT/root updates are required for normal file add.
             addRange(0, 0);
@@ -308,7 +365,9 @@ bool collectFileDigestsRecursive(rde::FileSystemHandler& handler,
             continue;
         }
         try {
-            const auto data = handler.readFile(child);
+            // Raw bytes: covers headers and whole sectors, and does not fail
+            // on files whose header a type-aware read would reject
+            const auto data = handler.readFileRaw(child);
             rde::CLI::FileDigest d;
             d.size = data.size();
             d.hash = fnv1a64(data);
@@ -344,7 +403,7 @@ void CLI::initCommands() {
     registerCommand("extract",
         [this](const std::vector<std::string>& args) { return cmdExtract(args); },
         "Extract files from disk image",
-        "extract <image_file> <file> [output_path]");
+        "extract [--raw] <image_file> <file> [output_path]");
 
     registerCommand("add",
         [this](const std::vector<std::string>& args) { return cmdAdd(args); },
@@ -353,6 +412,7 @@ void CLI::initCommands() {
         "    Options:\n"
         "      -f, --force         Overwrite existing file\n"
         "      -t, --type <type>   File type (T/I/A/B/S/R, SYS/BIN/TXT/BAS/CMD/INT/REL, or 0xFF/$FF)\n"
+        "      --raw               DOS 3.3: host file already holds the DOS file bytes (header included)\n"
         "      -a, --addr <addr>   Load address for binary files (hex: 0x0803 or $0803)");
 
     registerCommand("delete",
@@ -558,11 +618,15 @@ void CLI::printHelp() const {
 
     std::cout << "Supported Formats:\n";
     std::cout << "  Apple II:   .do, .dsk (DOS order), .po (ProDOS order),\n";
-    std::cout << "              .nib (Nibble), .woz (WOZ v1/v2)\n";
+    std::cout << "              .nib/.nb2 (Nibble), .woz (WOZ v1/v2),\n";
+    std::cout << "              .d13 (DOS 3.2 13-sector, read-only),\n";
+    std::cout << "              .po 819200 bytes (3.5\" 800K ProDOS, -f 800po),\n";
+    std::cout << "              .2mg (800K ProDOS in 2MG container, -f 800mg)\n";
     std::cout << "  MSX:        .dsk (Raw sector), .dmk (DMK), .xsa (XSA compressed)\n";
     std::cout << "  X68000:     .xdf (XDF), .dim (DIM)\n";
     std::cout << "  Macintosh:  .img / .dsk (Raw 512B sectors, HFS / MFS),\n";
-    std::cout << "              .image / .dc42 (Apple Disk Copy 4.2 container)\n";
+    std::cout << "              .image / .dc42 (Apple Disk Copy 4.2 container),\n";
+    std::cout << "              .moof (Applesauce MOOF, read-only contents)\n";
     std::cout << "\n";
 
     std::cout << "Run 'rdedisktool help <command>' for detailed command help.\n";
@@ -588,19 +652,21 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  -g, --geometry <spec>   Custom geometry: tracks:sides:sectors:bytes\n";
         std::cout << "  --force                 Overwrite existing file\n";
         std::cout << "\nSupported Formats:\n";
-        std::cout << "  Apple II:  do, po, nib, nb2, woz, woz1, woz2\n";
+        std::cout << "  Apple II:  do, po, nib, nb2, woz, woz1, woz2, d13 (blank only),\n";
+        std::cout << "             800po (3.5\" 800K ProDOS block image), 800mg (same in .2mg)\n";
         std::cout << "  MSX:       msxdsk, dmk\n";
         std::cout << "  X68000:    xdf, dim\n";
         std::cout << "  Macintosh: mac_img  (raw 512B sectors)\n";
-        std::cout << "             mac_dc42 (Apple Disk Copy 4.2 wrapper)\n";
         std::cout << "             mac_moof (Applesauce MOOF, GCR 400K/800K + MFM 1.44M)\n";
+        std::cout << "             (mac_dc42 cannot be created: create mac_img, then convert)\n";
         std::cout << "\nSupported Filesystems:\n";
-        std::cout << "  Apple II:  dos33, prodos\n";
+        std::cout << "  Apple II:  dos33, prodos (800po/800mg: prodos only)\n";
         std::cout << "  MSX:       msxdos, fat12\n";
         std::cout << "  X68000:    human68k\n";
         std::cout << "  Macintosh: hfs (800K or 1440K), mfs (400K floppy only)\n";
         std::cout << "\nDefault Geometry:\n";
         std::cout << "  Apple II:  35 tracks, 1 side, 16 sectors/track, 256 bytes/sector (140 KB)\n";
+        std::cout << "             800po/800mg: 1600 blocks, addressed as 80:2:10:512 (800 KB)\n";
         std::cout << "  MSX:       80 tracks, 2 sides, 9 sectors/track, 512 bytes/sector (720 KB)\n";
         std::cout << "  X68000:    XDF=154 tracks, 2 sides, 8 sectors/track, 1024 bytes/sector\n";
         std::cout << "              DIM=154 tracks, 2 sides, 8 sectors/track, 1024 bytes/sector (2HD default)\n";
@@ -638,8 +704,14 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  -t, --type <type>   File type for Apple II disks:\n";
         std::cout << "                        DOS 3.3 codes: T/I/A/B/S/R\n";
         std::cout << "                        ProDOS names:  SYS/BIN/TXT/BAS/CMD/INT/REL\n";
-        std::cout << "                        Hex values:    0xFF or $FF\n";
+        std::cout << "                        Hex values:    0xFF or $FF (code of the target file system)\n";
         std::cout << "  -a, --addr <addr>   Load address for binary files (hex: 0x0803 or $0803)\n";
+        std::cout << "\nDOS 3.3 disks:\n";
+        std::cout << "  The host file is the file body. B files get the DOS header\n";
+        std::cout << "  (address, length; address $2000 when --addr is not given), A/I files\n";
+        std::cout << "  get the 2-byte length. No --type means B.\n";
+        std::cout << "  --raw               The host file already holds the DOS file bytes\n";
+        std::cout << "                      (B/A/I header included); stored unchanged.\n";
         std::cout << "\nMacintosh-only Options (mutually exclusive, HFS only):\n";
         std::cout << "  --macbinary         <host_file> is a MacBinary v1 (.bin) container.\n";
         std::cout << "                      Both forks + Finder info (type/creator/flags) are\n";
@@ -709,8 +781,11 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "\nOptions:\n";
         std::cout << "  -f, --format <fmt> Output disk format (auto-detected from extension if not specified)\n";
         std::cout << "\nSupported Conversions:\n";
-        std::cout << "  Apple II:  do <-> po\n";
+        std::cout << "  Apple II:  do, po, nib, nb2, woz (any direction)\n";
+        std::cout << "             13-sector (DOS 3.2) disks -> d13 only\n";
+        std::cout << "             800po <-> 800mg (3.5\" 800K) only\n";
         std::cout << "  MSX:       dsk <-> dmk <-> xsa\n";
+        std::cout << "  X68000:    xdf <-> dim\n";
         std::cout << "  Macintosh: mac_img <-> mac_dc42 <-> mac_moof  (all 3 are bidirectional)\n";
         std::cout << "             mac_img  = raw 512B sectors\n";
         std::cout << "             mac_dc42 = Apple Disk Copy 4.2 wrapper (ROR32+BE16 checksum)\n";
@@ -725,7 +800,7 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  rdedisktool convert game.img game.moof -f mac_moof   # raw → MOOF (encode)\n";
         std::cout << "  rdedisktool convert game.dc42 game.moof -f mac_moof  # DC42 → MOOF\n";
         std::cout << "\nNotes:\n";
-        std::cout << "  * XSA compression achieves ~99%% ratio for typical disk images.\n";
+        std::cout << "  * XSA size depends on content (an empty 720 KB disk becomes about 9 KB).\n";
         std::cout << "  * mac_dc42 → mac_img drops the DC42 header + tag bytes;\n";
         std::cout << "    mac_img → mac_dc42 wraps with a fresh DC42 header (ROR32+BE16 checksum).\n";
     } else if (command == "list") {
@@ -740,6 +815,11 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  rdedisktool list mac.img -v\n";
         std::cout << "  rdedisktool list mac.img \"System Folder\" --verbose\n";
     } else if (command == "extract") {
+        std::cout << "\nOptions:\n";
+        std::cout << "  --raw           Write the file exactly as stored (DOS 3.3: B/A/I header\n";
+        std::cout << "                  and all data sectors). Without it, DOS 3.3 B/A/I files\n";
+        std::cout << "                  are written without their header, T files up to the\n";
+        std::cout << "                  first $00, other types as all data sectors.\n";
         std::cout << "\nMacintosh-only Options (mutually exclusive):\n";
         std::cout << "  --apple-double  Write data fork to <output_path> + a paired\n";
         std::cout << "                  ._<basename> sidecar in the same directory holding\n";
@@ -876,6 +956,11 @@ LoadedDisk CLI::loadDiskImage(const std::string& imagePath) {
 
     // Create filesystem handler
     result.handler = FileSystemHandler::create(result.image.get());
+    if (result.handler) {
+        for (const auto& w : result.handler->mountWarnings()) {
+            printWarning(w);
+        }
+    }
     if (!result.handler) {
         FileSystemType fsType = result.image->getFileSystemType();
         if (result.format == DiskFormat::MSXDSK || result.format == DiskFormat::MSXDMK ||
@@ -883,6 +968,8 @@ LoadedDisk CLI::loadDiskImage(const std::string& imagePath) {
             fsType == FileSystemType::MSXDOS1 || fsType == FileSystemType::MSXDOS2 ||
             fsType == FileSystemType::FAT12 || fsType == FileSystemType::Human68k) {
             printError("Failed to initialize filesystem (possible invalid BPB/metadata)");
+        } else if (DiskImageFactory::getPlatformForFormat(result.format) == Platform::AppleII) {
+            printError(appleNoFileSystemMessage(*result.image));
         } else {
             printError("File system not supported for this disk format");
         }
@@ -1002,7 +1089,8 @@ bool CLI::captureSafeAddSnapshot(const LoadedDisk& disk,
     for (const auto& r : ranges) {
         for (uint32_t s = r.first; s <= r.second; ++s) {
             std::vector<uint8_t> data;
-            if (!readSectorLinear(*disk.image, disk.format, s, data)) {
+            if (!readSectorLinear(*disk.image, disk.format,
+                                  protectedSectorInImage(*disk.image, profile, s), data)) {
                 error = "failed to read protected sector during snapshot";
                 return false;
             }
@@ -1050,7 +1138,8 @@ bool CLI::verifySafeAddSnapshot(const LoadedDisk& disk,
 
     for (const auto& kv : snapshot.protectedSectors) {
         std::vector<uint8_t> now;
-        if (!readSectorLinear(*disk.image, disk.format, kv.first, now)) {
+        if (!readSectorLinear(*disk.image, disk.format,
+                              protectedSectorInImage(*disk.image, profile, kv.first), now)) {
             error = "failed to re-read protected sector during verification";
             return false;
         }
@@ -1101,8 +1190,22 @@ int CLI::cmdInfo(const std::vector<std::string>& args) {
 
             FileSystemType fsType = image->getFileSystemType();
             std::cout << "\nFile System: " << fileSystemTypeToString(fsType) << "\n";
+            if (auto* appleImg = dynamic_cast<AppleDiskImage*>(image.get())) {
+                for (const auto& w : appleImg->readWarnings()) {
+                    printWarning(w);
+                }
+            }
 
             auto handler = FileSystemHandler::create(image.get());
+            if (handler) {
+                for (const auto& w : handler->mountWarnings()) {
+                    printWarning(w);
+                }
+            }
+            if (!handler && fsType != FileSystemType::Unknown &&
+                DiskImageFactory::getPlatformForFormat(image->getFormat()) == Platform::AppleII) {
+                printWarning(appleNoFileSystemMessage(*image));
+            }
 
             // Show additional filesystem info if detected
             if (fsType != FileSystemType::Unknown) {
@@ -1338,16 +1441,21 @@ int CLI::cmdList(const std::vector<std::string>& args) {
                 std::cout << std::left << std::setw(30) << file.name
                           << std::right << std::setw(10) << file.size;
 
-                // File type indicator
-                std::string typeStr = file.isDirectory ? "DIR" : "FILE";
+                // File type indicator (Apple II: the catalog's own type)
+                std::string typeStr = !file.typeName.empty() ? file.typeName
+                                    : file.isDirectory ? "DIR" : "FILE";
                 std::cout << std::setw(6) << typeStr;
 
-                // Attributes
+                // Attributes (Apple II: lock state only; FAT flags elsewhere)
                 std::string attrStr;
-                if (file.attributes & 0x01) attrStr += "R";  // Read-only
-                if (file.attributes & 0x02) attrStr += "H";  // Hidden
-                if (file.attributes & 0x04) attrStr += "S";  // System
-                if (file.attributes & 0x80) attrStr += "L";  // Locked
+                if (!file.typeName.empty()) {
+                    if (file.locked) attrStr += "L";
+                } else {
+                    if (file.attributes & 0x01) attrStr += "R";  // Read-only
+                    if (file.attributes & 0x02) attrStr += "H";  // Hidden
+                    if (file.attributes & 0x04) attrStr += "S";  // System
+                    if (file.attributes & 0x80) attrStr += "L";  // Locked
+                }
                 std::cout << std::setw(6) << attrStr << "\n";
 
                 totalSize += file.size;
@@ -1372,12 +1480,15 @@ int CLI::cmdExtract(const std::vector<std::string>& args) {
     //   --macbinary     : write a single MacBinary v1 .bin file
     bool modeAppleDouble = false;
     bool modeMacBinary   = false;
+    bool modeRaw         = false;
     std::vector<std::string> positional;
     for (const auto& a : args) {
         if (a == "--apple-double") {
             modeAppleDouble = true;
         } else if (a == "--macbinary") {
             modeMacBinary = true;
+        } else if (a == "--raw") {
+            modeRaw = true;
         } else {
             positional.push_back(a);
         }
@@ -1441,7 +1552,8 @@ int CLI::cmdExtract(const std::vector<std::string>& args) {
             }
         }
 
-        auto data = disk.handler->readFile(filename);
+        auto data = modeRaw ? disk.handler->readFileRaw(filename)
+                            : disk.handler->readFile(filename);
 
         std::ofstream outFile(outputPath, std::ios::binary);
         if (!outFile) {
@@ -1576,6 +1688,7 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
     opts.addFlag("force", {"-f", "--force"});
     opts.addValue("type", {"-t", "--type"});
     opts.addValue("addr", {"-a", "--addr"});
+    opts.addFlag("raw", {"--raw"});
 
     std::string parseError;
     if (!opts.parse(filteredArgs, &parseError)) {
@@ -1776,8 +1889,21 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
             FileMetadata metadata;
             metadata.targetName = targetName;
             metadata.fileType = fileType;
+            metadata.fileTypeName = opts.getValue("type");
             metadata.loadAddress = loadAddress;
+            metadata.loadAddressSet = !opts.getValue("addr").empty();
+            metadata.rawData = opts.hasFlag("raw");
+            auto* dosHandler = dynamic_cast<AppleDOS33Handler*>(disk.handler.get());
+            if (metadata.rawData && !dosHandler) {
+                printError("--raw is only supported on DOS 3.3 disks");
+                return 1;
+            }
             writeOk = disk.handler->writeFile(targetName, data, metadata);
+            if (dosHandler) {
+                for (const auto& w : dosHandler->lastWriteWarnings()) {
+                    printWarning(w);
+                }
+            }
         }
         if (!writeOk) {
             printError("Failed to write file to disk image");
@@ -1801,20 +1927,17 @@ int CLI::cmdAdd(const std::vector<std::string>& args) {
         if (!m_quiet) {
             std::cout << "Added: " << hostFile << " -> " << targetName
                       << " (" << data.size() << " bytes)";
-            if (fileType != 0 || loadAddress != 0) {
+            const std::string typeStr = opts.getValue("type");
+            const bool addrGiven = !opts.getValue("addr").empty();
+            if (!typeStr.empty() || addrGiven) {
                 std::cout << " [";
-                if (fileType != 0) {
-                    const char* typeNames[] = {"T", "I", "A", "", "B", "", "", "", "S"};
-                    if (fileType <= 8) {
-                        std::cout << "type=" << typeNames[fileType];
-                    } else if (fileType == 0x10) {
-                        std::cout << "type=R";
-                    }
+                if (!typeStr.empty()) {
+                    std::cout << "type=" << typeStr;
                 }
-                if (fileType != 0 && loadAddress != 0) {
+                if (!typeStr.empty() && addrGiven) {
                     std::cout << ", ";
                 }
-                if (loadAddress != 0) {
+                if (addrGiven) {
                     std::cout << "addr=$" << std::hex << std::uppercase
                               << std::setw(4) << std::setfill('0') << loadAddress
                               << std::dec;
@@ -2136,8 +2259,19 @@ int CLI::cmdCreate(const std::vector<std::string>& args) {
     }
 
     // XSA is read-only
+    // WOZ files are always written as WOZ2 (WOZ1 is read and kept only for
+    // images loaded from disk)
+    if (format == DiskFormat::AppleWOZ1) {
+        printWarning("WOZ1 output is not supported; writing WOZ2");
+        format = DiskFormat::AppleWOZ2;
+    }
+
     if (format == DiskFormat::MSXXSA) {
         printError("XSA format is read-only and cannot be created");
+        return 1;
+    }
+    if (const std::string why = apple800KNameProblem(format, outputPath); !why.empty()) {
+        printError(why);
         return 1;
     }
 
@@ -2172,7 +2306,7 @@ int CLI::cmdCreate(const std::vector<std::string>& args) {
         if (!isFileSystemCompatible(format, fsType)) {
             printError("Filesystem '" + filesystemStr + "' is not compatible with format '" +
                        formatToString(format) + "'");
-            printError("Apple II formats support: dos33, prodos");
+            printError("Apple II formats support: dos33, prodos (800po/800mg: prodos only)");
             printError("MSX formats support: msxdos, fat12");
             printError("X68000 formats support: human68k");
             return 1;
@@ -2209,17 +2343,19 @@ int CLI::cmdCreate(const std::vector<std::string>& args) {
 
         // Print success message
         if (!m_quiet) {
+            // The geometry of the image as created (formats may fix it)
+            const DiskGeometry created = image->getGeometry();
             std::cout << "Created: " << outputPath << "\n";
             std::cout << "Format: " << formatToString(format) << "\n";
-            std::cout << "Size: " << geometry.totalSize() << " bytes";
-            if (geometry.totalSize() >= 1024) {
-                std::cout << " (" << (geometry.totalSize() / 1024) << " KB)";
+            std::cout << "Size: " << created.totalSize() << " bytes";
+            if (created.totalSize() >= 1024) {
+                std::cout << " (" << (created.totalSize() / 1024) << " KB)";
             }
             std::cout << "\n";
-            std::cout << "Geometry: " << geometry.tracks << " tracks, "
-                      << geometry.sides << " side(s), "
-                      << geometry.sectorsPerTrack << " sectors/track, "
-                      << geometry.bytesPerSector << " bytes/sector\n";
+            std::cout << "Geometry: " << created.tracks << " tracks, "
+                      << created.sides << " side(s), "
+                      << created.sectorsPerTrack << " sectors/track, "
+                      << created.bytesPerSector << " bytes/sector\n";
 
             if (fsType != FileSystemType::Unknown) {
                 std::cout << "Filesystem: " << fileSystemTypeToString(fsType) << "\n";
@@ -2271,10 +2407,20 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
             return 1;
         }
 
-        // Determine output format
+        // Determine output format. -f is case-insensitive and takes the names
+        // of create plus the older aliases (dsk, dos, prodos, nibble...); an
+        // unknown value is an error, not a reason to guess from the extension.
         DiskFormat outputFormat = DiskFormat::Unknown;
         if (!formatStr.empty()) {
-            outputFormat = stringToFormat(formatStr);
+            outputFormat = formatFromString(formatStr);
+            if (outputFormat == DiskFormat::Unknown) {
+                outputFormat = stringToFormat(toLower(formatStr));
+            }
+            if (outputFormat == DiskFormat::Unknown) {
+                printError("Unknown disk format: " + formatStr);
+                printError("Supported formats: do, po, nib, nb2, woz, d13, 800po, 800mg, dsk, dmk, msxdsk, xsa, xdf, dim, mac_img, mac_dc42, mac_moof");
+                return 1;
+            }
         }
 
         if (outputFormat == DiskFormat::Unknown) {
@@ -2283,9 +2429,26 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
                 std::filesystem::path(outputPath).extension().string());
         }
 
+        // .po names both the 140K and the 800K image; from an 800K input it
+        // means the 800K one (an explicit -f po is refused below)
+        if (formatStr.empty() && outputFormat == DiskFormat::ApplePO &&
+            isApple800KFormat(inputImage->getFormat())) {
+            outputFormat = DiskFormat::Apple800PO;
+        }
+
+        if (const std::string why = apple800KNameProblem(outputFormat, outputPath); !why.empty()) {
+            printError(why);
+            return 1;
+        }
+
+        if (outputFormat == DiskFormat::AppleWOZ1) {
+            printWarning("WOZ1 output is not supported; writing WOZ2");
+            outputFormat = DiskFormat::AppleWOZ2;
+        }
+
         if (outputFormat == DiskFormat::Unknown) {
             printError("Cannot determine output format. Use --format option.");
-            printError("Supported formats: do, po, dsk, dmk, msxdsk, xsa, xdf, dim");
+            printError("Supported formats: do, po, nib, nb2, woz, d13, 800po, 800mg, dsk, dmk, msxdsk, xsa, xdf, dim");
             return 1;
         }
 
@@ -2303,8 +2466,35 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
         // Get geometry from input
         DiskGeometry geom = inputImage->getGeometry();
 
+        // 3.5" 800K (1600 blocks) and the 5.25" formats hold different disks
+        if (inputPlatform == Platform::AppleII &&
+            isApple800KFormat(inputImage->getFormat()) != isApple800KFormat(outputFormat)) {
+            printError(isApple800KFormat(inputImage->getFormat())
+                           ? "800K (3.5\") images convert only to 800po or 800mg"
+                           : "800po/800mg hold 800K (3.5\") disks only; this is a 5.25\" disk image");
+            return 1;
+        }
+        // A new output gets a new 2MG header (or none): say what is left behind
+        if (auto* mg = dynamic_cast<AppleProDOS800MGImage*>(inputImage.get());
+            mg && mg->hasContainerData()) {
+            printWarning("2MG comment, creator data and lock flag are not carried over to " +
+                         outputPath);
+        }
+
+        // 13-sector (DOS 3.2) disks only convert to .d13, and .d13 only
+        // holds 13-sector disks: the sectors of one do not fit the other.
+        if (inputPlatform == Platform::AppleII &&
+            (geom.sectorsPerTrack == 13) != (outputFormat == DiskFormat::AppleD13)) {
+            printError(geom.sectorsPerTrack == 13
+                           ? "13-sector (DOS 3.2) disks convert only to .d13 (-f d13)"
+                           : ".d13 holds 13-sector (DOS 3.2) disks only; this disk has " +
+                                 std::to_string(geom.sectorsPerTrack) + " sectors per track");
+            return 1;
+        }
+
         std::unique_ptr<DiskImage> outputImage;
         size_t sectorsConverted = 0;
+        size_t sectorsFailed = 0;
 
         // Macintosh containers: prefer the input's convertTo() path which
         // copies the raw 512B-sector stream directly. The generic sector-by-
@@ -2369,20 +2559,33 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
                 return 1;
             }
 
-            // Copy all sectors
+            // Apple images number sectors in different orders (DOS 3.3 for
+            // .do/.nib/.woz, ProDOS for .po); map through the physical sector.
+            auto* appleIn = dynamic_cast<AppleDiskImage*>(inputImage.get());
+            auto* appleOut = dynamic_cast<AppleDiskImage*>(outputImage.get());
+
+            // Copy all sectors (X68000 numbers sectors from 1, others from 0)
+            const size_t inFirst = inputImage->firstSectorNumber();
+            const size_t outFirst = outputImage->firstSectorNumber();
             for (size_t track = 0; track < geom.tracks; ++track) {
                 for (size_t side = 0; side < geom.sides; ++side) {
-                    for (size_t sector = 0; sector < geom.sectorsPerTrack; ++sector) {
+                    for (size_t index = 0; index < geom.sectorsPerTrack; ++index) {
+                        const size_t sector = inFirst + index;
+                        size_t outSector = outFirst + index;
+                        if (appleIn && appleOut) {
+                            outSector = appleOut->physicalToLogical(
+                                appleIn->logicalToPhysical(index));
+                        }
                         try {
                             auto data = inputImage->readSector(track, side, sector);
-                            outputImage->writeSector(track, side, sector, data);
+                            outputImage->writeSector(track, side, outSector, data);
                             ++sectorsConverted;
                         } catch (const std::exception& e) {
-                            if (m_verbose) {
-                                printWarning("Failed to copy sector T" + std::to_string(track) +
-                                           "/S" + std::to_string(side) + "/H" + std::to_string(sector) +
-                                           ": " + e.what());
-                            }
+                            ++sectorsFailed;
+                            // Always report: a lost sector must not be silent
+                            printWarning("Failed to copy sector T" + std::to_string(track) +
+                                       "/S" + std::to_string(side) + "/H" + std::to_string(sector) +
+                                       ": " + e.what());
                         }
                     }
                 }
@@ -2397,6 +2600,20 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
             std::cout << "Format: " << formatToString(inputImage->getFormat())
                       << " -> " << formatToString(outputFormat) << "\n";
             std::cout << "Sectors: " << sectorsConverted << " copied\n";
+        }
+
+        // Sectors that were read although their address field is irregular
+        if (auto* appleSrc = dynamic_cast<AppleDiskImage*>(inputImage.get())) {
+            for (const auto& w : appleSrc->readWarnings()) {
+                printWarning(w);
+            }
+        }
+
+        // The image was written, but some sectors are missing
+        if (sectorsFailed > 0) {
+            printWarning(std::to_string(sectorsFailed) +
+                         " sector(s) could not be copied and were left blank");
+            return 2;
         }
 
         return 0;
@@ -2505,9 +2722,12 @@ int CLI::cmdDump(const std::vector<std::string>& args) {
                       std::to_string(geom.sides - 1) + ")");
             return 1;
         }
-        if (static_cast<size_t>(sector) >= geom.sectorsPerTrack) {
-            printError("Sector " + std::to_string(sector) + " out of range (0-" +
-                      std::to_string(geom.sectorsPerTrack - 1) + ")");
+        const size_t firstSector = image->firstSectorNumber();  // X68000: 1
+        if (sector < 0 || static_cast<size_t>(sector) < firstSector ||
+            static_cast<size_t>(sector) >= firstSector + geom.sectorsPerTrack) {
+            printError("Sector " + std::to_string(sector) + " out of range (" +
+                      std::to_string(firstSector) + "-" +
+                      std::to_string(firstSector + geom.sectorsPerTrack - 1) + ")");
             return 1;
         }
 
@@ -2846,6 +3066,10 @@ int CLI::cmdValidate(const std::vector<std::string>& args) {
             if (!m_quiet) {
                 std::cout << "File system: Not detected\n";
                 std::cout << "Status: " << (basicValid ? "Valid" : "Invalid") << "\n";
+            }
+            if (image->getFileSystemType() == FileSystemType::ProDOS &&
+                DiskImageFactory::getPlatformForFormat(image->getFormat()) == Platform::AppleII) {
+                printWarning(appleNoFileSystemMessage(*image));
             }
             return basicValid ? 0 : 1;
         }

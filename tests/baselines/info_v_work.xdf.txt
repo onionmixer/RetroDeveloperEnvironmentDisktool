@@ -3,11 +3,11 @@ Format: X68000 XDF
 Platform: X68000
 
 Geometry:
-  Tracks: 154
+  Tracks: 77
   Sides: 2
   Sectors/Track: 8
   Bytes/Sector: 1024
-  Total Size: 2523136 bytes
+  Total Size: 1261568 bytes
 
 File System: Unknown
 

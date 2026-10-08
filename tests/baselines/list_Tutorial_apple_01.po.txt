@@ -3,7 +3,7 @@ Volume: /TUTORIAL
 
 Name                                Size  Type  Attr
 ----------------------------------------------------
-HELLO                               3058  FILE   RHL
+HELLO                               3058   BIN      
 ----------------------------------------------------
 1 file(s), 3058 bytes
 Free space: 136192 bytes

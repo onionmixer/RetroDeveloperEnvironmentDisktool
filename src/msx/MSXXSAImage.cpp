@@ -191,6 +191,9 @@ bool MSXXSAImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::MacIMG:
         case DiskFormat::MacDC42:
         case DiskFormat::MacMOOF:
+        case DiskFormat::AppleD13:
+        case DiskFormat::Apple800PO:
+        case DiskFormat::Apple800MG:
             return false;
     }
     return false;
@@ -304,6 +307,7 @@ std::string MSXXSAImage::getDiagnostics() const {
         case FileSystemType::FAT16: oss << "FAT16"; break;
         case FileSystemType::Unknown:
         case FileSystemType::DOS33:
+        case FileSystemType::DOS32:
         case FileSystemType::ProDOS:
         case FileSystemType::Human68k:
         case FileSystemType::HFS:

@@ -81,6 +81,7 @@ void ApplePOImage::save(const std::filesystem::path& path) {
 }
 
 void ApplePOImage::create(const DiskGeometry& geometry) {
+    requireLoadableGeometry(geometry, false);
     size_t tracks = geometry.tracks > 0 ? geometry.tracks : TRACKS_35;
     size_t sectors = geometry.sectorsPerTrack > 0 ? geometry.sectorsPerTrack : SECTORS_16;
 
@@ -238,6 +239,9 @@ bool ApplePOImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::MacIMG:
         case DiskFormat::MacDC42:
         case DiskFormat::MacMOOF:
+        case DiskFormat::AppleD13:
+        case DiskFormat::Apple800PO:
+        case DiskFormat::Apple800MG:
             return false;
     }
     return false;
@@ -306,6 +310,9 @@ std::string ApplePOImage::getDiagnostics() const {
             break;
         case FileSystemType::ProDOS:
             oss << "ProDOS\n";
+            break;
+        case FileSystemType::DOS32:
+            oss << "DOS 3.2\n";
             break;
         case FileSystemType::Unknown:
         case FileSystemType::MSXDOS1:

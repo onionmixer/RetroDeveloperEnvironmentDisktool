@@ -55,6 +55,46 @@ void Human68kHandler::writeLogicalSector(uint32_t logicalSector, const std::vect
 // BPB Parsing
 //=============================================================================
 
+void Human68kHandler::repairOversizedBpb() {
+    if (!m_bpbNeedsRepair) {
+        return;
+    }
+    auto boot = readLogicalSector(0);
+    if (m_bpbTotal32) {
+        boot[0x20] = m_totalSectors & 0xFF;
+        boot[0x21] = (m_totalSectors >> 8) & 0xFF;
+        boot[0x22] = 0;
+        boot[0x23] = 0;
+    } else {
+        boot[0x13] = m_totalSectors & 0xFF;
+        boot[0x14] = (m_totalSectors >> 8) & 0xFF;
+    }
+    writeLogicalSector(0, boot);
+    m_bpbNeedsRepair = false;
+}
+
+std::vector<std::string> Human68kHandler::mountWarnings() const {
+    if (m_bpbOversizedTotal == 0) {
+        return {};
+    }
+    return {"BPB total sectors " + std::to_string(m_bpbOversizedTotal) +
+            " exceed the image (" + std::to_string(m_totalSectors) + " sectors); using " +
+            std::to_string(m_totalSectors) + ". The BPB is corrected when the disk is changed."};
+}
+
+ValidationResult Human68kHandler::validateExtended() const {
+    ValidationResult result;
+    if (m_bpbNeedsRepair) {
+        result.addError("BPB total sectors " + std::to_string(m_bpbOversizedTotal) +
+                        " exceed the image (" + std::to_string(m_totalSectors) + " sectors)",
+                        "BPB");
+    } else {
+        result.addInfo("BPB total sectors match the image (" +
+                       std::to_string(m_totalSectors) + ")");
+    }
+    return result;
+}
+
 bool Human68kHandler::parseBPB() {
     // Read boot sector (logical sector 0)
     auto bootSector = readLogicalSector(0);
@@ -85,6 +125,21 @@ bool Human68kHandler::parseBPB() {
                                   (static_cast<uint32_t>(bootSector[0x23]) << 24);
         if (totalSectors32 > 0 && totalSectors32 <= 0xFFFFu) {
             m_totalSectors = static_cast<uint16_t>(totalSectors32);
+            m_bpbTotal32 = true;
+        }
+    }
+
+    // A total larger than the image would put clusters past its end (older
+    // rdedisktool versions wrote twice the real count): use the image size,
+    // and correct the BPB on the next change (repairOversizedBpb).
+    m_bpbOversizedTotal = 0;
+    m_bpbNeedsRepair = false;
+    if (m_bytesPerSector != 0) {
+        const size_t physical = m_disk->getGeometry().totalSize() / m_bytesPerSector;
+        if (physical > 0 && m_totalSectors > physical) {
+            m_bpbOversizedTotal = m_totalSectors;
+            m_totalSectors = static_cast<uint16_t>(physical);
+            m_bpbNeedsRepair = true;
         }
     }
 
@@ -531,6 +586,7 @@ std::vector<uint8_t> Human68kHandler::readFile(const std::string& filename) {
 bool Human68kHandler::writeFile(const std::string& filename,
                                const std::vector<uint8_t>& data,
                                const FileMetadata& metadata) {
+    repairOversizedBpb();
     // Delete existing file if present
     deleteFile(filename);
 
@@ -612,6 +668,7 @@ bool Human68kHandler::writeFile(const std::string& filename,
 }
 
 bool Human68kHandler::deleteFile(const std::string& filename) {
+    repairOversizedBpb();
     auto entries = readRootDirectory();
     int idx = findDirectoryEntry(entries, filename);
 
@@ -642,6 +699,7 @@ bool Human68kHandler::deleteFile(const std::string& filename) {
 }
 
 bool Human68kHandler::renameFile(const std::string& oldName, const std::string& newName) {
+    repairOversizedBpb();
     // Find last path separator (handles mixed / and \ separators)
     auto findLastSeparator = [](const std::string& path) -> size_t {
         size_t fwd = path.rfind('/');
@@ -896,6 +954,7 @@ Human68kHandler::ClusterInfo Human68kHandler::getClusterInfo() const {
 //=============================================================================
 
 bool Human68kHandler::createDirectory(const std::string& path) {
+    repairOversizedBpb();
     // Find parent directory
     size_t lastSlash = path.rfind('/');
     if (lastSlash == std::string::npos) {
@@ -990,6 +1049,7 @@ bool Human68kHandler::createDirectory(const std::string& path) {
 }
 
 bool Human68kHandler::deleteDirectory(const std::string& path) {
+    repairOversizedBpb();
     auto [cluster, name] = resolvePath(path);
     if (cluster == 0) {
         return false;  // Directory not found

@@ -8,9 +8,11 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 - **File operations**: List, extract, add, delete, and rename files
 - **Subdirectory support**: Full subdirectory operations for ProDOS, MSX-DOS, Human68k, and HFS
 - **Format conversion**: Convert between compatible disk formats (incl. `mac_img ↔ mac_dc42`)
-- **XSA compression**: Compress/decompress MSX disk images (LZ77 + Huffman, ~99% compression)
-- **Macintosh forks**: AppleDouble v2 (`._<basename>` sidecar) and MacBinary v1 export preserves resource forks + Finder info
+- **XSA compression**: Compress/decompress MSX disk images (LZ77 + Huffman; an empty 720 KB disk becomes about 9 KB)
+- **Macintosh forks**: AppleDouble v2 (`._<basename>` sidecar) and MacBinary v1 import (`add`) and export (`extract`) keep resource forks + Finder info
 - **Disk creation**: Create new formatted disk images (incl. empty 800K / 1440K HFS and 400K MFS volumes)
+- **Apple II nibble / bit images**: NIB, NB2 and WOZ read and write (DOS 3.3 RWTS-compatible encoding); 13-sector DOS 3.2 disks read-only
+- **Apple II 3.5" 800K ProDOS**: 1600-block `.po` (`800po`) and `.2mg` (`800mg`) images — read, write, create, convert between the two
 - **Boot disk protection**: Multi-condition policy guards System / Finder files on bootable Macintosh / Apple II / MSX / X68000 disks
 - **Validation**: Verify disk image integrity (incl. DC42 ROR32+BE16 checksum)
 - **Sector dump**: Raw sector/track data inspection
@@ -24,7 +26,37 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 | DOS Order | .do, .dsk | Standard DOS 3.3 sector order |
 | ProDOS Order | .po | ProDOS sector order |
 | Nibble | .nib | Raw nibblized format (6656 bytes/track) |
-| WOZ | .woz | WOZ v1/v2 flux-level format |
+| Nibble 6384 | .nb2 | Same as `.nib` with 6384 bytes/track |
+| WOZ | .woz | WOZ v1/v2 bitstream format (reads both; new images are always written as WOZ2) |
+| DOS 3.2 (13-sector) | .d13 | 35 × 13 × 256 sector image in physical order (116,480 bytes) |
+| ProDOS 800K (`800po`) | .po | 3.5" disk: 1600 × 512-byte blocks in block order (819,200 bytes) |
+| ProDOS 800K 2MG (`800mg`) | .2mg | The same 1600 blocks after a 64-byte 2MG header |
+
+Sector numbers: `.do`/`.dsk`/`.nib`/`.nb2`/`.woz` use DOS 3.3 logical sector numbers, `.po` uses
+ProDOS logical sector numbers, 13-sector disks (`.d13` and 13-sector NIB/WOZ) use physical
+sector numbers. `convert` moves every sector to the same physical sector.
+
+13-sector (DOS 3.2) disks are **read-only**: `.nib`/`.nb2`/`.woz` tracks with `D5 AA B5`
+address fields (5-and-3 data) and `.d13` images are detected automatically, and
+`info`, `list`, `extract`, `validate` work (file system "DOS 3.2"). `add`/`delete`/`rename`
+are refused and leave the image unchanged. They convert only to `.d13` (`-f d13`), and `.d13`
+only holds 13-sector disks; 13-sector NIB/WOZ images are never written.
+
+**800K (3.5") images** hold ProDOS only and are a different medium from both the 5.25"
+images and Macintosh 800K disks:
+- They are recognised **only by name and size**: `.po` of exactly 819,200 bytes is `800po`
+  (any other `.po` is the 140K layout), `.2mg` with a `2IMG` header is `800mg`. A raw
+  819,200-byte `.img`/`.dsk` is never opened as Apple II (ProDOS block 2 and the Macintosh
+  MDB share offset `$400`).
+- Sector commands (`dump`) address block *b* as track `b / 20`, side `(b % 20) / 10`,
+  sector `b % 10` (80 × 2 × 10 × 512, numbered from 0). This is only a numbering of the
+  blocks, not the physical 3.5" GCR layout.
+- 2MG header (layout as read by MAME and AppleWin): only format 1 (ProDOS order) with 1600
+  blocks is accepted; DOS order, nibble data, other block counts, a header size other than
+  64, version > 1 or ranges outside the file are refused with the reason. Data length 0
+  means 1600 × 512. Changing files rewrites only the data range, so the header, comment,
+  creator data and any trailing bytes stay byte-identical. Flags bit 31 (locked) makes the
+  image write-protected. New `.2mg` files get creator `RDET`.
 
 ### MSX
 | Format | Extension | Description |
@@ -48,19 +80,21 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 |--------|-----------|-------------|
 | Raw Image | .img, .dsk | Raw 512-byte-sector stream (400K / 720K / 800K / 1.44M) |
 | Apple Disk Copy 4.2 | .image, .dc42 | 0x54-byte header + raw payload + optional tag bytes, validated by data/tag ROR32+BE16 checksum |
+| Applesauce MOOF | .moof | Bitstream image (GCR 400K/800K, MFM 1.44M); files inside are **read-only** — convert to `mac_img` to modify |
 
-> **Note**: Both HFS and MFS are detected automatically by the MDB signature at sector 2. Bidirectional `mac_img ↔ mac_dc42` conversion is supported via the `convert` command. `mac_dc42` cannot be created from scratch — make a `mac_img` first, then convert.
+> **Note**: Both HFS and MFS are detected automatically by the MDB signature at sector 2. `mac_img`, `mac_dc42` and `mac_moof` convert to each other in every direction. `mac_dc42` cannot be created from scratch — make a `mac_img` first, then convert.
 
 ## Supported File Systems
 
 | File System | Platform | Subdirectories | Notes |
 |-------------|----------|----------------|-------|
 | DOS 3.3 | Apple II | No | VTOC-based allocation, 140KB max |
-| ProDOS | Apple II | Yes | Block-based allocation, up to 32MB |
+| DOS 3.2 | Apple II | No | 13 sectors/track; **read-only** (`info`/`list`/`extract`/`validate`) |
+| ProDOS | Apple II | Yes | Block-based allocation; 140 KB 5.25" images (280 blocks) and 800 KB 3.5" images (1600 blocks) |
 | MSX-DOS | MSX | Yes | FAT12, MSX-DOS 1/2 compatible |
 | Human68k | X68000 | Yes | FAT12-based, 1024-byte sectors, 8.3 filenames |
 | HFS | Macintosh | Yes | Hierarchical File System: catalog B-tree (auto leaf-split), extents overflow read, 800K / 1440K format, mkdir/rmdir/rename incl. resource-fork preservation |
-| MFS | Macintosh | No | Flat directory + 12-bit allocation map; full read/write/format on 400K floppies (800K MFS read-only — exceeds the 12-bit map for `create`) |
+| MFS | Macintosh | No | Flat directory + 12-bit allocation map; full read/write/format on 400K floppies (`create` cannot make 800K MFS — 792 allocation blocks exceed the 640-entry map) |
 
 ## Build & Installation
 
@@ -110,10 +144,13 @@ sudo cmake --build . --target uninstall
 
 | Option | Description |
 |--------|-------------|
-| `-DCMAKE_BUILD_TYPE=Release` | Release build with optimizations |
+| `-DCMAKE_BUILD_TYPE=Release` | Release build with optimizations (default when not set) |
 | `-DCMAKE_BUILD_TYPE=Debug` | Debug build with symbols |
-| `-DBUILD_TESTS=ON` | Build test suite |
 | `-DCMAKE_INSTALL_PREFIX=<path>` | Custom installation prefix |
+| `-DBUILD_TESTS=ON` | Register every `tests/test_*.sh` as a CTest test (run `ctest` in the build directory) |
+
+The tests are shell scripts in `tests/` and can also be run directly (they use
+`build/rdedisktool`, or `RDEDISKTOOL=<path>`); see `HOWTO_COMPILE.md`.
 
 ## Usage
 
@@ -161,6 +198,14 @@ rdedisktool add diskwork/bootdisk/msx/msxdos23.dsk ./PATCH.BIN PATCH.BIN
 rdedisktool --force-bootdisk add diskwork/bootdisk/msx/msxdos23.dsk ./PATCH.BIN PATCH.BIN
 ```
 
+A disk counts as a boot disk when **any** of these holds:
+- its root directory has one of the profile's system files — DOS 3.3: `INTBASIC`, `FPBASIC`,
+  `MASTER`, `BOOT13`; ProDOS: `PRODOS`, `BASIC.SYSTEM`, `QUIT.SYSTEM`; MSX-DOS: `MSXDOS2.SYS`,
+  `COMMAND2.COM`; Human68k: `HUMAN.SYS`, `COMMAND.X`, `CONFIG.SYS`, `AUTOEXEC.BAT`;
+  Macintosh: `LK` boot block **and** both `System` and `Finder` (root or `System Folder`)
+- the image path contains a `/bootdisk/` directory
+- `--bootdisk-profile` names a profile other than `unknown`
+
 Bootdisk mode behavior matrix:
 
 | Mode | `add` | `delete` / `mkdir` / `rmdir` / `rename` |
@@ -199,8 +244,11 @@ FAT Cluster Map:
 
 #### list - List files in disk image
 ```bash
-rdedisktool list <image_file> [path]
+rdedisktool list <image_file> [path] [-v]
 ```
+
+`-v` adds Macintosh file type, creator and Finder-flag columns (`MacTy Creat FFlg`) on
+Macintosh disks; it changes nothing on other platforms.
 
 Examples:
 ```bash
@@ -214,7 +262,7 @@ rdedisktool list mydisk.dsk GAMES
 rdedisktool list mydisk.dsk GAMES/RPG
 ```
 
-Output:
+Output (MSX-DOS disk; Attr shows FAT attributes `R`/`H`/`S`):
 ```
 Directory listing for: mydisk.dsk
 Volume: MYDISK
@@ -230,10 +278,22 @@ README.TXT                           512  FILE
 Free space: 358400 bytes
 ```
 
+On Apple II disks the Type column shows the file type as the disk's own catalog does —
+DOS 3.3/3.2 `T` `I` `A` `B` `S` `R` (`a` / `b` for types `$20` / `$40`, which DOS itself
+shows as `A` / `B`), ProDOS `TXT` `BIN` `SYS` `BAS` … or `$xx` for unnamed types, `DIR` for
+directories — and Attr shows `L` for a locked file (DOS: type bit 7; ProDOS: write bit off,
+as `CAT` marks it `*`).
+
 #### extract - Extract files from disk image
 ```bash
-rdedisktool extract <image_file> <file> [output_path]
+rdedisktool extract [--raw] <image_file> <file> [output_path]
+rdedisktool extract <image_file> <file> --apple-double|--macbinary <output_path>   # Macintosh
 ```
+
+On DOS 3.3 disks the output is the file body: B files without their 4-byte
+address/length header, A/I files without their 2-byte length, T files up to the
+first `$00`, other types as all data sectors. `--raw` writes the file exactly as
+stored (headers and whole sectors).
 
 Examples:
 ```bash
@@ -256,12 +316,30 @@ rdedisktool add [options] <image_file> <host_file> [target_name]
 |--------|-------------|
 | `-f, --force` | Overwrite existing file without prompting |
 | `-t, --type <type>` | File type for Apple II disks (see tables below) |
-| `-a, --addr <addr>` | Load address for binary files (hex: 0x0803 or $0803) |
+| `-a, --addr <addr>` | Load address for binary files (hex: `0x0803` or `'$0803'` — quote `$` values in the shell) |
+| `--raw` | DOS 3.3: the host file already holds the DOS file bytes (B/A/I header included) |
+
+**DOS 3.3 free-sector bitmap:** the standard VTOC layout is used (track entry byte 0
+bit k = sector 8+k, byte 1 bit k = sector k). Versions before 2026-10 reversed the
+bits inside each byte, so on a partially used track they could hand out sectors in
+use, and real DOS could later overwrite their files. Before an add, sectors in use by
+the catalog or a file that the bitmap shows free are marked used, with a warning
+("N sector(s) in use were marked free ... marked them used"); `validate` reports them.
+
+**DOS 3.3 disks:** the host file is the file body. B files get the DOS header
+(load address, length) — without `--addr` the address is `$2000` and a warning is
+printed; A/I files get the 2-byte length. Without `--type` the file is added as B.
+Text (T) files are stored as given; DOS reads a sequential text file only up to its
+first `$00`.
 
 The `--type` option accepts three formats:
 - **DOS 3.3 single-character codes**: `T`, `I`, `A`, `B`, `S`, `R`
 - **ProDOS type names**: `SYS`, `BIN`, `TXT`, `BAS`, `CMD`, `INT`, `REL`
-- **Hex values**: `0xFF` or `$FF` (any ProDOS file type code)
+- **Hex values**: `0xFF` or `$FF` — the type code of the target file system (ProDOS: any
+  code, e.g. `$04` = TXT; DOS 3.3: `$00 $01 $02 $04 $08 $10 $20 $40`)
+
+On DOS 3.3 disks the ProDOS names `TXT`, `INT`, `BAS`, `BIN`, `REL` map to `T`, `I`, `A`,
+`B`, `R`; `SYS` and `CMD` are rejected.
 
 **DOS 3.3 File Types:**
 | Type | Code | Description |
@@ -292,6 +370,8 @@ The `--type` option accepts three formats:
 > | A (0x02) | BAS | 0xFC |
 > | B (0x04) | BIN | 0x06 |
 > | R (0x10) | REL | 0xFE |
+>
+> `S` has no ProDOS equivalent and is rejected on ProDOS disks.
 
 Examples:
 ```bash
@@ -311,7 +391,7 @@ rdedisktool add --force mydisk.dsk ./updated.com GAME.COM
 rdedisktool add disk.do ./HELLO.BIN HELLO --type B --addr 0x0803
 
 # Add binary at hi-res graphics page 2
-rdedisktool add disk.do ./PICTURE.BIN MYPIC -t B -a $4000
+rdedisktool add disk.do ./PICTURE.BIN MYPIC -t B -a 0x4000
 
 # Add Applesoft BASIC program
 rdedisktool add disk.do ./HELLO.BAS HELLO --type A
@@ -344,7 +424,7 @@ Bootdisk safety on delete:
 - If the target is a boot-critical system file, `rdedisktool` asks `yes/no` before deletion.
 - `--force-system-file` skips the prompt and deletes immediately (no extra confirmation step).
 
-#### mkdir - Create directory (ProDOS, MSX-DOS, Human68k)
+#### mkdir - Create directory (ProDOS, MSX-DOS, Human68k, HFS)
 ```bash
 rdedisktool mkdir <image_file> <directory> [-f <format>]
 ```
@@ -362,7 +442,7 @@ rdedisktool mkdir mydisk.dsk GAMES
 rdedisktool mkdir mydisk.dsk GAMES/RPG
 ```
 
-#### rmdir - Remove directory (ProDOS, MSX-DOS, Human68k)
+#### rmdir - Remove directory (ProDOS, MSX-DOS, Human68k, HFS)
 ```bash
 rdedisktool rmdir <image_file> <directory> [-f <format>]
 ```
@@ -410,18 +490,18 @@ rdedisktool create <file> -f <format> [--fs <filesystem>] [-n <volume>] [-g <geo
 | Option | Description |
 |--------|-------------|
 | `-f, --format <fmt>` | Disk format (required if not detectable from extension) |
-| `--fs, --filesystem <fs>` | Initialize with filesystem: dos33, prodos, msxdos, fat12, human68k |
-| `-n, --volume <name>` | Volume name (optional, ignored for DOS 3.3) |
+| `--fs, --filesystem <fs>` | Initialize with filesystem: dos33, prodos, msxdos, fat12, human68k, hfs, mfs |
+| `-n, --volume <name>` | Volume name (optional, ignored for DOS 3.3; ProDOS: 1-15 of A-Z, 0-9, `.`, starting with a letter — lower case is stored as upper case, anything else is refused; default `BLANK`) |
 | `-g, --geometry <spec>` | Custom geometry: tracks:sides:sectors:bytes |
 | `--force` | Overwrite existing file |
 
 **Supported disk formats:**
 | Platform | Formats |
 |----------|---------|
-| Apple II | do, po, nib, nb2, woz, woz1, woz2 |
+| Apple II | do, po, nib, nb2, woz (`woz1` is written as WOZ2 with a warning), d13 (blank, no file system), 800po (`*.po` only), 800mg (`*.2mg` only) |
 | MSX | msxdsk, dmk |
 | X68000 | xdf, dim |
-| Macintosh | mac_img |
+| Macintosh | mac_img, mac_moof (`mac_dc42` cannot be created — convert from `mac_img`) |
 
 Examples:
 ```bash
@@ -449,8 +529,13 @@ rdedisktool create mac.img -f mac_img --fs hfs -n V -g 80:2:10:512
 # Create Macintosh MFS volume (400K floppy)
 rdedisktool create mfs.img -f mac_img --fs mfs -n V -g 80:1:10:512
 
-# Create disk with custom geometry
-rdedisktool create custom.do -f do -g 40:1:16:256
+# Create Apple II 3.5" 800K ProDOS volume (raw .po or .2mg; ProDOS only)
+rdedisktool create big.po  -f 800po --fs prodos -n BIGDISK
+rdedisktool create big.2mg -f 800mg --fs prodos -n BIGDISK
+
+# 5.25" Apple II images are always 35 tracks x 1 side x 16 sectors x 256 bytes (DO also
+# 13 sectors for DOS 3.2), 800K images 80:2:10:512; any other -g is refused before a
+# file is written.
 
 # Create blank disk (no filesystem)
 rdedisktool create blank.po -f po
@@ -487,12 +572,34 @@ rdedisktool convert <input_file> <output_file> [-f <format>]
 
 | Option | Description |
 |--------|-------------|
-| `-f, --format <fmt>` | Output format (auto-detected from extension if not specified) |
+| `-f, --format <fmt>` | Output format (auto-detected from extension if not specified). Any case; the names of `create` plus the aliases `dsk`, `dos`, `prodos`, `nibble`, `nibble2`. An unknown value is an error |
+
+Apple II 800K: `800po` and `800mg` convert only to each other (`.po` ⇄ `.2mg`, data
+byte-identical); 5.25" and Macintosh formats are refused. A `.po` output name with an 800K
+input means `800po`. The output must be named `*.po` for `800po` and `*.2mg` for `800mg`
+(also for `create`) — other names would not be opened as that format again. A new `.2mg`
+gets a fresh header; when the input `.2mg` has a comment, creator data or the lock flag,
+a warning says they are not carried over.
+
+Apple II: sectors are moved by physical position between DOS-order (`.do`/`.nib`/`.nb2`/`.woz`)
+and ProDOS-order (`.po`) images. 13-sector disks convert only to `.d13`, and `.d13` only
+accepts 13-sector disks. If a sector cannot be read (for example an
+unformatted WOZ track), the image is still written, every missing sector is listed
+as a warning, and the exit code is **2**. Sectors are read with the same checks as
+DOS 3.3 RWTS (address/data epilogue `DE AA`, checksums); a sector whose address bytes
+miss a fixed 4-and-4 bit is still read (as DOS does) and reported as a warning.
+
+On every platform, a sector that cannot be copied is reported as a warning and the
+exit code is **2** (the output image is still written).
 
 Examples:
 ```bash
 # Convert Apple II DOS to ProDOS order
 rdedisktool convert game.do game.po -f po
+
+# Wrap an Apple II 800K .po in a 2MG container, and back
+rdedisktool convert big.po big.2mg
+rdedisktool convert big.2mg big.po
 
 # Compress MSX DSK to XSA (format auto-detected from extension)
 rdedisktool convert game.dsk game.xsa
@@ -510,19 +617,21 @@ rdedisktool convert mac.img mac.image -f mac_dc42
 rdedisktool convert mac.image mac.img -f mac_img
 ```
 
-**Supported format conversions:**
-| From | To | Notes |
-|------|-----|-------|
-| DSK | XSA | Compresses ~99% |
-| DMK | XSA | Compresses ~99% |
-| XSA | DSK | Decompresses to raw |
-| XSA | DMK | Decompresses to DMK |
-| DSK | DMK | Sector to DMK |
-| DMK | DSK | DMK to sector |
-| DO | PO | Apple II order swap |
-| PO | DO | Apple II order swap |
-| mac_img | mac_dc42 | Wrap with fresh DC42 header (ROR32+BE16 checksum) |
-| mac_dc42 | mac_img | Strip DC42 header + tag bytes |
+**Supported format conversions** (within one platform only):
+| Platform | Formats | Notes |
+|----------|---------|-------|
+| Apple II | do, po, nib, nb2, woz | Any direction; sectors keep their physical position |
+| Apple II | 13-sector nib/nb2/woz/d13 → d13 | DOS 3.2 disks; no other target |
+| Apple II | 800po, 800mg | 3.5" 800K only, either direction; no other target |
+| MSX | msxdsk, dmk, xsa | Any direction; XSA output is compressed |
+| X68000 | xdf, dim | 2HD both ways, byte for byte |
+| Macintosh | mac_img, mac_dc42, mac_moof | Any direction; `mac_dc42` output gets a fresh header and checksums |
+
+#### list-formats - List registered disk image formats
+```bash
+rdedisktool list-formats
+```
+Prints every format name with its extensions and display name (tab-separated).
 
 #### validate - Validate disk image integrity
 ```bash
@@ -538,8 +647,12 @@ rdedisktool validate corrupted.po
 **Validation checks:**
 - Disk image structure integrity
 - File system metadata consistency
-- Sector/block allocation verification
+- Sector/block allocation verification (DOS 3.3: every sector used by the catalog or a
+  file must be marked used in the VTOC bitmap)
 - Boot block integrity (ProDOS)
+- Human68k: the BPB total sector count must fit the image
+
+The exit code is non-zero when errors are found.
 
 #### dump - Dump sector/track data
 ```bash
@@ -549,7 +662,7 @@ rdedisktool dump <image_file> -t <track> -s <sector> [--side <n>] [-f <format>]
 | Option | Description |
 |--------|-------------|
 | `-t, --track <n>` | Track number (0-based, required) |
-| `-s, --sector <n>` | Sector number (0-based, required) |
+| `-s, --sector <n>` | Sector number (required; 0-based, X68000 1-8) |
 | `--side <n>` | Side number (0-based, default: 0) |
 | `-f, --format <fmt>` | Disk format (auto-detected if not specified) |
 
@@ -628,7 +741,10 @@ Project-root scripts for bootdisk copy -> file add -> emulator boot:
 Notes:
 - Each script uses a single emulated drive for bootdisk file-control verification.
 - DOS 3.3 diskaddtest includes a pre-step that removes non-essential files from the copied bootdisk before add tests.
-- Current status: all four scripts pass boot smoke (`4/4`).
+- Last recorded run: 2026-02-24, all four passed (`TESTCASE.md` scenario 12).
+
+Apple II NIB/NB2/WOZ images can also be checked against real DOS 3.3 / ProDOS in an isolated
+AppleWin (sa2) — see `tests/emu/README.md`.
 
 ## Examples
 
@@ -678,6 +794,11 @@ rdedisktool rmdir x68k.xdf GAMES  # (must be empty)
 
 > **Note**: X68000 uses 8.3 filename format. Long filenames will be truncated (e.g., `test_file.txt` becomes `TEST_FIL.TXT`).
 
+> **Geometry**: a 2HD disk is 77 cylinders x 2 heads x 8 sectors (numbered 1-8) x 1024 bytes
+> (1,232 sectors). `dump -t` takes the cylinder and `--side` the head. Disks formatted by
+> rdedisktool before 2026-10 have a BPB that claims 2,464 sectors: rdedisktool warns, uses the
+> real size, and writes the correct count into the BPB on the next change (`add`, `delete`, …).
+
 ### Working with XSA Compressed Disks
 
 XSA is a compressed disk image format that significantly reduces file size while maintaining full compatibility. **XSA images are read-only** - you can view and extract files, but cannot modify them directly.
@@ -692,7 +813,7 @@ rdedisktool list game.xsa
 # Extract a file from XSA disk
 rdedisktool extract game.xsa GAME.COM ./game.com
 
-# Compress DSK to XSA (typically achieves 98%+ compression)
+# Compress DSK to XSA
 rdedisktool convert game.dsk game.xsa
 
 # Compress DMK to XSA
@@ -707,14 +828,13 @@ rdedisktool convert game.xsa game.dmk -f dmk
 
 > **Modifying XSA contents**: To modify files in an XSA image, first decompress to DSK or DMK, make your changes, then re-compress to XSA.
 
-**Typical compression results:**
-| Original | Compressed | Ratio |
-|----------|------------|-------|
-| 720KB DSK | ~8KB XSA | ~99% |
-| 360KB DSK | ~4KB XSA | ~99% |
-| 1MB DMK | ~9KB XSA | ~99% |
+**Measured examples** (rdedisktool 2026-10):
+| Original | XSA size |
+|----------|----------|
+| Empty 720 KB MSX-DOS DSK | 8,810 bytes |
+| Same disk with one 3,000-byte random file | 12,159 bytes |
 
-> **Note**: Compression ratio depends on disk content. Empty or repetitive data compresses extremely well.
+> **Note**: Compression depends on disk content. Empty or repetitive data compresses extremely well; disks full of programs or compressed data shrink far less.
 
 ### Working with Apple II Disks
 
@@ -728,7 +848,7 @@ rdedisktool list appleii.do
 # Extract Applesoft BASIC program
 rdedisktool extract appleii.do HELLO hello.bas
 
-# Add binary file (default type)
+# Add binary file (default type B; load address $2000 unless --addr is given)
 rdedisktool add appleii.do ./newprog.bin NEWPROG
 ```
 
@@ -741,7 +861,7 @@ DOS 3.3 binary files require a load address to execute properly with `BRUN`. The
 rdedisktool add disk.do ./HELLO.BIN HELLO --type B --addr 0x0803
 
 # Add binary file at $4000 (common for hi-res graphics)
-rdedisktool add disk.do ./PICTURE.BIN MYPIC -t B -a $4000
+rdedisktool add disk.do ./PICTURE.BIN MYPIC -t B -a 0x4000
 
 # Add binary file at $6000 (alternative address)
 rdedisktool add disk.do ./GAME.BIN GAME --type B --addr 0x6000
@@ -769,7 +889,7 @@ rdedisktool add disk.po ./README.TXT README --type TXT
 
 # Using hex type code for any ProDOS file type
 rdedisktool add disk.po ./DATA DATA --type 0x06 --addr 0x4000
-rdedisktool add disk.po ./DATA DATA --type $06 --addr $4000
+rdedisktool add disk.po ./DATA DATA --type '$06' --addr '$4000'   # quote $ in the shell
 
 # DOS 3.3 codes also work on ProDOS disks (auto-converted)
 rdedisktool add disk.po ./HELLO HELLO --type B --addr 0x0803
@@ -783,9 +903,13 @@ rdedisktool add disk.po ./HELLO HELLO --type B --addr 0x0803
 | $2000 | Hi-res graphics page 1 |
 | $4000 | Hi-res graphics page 2 |
 | $6000 | Common program area |
-| $9600 | RWTS buffer area |
 
-> **Note**: When `--addr` is specified for binary files (type B), a 4-byte header (load address + length) is automatically prepended to the file data. If the file already contains a valid DOS 3.3 header, it will not be added again.
+> Under 48K DOS 3.3, HIMEM is `$9600` (DOS and its buffers sit above it), so do not load
+> programs at `$9600` or higher.
+
+> **Note**: On DOS 3.3 disks the host file is always treated as the file body: B files get the
+> 4-byte header (load address + length) and A/I files the 2-byte length, even if the host file
+> already starts with such a header. To store a file that already holds the DOS bytes, use `--raw`.
 
 ### Working with Subdirectories
 
@@ -951,10 +1075,13 @@ rdedisktool convert mac.img   mac.dc42 -f mac_dc42   # raw → DC42 (re-checksum
 - 8.3 filename format (8 characters name + 3 characters extension)
 
 ### Apple DOS 3.3 Structure
-- Track 0: DOS boot code
+- Tracks 0-2: DOS image on a bootable disk (`create --fs dos33` writes no DOS; it keeps track 0
+  and track 17 for the system and gives tracks 1-2 to files)
 - Track 17, Sector 0: VTOC (Volume Table of Contents)
 - Track 17, Sectors 15-1: Catalog (directory)
 - Each file has a Track/Sector list
+- VTOC free-sector bitmap: 4 bytes per track from offset `$38`; byte 0 bit k = sector 8+k,
+  byte 1 bit k = sector k (1 = free)
 
 #### DOS 3.3 File Types
 
@@ -973,14 +1100,15 @@ rdedisktool convert mac.img   mac.dc42 -f mac_dc42   # raw → DC42 (re-checksum
 
 #### DOS 3.3 Binary File Format
 
-Binary files (type B), Applesoft (type A), and Integer BASIC (type I) files include a 4-byte header:
+Binary files (type B) start with a 4-byte header; Applesoft (type A) and Integer BASIC
+(type I) files start with a 2-byte length only:
 
 ```
-Offset  Size  Description
-------  ----  -----------
-0       2     Load address (little-endian)
-2       2     File length (little-endian)
-4       n     Actual program data
+B:  Offset 0  2 bytes  Load address (little-endian)
+    Offset 2  2 bytes  File length (little-endian)
+    Offset 4  n bytes  Program data
+A/I: Offset 0 2 bytes  Program length (little-endian)
+     Offset 2 n bytes  Program
 ```
 
 **Example**: A 59-byte program at $0803:
@@ -990,18 +1118,24 @@ Offset  Size  Description
 [59 bytes of program data]
 ```
 
-This header is automatically added when using `--addr` with the `add` command. DOS 3.3 uses this information when executing `BRUN` or `BLOAD` commands.
+`add` writes this header (address `$2000` with a warning when `--addr` is not given);
+`extract` removes it unless `--raw` is used. DOS 3.3 uses it for `BLOAD` / `BRUN`.
 
 ### Apple ProDOS Structure
-- Block-based (512 bytes per block, 280 blocks on 140KB disk)
-- Blocks 0-1: Boot blocks
-- Block 2+: Volume directory (key block)
-- Block 6: Volume bitmap (block allocation)
-- Subdirectory support with linked directory blocks
+- Block-based (512 bytes per block; 280 blocks on a 140KB disk, 1600 on an 800KB disk)
+- Blocks 0-1: Boot blocks (boot-disk `add` guards exactly these 1024 bytes: 256-byte
+  sectors 0-3 on 5.25" images, 512-byte sectors 0-1 on 800K)
+- Blocks 2-5: Volume directory (key block 2)
+- Block 6: Volume bitmap (one block per 4096 blocks; bit = 1 means free)
+- Subdirectory support with linked directory blocks. A subdirectory header's
+  `parent_pointer` is the directory block that holds its entry and
+  `parent_entry_number` is that entry's slot in the block + 1 (the header is entry 1)
 - Three storage types for files:
   - **Seedling**: Files ≤ 512 bytes (1 data block)
   - **Sapling**: Files ≤ 128KB (1 index block + up to 256 data blocks)
   - **Tree**: Files ≤ 16MB (1 master index + 256 index blocks)
+  - Index blocks hold pointer low bytes in bytes 0-255 and high bytes in 256-511;
+    a zero pointer is an unallocated (sparse) block and reads as 512 zero bytes
 
 ### Deleted File Markers
 
@@ -1095,14 +1229,18 @@ XSA (eXtendable Storage Archive) is a compressed disk image format developed by 
 - Huffman tree rebuilt every 127 distance codes
 - Bit-level encoding for optimal compression
 
-**Length Encoding:**
+**Length Encoding** (as decoded by `XSAExtractor::rdStrLen`; `x` = value bits):
 | Bits | Length |
 |------|--------|
-| 0 | 2 |
-| 10 | 3 |
-| 110 | 4 |
-| 111... | 5-254 (variable) |
-| 1111110 | 255 (EOF marker) |
+| `0` | 2 |
+| `10` | 3 |
+| `110` | 4 |
+| `111 0 xx` | 5-8 |
+| `1111 0 xxx` | 9-16 |
+| `11111 0 xxxx` | 17-32 |
+| `111111 0 xxxxx` | 33-64 |
+| `1111111 0 xxxxxx` | 65-128 |
+| `11111111 xxxxxxx` | 129-254, 255 = end marker (`111111111111110`) |
 
 **Supported Operations:**
 - Read: Full support (automatic decompression on load)
@@ -1126,14 +1264,16 @@ XSA (eXtendable Storage Archive) is a compressed disk image format developed by 
 
 **Applesauce MOOF (`mac_moof`)**:
 - Bitstream / flux Macintosh floppy image — the format Applesauce hardware
-  emits and the snow emulator reads/writes. Full read+write support for
-  GCR (400K single-sided / 800K double-sided) and MFM (1.44M IBM PC
-  standard) variants. Flux tracks (FLUX chunk) are not currently
-  decoded — pure bitstream MOOFs only.
-- Auto-detected by the 8-byte magic `MOOF\xff\x0a\x0d\x0a` + CRC32-
-  ISO-HDLC over the chunk stream.
+  emits and the snow emulator reads/writes. GCR (400K single-sided / 800K
+  double-sided) and MFM (1.44M IBM PC standard) tracks are decoded on load and
+  encoded on `convert` / `create`. Flux tracks (FLUX chunk) are not decoded —
+  pure bitstream MOOFs only.
+- A loaded MOOF is **write-protected**: `add` / `delete` / `rename` / `mkdir` are refused.
+  Convert to `mac_img`, modify, and convert back.
+- Auto-detected by the 8-byte magic `MOOF\xff\x0a\x0d\x0a`; the CRC32 (ISO-HDLC) over the
+  chunk stream is checked on load when the stored CRC is non-zero.
 - Bidirectional conversion with `mac_img` and `mac_dc42` via `convert`.
-  `create -f mac_moof` produces a blank GCR/MFM image.
+  `create -f mac_moof` produces a blank GCR/MFM image (`--fs hfs` formats it).
 
 > **Reference**: The MOOF chunk loader, the GCR 6-and-2 sector encoder,
 > and the MFM bit-window / sync-marker / CRC16-CCITT constants were
@@ -1156,8 +1296,9 @@ XSA (eXtendable Storage Archive) is a compressed disk image format developed by 
   splits the leaf automatically on write when full (depth 1→2 root
   promotion is supported; cascading index split is deferred).
 - **Extents Overflow B-tree** for files whose forks exceed 3 initial
-  extents: read-only at the moment (write is deferred — needs a
-  fragmented fixture for cross-tool verification).
+  extents: read only. `create` writes an empty tree; writes that would need
+  overflow extents are not implemented (deferred — needs a fragmented
+  fixture for cross-tool verification).
 - **Boot block** (sectors 0..1, 1024 bytes total): `LK` signature +
   Pascal name fields (System / Finder / Macsbug / etc.) + boot loader
   code starting at 0x08a. `rdedisktool create --fs hfs` writes a
@@ -1172,12 +1313,10 @@ XSA (eXtendable Storage Archive) is a compressed disk image format developed by 
 - Older flat-directory file system (no subdirectories) used on the
   earliest Macintosh floppies.
 - MDB at offset 0x400 with a **12-bit allocation map** packed into the
-  bytes immediately after the MDB header. The 12-bit map is the reason
-  `rdedisktool create` only supports 400K MFS — 800K @ 512-byte alloc
-  blocks exceeds the map's 640-entry capacity.
+  bytes immediately after the MDB header (640 entries). `create` uses
+  1024-byte allocation blocks, so 400K fits and 800K (792 blocks) is
+  refused.
 - Directory entries live in a fixed-size run after the allocation map.
-- Format byte-for-byte parity with Python `mfs-init-empty` (verified
-  via `cmp` in CI).
 
 ### Macintosh Boot Disk Policy
 
@@ -1187,8 +1326,10 @@ A volume is treated as a "boot disk" when **all** of:
 2. Either root contains both `System` and `Finder` files, OR a `System
    Folder` subdirectory contains them
 
-In strict mode (`--bootdisk-mode strict`, default), deletes / overwrites
-of those files are blocked. Use `--force-system-file` to override.
+In strict mode (`--bootdisk-mode strict`, default) every delete / mkdir /
+rmdir / rename on a boot disk is blocked unless `--force-bootdisk` is given,
+and `add` may not change existing files. Deleting `System` or `Finder` then
+still asks `[y/N]`; `--force-system-file` skips only that question.
 
 ## License
 

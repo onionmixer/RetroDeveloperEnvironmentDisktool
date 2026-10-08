@@ -45,6 +45,9 @@ set(APPLE_SOURCES
     src/apple/AppleNibImage.cpp
     src/apple/AppleWozImage.cpp
     src/apple/NibbleEncoder.cpp
+    src/apple/AppleD13Image.cpp
+    src/apple/AppleProDOS800Image.cpp
+    src/apple/AppleProDOS800MGImage.cpp
 )
 
 # MSX format sources

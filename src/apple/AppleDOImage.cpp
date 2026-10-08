@@ -90,6 +90,7 @@ void AppleDOImage::save(const std::filesystem::path& path) {
 }
 
 void AppleDOImage::create(const DiskGeometry& geometry) {
+    requireLoadableGeometry(geometry, true);  // DO also holds 13-sector disks
     size_t tracks = geometry.tracks > 0 ? geometry.tracks : TRACKS_35;
     size_t sectors = geometry.sectorsPerTrack > 0 ? geometry.sectorsPerTrack : SECTORS_16;
 
@@ -161,7 +162,7 @@ TrackBuffer AppleDOImage::readTrack(size_t track, size_t /*side*/) {
         throw SectorNotFoundException(static_cast<int>(track), 0);
     }
 
-    size_t offset = track * TRACK_SIZE;
+    size_t offset = track * m_geometry.sectorsPerTrack * BYTES_PER_SECTOR;
     size_t trackSize = m_geometry.sectorsPerTrack * BYTES_PER_SECTOR;
 
     return TrackBuffer(m_data.begin() + offset,
@@ -177,7 +178,7 @@ void AppleDOImage::writeTrack(size_t track, size_t /*side*/, const TrackBuffer& 
         throw SectorNotFoundException(static_cast<int>(track), 0);
     }
 
-    size_t offset = track * TRACK_SIZE;
+    size_t offset = track * m_geometry.sectorsPerTrack * BYTES_PER_SECTOR;
     size_t trackSize = m_geometry.sectorsPerTrack * BYTES_PER_SECTOR;
     size_t copySize = std::min(data.size(), trackSize);
 
@@ -210,6 +211,9 @@ bool AppleDOImage::canConvertTo(DiskFormat format) const {
         case DiskFormat::MacIMG:
         case DiskFormat::MacDC42:
         case DiskFormat::MacMOOF:
+        case DiskFormat::AppleD13:
+        case DiskFormat::Apple800PO:
+        case DiskFormat::Apple800MG:
             return false;
     }
     return false;
@@ -283,6 +287,9 @@ std::string AppleDOImage::getDiagnostics() const {
             break;
         case FileSystemType::ProDOS:
             oss << "ProDOS\n";
+            break;
+        case FileSystemType::DOS32:
+            oss << "DOS 3.2\n";
             break;
         case FileSystemType::Unknown:
         case FileSystemType::MSXDOS1:

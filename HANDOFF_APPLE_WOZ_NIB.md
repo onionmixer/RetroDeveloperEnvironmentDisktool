@@ -1,7 +1,7 @@
 # HANDOFF — rdedisktool Apple II WOZ(및 NIB) 지원 개선
 
 > 작성 2026-10-07 · 출처: sa2(AppleWin) IIc 지원 작업 중 발견(`DKFS_retro/prototype_20_AppleII/PLAN_99_A2_SA2_IIC.md` §11-9 참고)
-> 상태: **조사 완료 · 코드 무변경** · 이 문서만 보고 다음 세션이 이어서 작업할 수 있게 쓴다.
+> 상태: **완료(2026-10-07)** — 결과·원인 정정·동작 변경은 맨 아래 §7. 아래 §0–§6 은 조사 당시 기록(원문 유지).
 
 ## 0. 한 장 요약
 
@@ -76,3 +76,58 @@ $T convert dos33.dsk x.nib -f nib ; $T convert x.nib rtn.dsk -f do              
 - 상용 디스크 이미지(Drelbs 등)는 **저장소에 넣지 않는다**(사용자 제공 · 스크래치 전용).
 - 커밋은 요청이 있을 때만 · 공유 인덱스라 `git commit --only`.
 - 계획 → codex 교차검토(코딩 전) → 전건 재검증 → 구현 → 위 검증 표 순서.
+
+## 7. 결과 (2026-10-07 · 같은 날 후속 세션)
+
+> 상세 계획·측정·codex 판정표는 로컬 작업 문서 `PLAN_APPLE_WOZ_NIB.md` · `PLAN_APPLE_DOS33_FILES.md`(`.gitignore` 의 `PLAN_*` — 저장소 밖).
+
+### 7-1. 실제 원인(§0 의 가설 정정)
+| §0 가설 | 결과 |
+|---|---|
+| 6-and-2 인코딩/디코딩 결함 | **인코더만** 틀림 — XOR 체인 역방향(체크섬이 항상 통과해 조용히 쓰레기). 디코더는 정상(올바른 NIB 560/560 판독) |
+| (가설에 없음) | **주소장 섹터 번호** = DOS 논리 번호를 기록(정답 = 물리 0..15 순차 — 실디스크 2 종 측정) · NIB/WOZ `readSector` 번호 의미 불일치 |
+| 10 비트 자기동기 없음 → 부팅 실패 | **sa2 부팅 실패의 원인이 아님** — 8 비트 동기 WOZ(회전 포함)도 sa2 에서 정상 부팅. 인코더 결함만 되살린 WOZ = "Apple //e" 정지, 주소 번호 결함만 = 부팅 실패 ⇒ 두 결함이 원인. 10 비트 동기는 사양·실기 정합으로 반영 |
+| 정상 WOZ 가 "VOLUME 0 · 파일 없음" | 파일시스템 감지가 원시 파일 바이트를 읽던 것(+ 비트 단위 판독 없음) |
+
+### 7-2. 변경 요약
+- NIB/WOZ: RWTS 정본 6-and-2 인코더 · 물리 순서 트랙(갭 85/6/11 동기 · WOZ 50,034 비트) · 비트 단위(LSS) 판독 · 판독 실패 = 예외(0 채움 금지) · 16 섹터 모두 읽혀야 트랙 재구성 · INFO(creator 공백·호환 0·최대 트랙 계산)·TMAP 인접·WOZ1 레코드·FLUX 감지·TRKS 경계 검사.
+- 섹터 번호 의미: `.do/.dsk/.nib/.woz` = DOS 3.3 논리 · `.po` = ProDOS 논리. `convert` 는 물리 섹터 기준으로 옮김(기존 DO↔PO 원시 복사 결함 해소) · DOS 3.3 처리기는 `.po` 에서 번호 변환 · ProDOS 부트 보호는 블록 0/1 의 실제 섹터를 봄.
+- DOS 3.3 파일: 호스트 파일 = 본문(B 는 주소·길이 헤더 자동, A/I 는 길이) · `--raw` · 두 번째 이후 T/S 목록 +5..6 상대 섹터(수정 전 실제 DOS `BLOAD` 가 31,228 B 에서 어긋남) · 희소 파일 구멍 보존 · 형식 이름은 파일시스템별로 해석.
+
+### 7-3. 동작 변경(사용자 영향)
+- `convert` 가 Apple 형식 간 섹터를 재배열한다 — 예전 rdedisktool 이 DO→PO 를 원시 복사해 만든 'DOS 3.3 PO' 는 이제 다르게(바르게) 읽힌다.
+- Apple 대상 `convert` 에서 읽지 못한 섹터가 있으면 경고 목록 + **종료 코드 2**.
+- DOS 3.3 `extract` 는 B/A/I 헤더를 뺀 본문 · T 는 첫 `$00` 까지 · 그 밖 형식은 데이터 섹터 전부(`--raw` = 디스크의 파일 바이트 그대로). `add` 에 `--type` 이 없으면 B · 주소 없으면 `$2000` + 경고.
+- `--type` 16 진수는 대상 파일시스템의 코드 그대로(ProDOS `$04` = TXT · 예전엔 BIN) · ProDOS 에서 `S` 는 오류.
+- `-f woz`/`woz1` 출력은 항상 WOZ2(`woz1` 은 경고).
+
+### 7-4. 검증
+- 독립 python 판독기 `tests/tools/a2_nibref.py` — 실디스크(Applesauce 캡처 · sa2 DOS `INIT` 기록본) 니블을 바이트 단위로 재현(1102/1104 · 나머지 2 는 판독에 안 쓰이는 비트).
+- 새 시험: `test_apple_nib_woz_roundtrip.sh` · `test_apple_woz_read.sh` · `test_apple_convert_order.sh` · `test_apple_dos33_files.sh` · `test_bootdisk_guard_prodos_order.sh` · 기존 `test_bootdisk_guard_apple.sh` 는 add 결과를 판정하도록 수정(이전엔 `|| true` + 가득 찬 이미지라 ProDOS 검증이 실행되지 않았음). 결함을 하나씩 되살린 변이 빌드 26 종 전부 검출.
+- sa2 IIe Enhanced(네트워크 네임스페이스로 격리 실행): DOS 3.3 WOZ·NIB 부팅 → CATALOG 화면이 DSK 와 동일 · ProDOS 2.4.3 PO→WOZ·NIB 부팅 동일 · sa2 에서 DOS 가 쓴 WOZ·NIB 560 섹터 = 같은 조작의 DSK · 실제 DOS 가 쓴 파일 extract 일치 · rdedisktool 이 넣은 파일을 실제 DOS 가 `BLOAD`/`LOAD`+`LIST`/`READ` 로 정상 판독.
+
+### 7-4a. 후속(같은 날)
+- `.nb2`(트랙 6,384 니블) 지원 — 생성자 등록 · `create`/`convert`/파일시스템 처리기. sa2 에서 NB2 부팅 CATALOG = DSK · sa2 가 쓴 NB2 560 섹터 = DSK.
+- 판독 규칙을 실제 DOS 3.3 RWTS 와 일치시킴(sa2 실측): 주소·데이터 에필로그 `DE AA` 필수(어긋나면 그 섹터만 판독 불가) · **4-and-4 고정 비트는 판독 조건이 아님**(값·체크섬이 맞으면 실제 DOS 가 읽음 — 앞서 넣었던 고정 비트 검사는 실기보다 엄격해 제거) · 대신 고정 비트가 어긋난 섹터는 `convert`·`info` 에서 **경고**(종료 코드 불변).
+- 시험 고정본 `a2_nibref.py make-nib dataepi/addrepi/fixedbit/nb2` · 변이 7 종 추가 검출(누계 33).
+
+- DOS VTOC 검증: 0/쓰레기 VTOC 를 DOS 3.3 으로 받아들이던 폴백을 막음(조건은 감지보다 느슨 — 볼륨 0 등 변형은 계속 읽음) · Apple 디스크에 파일시스템이 없으면 명확한 오류 · ProDOS 로 감지됐는데 못 읽으면 "섹터 순서(.po)" 안내. 그 과정에서 작업공간 예제 `Tutorial_apple_01.do` 가 PO 순서 이미지임이 드러나 올바른 DO 순서로 재생성 · `tests/baselines` 해당 2 개 갱신.
+
+- 에뮬레이터 검증 도구 보존: `tests/emu/`(README 참조) — `emu_apple_boot_check.sh`(수동 · DOS 3.3 부팅 CATALOG·SAVE 쓰기·ProDOS 부팅을 WOZ/NIB/NB2 로 대조 · 9 판정 · 옛 인코더 빌드면 9/9 실패) · `a2run.sh`(네트워크 네임스페이스 격리 sa2 · 격리 확인 실패 시 sa2 를 띄우지 않음 · 종료/신호 시 전부 정리).
+
+### 7-4b. 13 섹터(DOS 3.2) 읽기 전용(2026-10-08)
+- NIB/NB2/WOZ 의 트랙 0 이 `D5 AA B5` 주소장이면 13 섹터로 판정(35×13 · 물리 = DOS 3.2 논리) · 5-and-3 디코더(실디스크 nib↔d13 비트 상관으로 도출) · 에필로그 `DE AA` 필수. 새 형식 `.d13`(`AppleD13Image`).
+- 파일시스템 "DOS 3.2"(DOS 3.3 처리기의 읽기 전용 모드): `info`/`list`/`extract`/`validate` · 쓰기 명령은 이미지를 바꾸지 않고 거부 · 13↔16 섹터 형식 간 변환 거부(13 섹터는 `.d13` 로만).
+- 빈 섹터 비트맵: 16 비트 워드(바이트 0 상위)의 bit (섹터+3) — 실제 DOS 3.2 마스터 2 장의 빈 섹터(T14 S0~2)로 추정 · 빈 공간 표시에만 쓰임.
+- 검증: 새 시험 `test_apple_d13_read.sh`(103 판정 · 실디스크 선택 경로 `A2_REAL_D13_DIR`) · C++ 디코더 = 참조 표 2048/2048(단일 비트 섹터 전수) · 실디스크 nib→d13 = 동봉 d13 바이트 동일 · 변이 12 종 중 11 검출(나머지 1 = 실질 등가) · 기존 시험 30/30.
+
+### 7-4c. DOS 3.3 빈 섹터 비트맵 비트 순서(2026-10-08)
+- 결함(HEAD 부터): 바이트 안 비트를 뒤집어 다룸(섹터 s ↔ 표준 섹터 s^7). 부분 사용 트랙에서 사용 중 섹터 할당 · 실제 DOS 가 rdedisktool 파일을 덮어씀(격리 sa2 실측: `BSAVE` 가 NEW 의 T18 S8~10 덮음 — 수정 후 0) · `validate` 가 실제 DOS 마스터에 오류.
+- 수정: 표준 배치(바이트 0 bit k = 섹터 8+k · 바이트 1 bit k = 섹터 k — 실제 DOS 디스크 47 장 일치) + add 전 카탈로그·파일이 쓰는 섹터가 비트맵상 비어 있으면 사용 중으로 보정·경고(예전 rdedisktool 디스크 보호 · 사용자 선택).
+- 예제 `Examples/Tutorial_apple_dos33_01/Tutorial_apple_dos33_01.do` 재생성(옛 도구 비트맵 · 실제 DOS SAVE 시 HELLO 3 섹터 손상 위험) — HOWTO 명령 그대로 · VTOC 1 섹터만 다름.
+- 시험 `test_apple_dos33_bitmap.sh`(31 판정 · HEAD 빌드는 실패) · 변이 5/5 · `tests/emu` 4 번 항목(실제 DOS BSAVE 대조) · 기존 31/31.
+
+### 7-5. 남은 것
+- 비표준(복제 방지) 트랙 부분 갱신 · 약한 비트 · 13 섹터 쓰기·생성(읽기 전용만 지원).
+- DOS 3.3 부트 보호는 트랙 0 만(트랙 0~2 확장은 rdedisktool 포맷 디스크에서 오탐 — 실측 후 취소).
+

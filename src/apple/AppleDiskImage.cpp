@@ -7,6 +7,21 @@ AppleDiskImage::AppleDiskImage() {
     initGeometry();
 }
 
+void AppleDiskImage::requireLoadableGeometry(const DiskGeometry& g, bool allow13) {
+    const bool ok = (g.tracks == 0 || g.tracks == TRACKS_35) &&
+                    (g.sides == 0 || g.sides == 1) &&
+                    (g.bytesPerSector == 0 || g.bytesPerSector == BYTES_PER_SECTOR) &&
+                    (g.sectorsPerTrack == 0 || g.sectorsPerTrack == SECTORS_16 ||
+                     (allow13 && g.sectorsPerTrack == SECTORS_13));
+    if (!ok) {
+        throw UnsupportedFormatException(
+            "Apple II images can only be created as 35 tracks, 1 side, " +
+            std::string(allow13 ? "16 or 13" : "16") + " sectors of 256 bytes (got " +
+            std::to_string(g.tracks) + ":" + std::to_string(g.sides) + ":" +
+            std::to_string(g.sectorsPerTrack) + ":" + std::to_string(g.bytesPerSector) + ")");
+    }
+}
+
 void AppleDiskImage::initGeometry(size_t tracks, size_t sectors) {
     m_geometry.tracks = tracks;
     m_geometry.sides = 1;  // Apple II floppies are single-sided
@@ -29,7 +44,12 @@ FileSystemType AppleDiskImage::getFileSystemType() const {
 }
 
 FileSystemType AppleDiskImage::detectFileSystem() const {
-    if (m_data.size() < DISK_SIZE_140K) {
+    // 13 sectors per track: only DOS 3.2 exists on such disks
+    if (m_geometry.sectorsPerTrack == SECTORS_13) {
+        return isDOS32() ? FileSystemType::DOS32 : FileSystemType::Unknown;
+    }
+
+    if (detectionImage().size() < DISK_SIZE_140K) {
         return FileSystemType::Unknown;
     }
 
@@ -58,16 +78,17 @@ bool AppleDiskImage::isDOS33() const {
     // +0x27: Number of tracks per disk (usually 35)
     // +0x30: Number of sectors per track (usually 16)
 
-    size_t vtocOffset = calculateOffset(17, 0);
-    if (vtocOffset + 0x35 >= m_data.size()) {
+    const std::vector<uint8_t>& data = detectionImage();
+    const size_t vtocOffset = (17 * SECTORS_16 + 0) * BYTES_PER_SECTOR;
+    if (vtocOffset + 0x35 >= data.size()) {
         return false;
     }
 
-    uint8_t catalogTrack = m_data[vtocOffset + 0x01];
-    uint8_t catalogSector = m_data[vtocOffset + 0x02];
-    uint8_t volumeNum = m_data[vtocOffset + 0x06];
-    uint8_t numTracks = m_data[vtocOffset + 0x34];
-    uint8_t numSectors = m_data[vtocOffset + 0x35];
+    uint8_t catalogTrack = data[vtocOffset + 0x01];
+    uint8_t catalogSector = data[vtocOffset + 0x02];
+    uint8_t volumeNum = data[vtocOffset + 0x06];
+    uint8_t numTracks = data[vtocOffset + 0x34];
+    uint8_t numSectors = data[vtocOffset + 0x35];
 
     // Validate VTOC values
     if (catalogTrack == 17 &&
@@ -79,6 +100,22 @@ bool AppleDiskImage::isDOS33() const {
     }
 
     return false;
+}
+
+bool AppleDiskImage::isDOS32() const {
+    // VTOC at track 17, sector 0 of a 13-sector layout (DOS 3.2 numbers
+    // sectors physically). Same fields as DOS 3.3 with 13 sectors/track.
+    const std::vector<uint8_t>& data = detectionImage();
+    const size_t vtocOffset = (17 * SECTORS_13 + 0) * BYTES_PER_SECTOR;
+    if (vtocOffset + BYTES_PER_SECTOR > data.size()) {
+        return false;
+    }
+    const uint8_t catalogTrack = data[vtocOffset + 0x01];
+    const uint8_t catalogSector = data[vtocOffset + 0x02];
+    const uint8_t numTracks = data[vtocOffset + 0x34];
+    const uint8_t numSectors = data[vtocOffset + 0x35];
+    return catalogTrack == 17 && catalogSector >= 1 && catalogSector < SECTORS_13 &&
+           numTracks == 35 && numSectors == SECTORS_13;
 }
 
 bool AppleDiskImage::isProDOS() const {
@@ -98,10 +135,12 @@ bool AppleDiskImage::isProDOS() const {
                totalBlocks > 0 && totalBlocks <= 280;
     };
 
+    const std::vector<uint8_t>& data = detectionImage();
+
     // First try direct contiguous block mapping (PO style).
     size_t blockOffset = 2 * 512;
-    if (blockOffset + 512 <= m_data.size() &&
-        looksLikeProDOSBlock2(m_data.data() + blockOffset)) {
+    if (blockOffset + 512 <= data.size() &&
+        looksLikeProDOSBlock2(data.data() + blockOffset)) {
         return true;
     }
 
@@ -112,10 +151,10 @@ bool AppleDiskImage::isProDOS() const {
         constexpr size_t s2 = 10;
         size_t off1 = s1 * 256;
         size_t off2 = s2 * 256;
-        if (off1 + 256 <= m_data.size() && off2 + 256 <= m_data.size()) {
+        if (off1 + 256 <= data.size() && off2 + 256 <= data.size()) {
             uint8_t blk2[512];
-            std::copy(m_data.begin() + off1, m_data.begin() + off1 + 256, blk2);
-            std::copy(m_data.begin() + off2, m_data.begin() + off2 + 256, blk2 + 256);
+            std::copy(data.begin() + off1, data.begin() + off1 + 256, blk2);
+            std::copy(data.begin() + off2, data.begin() + off2 + 256, blk2 + 256);
             if (looksLikeProDOSBlock2(blk2)) {
                 return true;
             }
@@ -129,6 +168,10 @@ size_t AppleDiskImage::logicalToPhysical(size_t logical) const {
     if (logical >= SECTORS_16) {
         return logical;  // Out of range, return as-is
     }
+    // 13-sector (DOS 3.2) disks and physical-order images: no interleave
+    if (m_geometry.sectorsPerTrack != SECTORS_16 || getSectorOrder() == SectorOrder::Physical) {
+        return logical;
+    }
 
     if (getSectorOrder() == SectorOrder::DOS) {
         return AppleInterleave::DOS33_INTERLEAVE[logical];
@@ -141,6 +184,9 @@ size_t AppleDiskImage::physicalToLogical(size_t physical) const {
     if (physical >= SECTORS_16) {
         return physical;  // Out of range, return as-is
     }
+    if (m_geometry.sectorsPerTrack != SECTORS_16 || getSectorOrder() == SectorOrder::Physical) {
+        return physical;
+    }
 
     if (getSectorOrder() == SectorOrder::DOS) {
         return AppleInterleave::DOS33_DEINTERLEAVE[physical];
@@ -150,6 +196,11 @@ size_t AppleDiskImage::physicalToLogical(size_t physical) const {
 }
 
 SectorBuffer AppleDiskImage::readBlock(size_t block) {
+    // ProDOS blocks exist only on 16-sector disks
+    if (m_geometry.sectorsPerTrack != SECTORS_16) {
+        throw UnsupportedFormatException("ProDOS blocks need 16 sectors per track");
+    }
+
     // ProDOS block = 512 bytes = 2 sectors
     // Block mapping depends on format
 
@@ -192,6 +243,11 @@ SectorBuffer AppleDiskImage::readBlock(size_t block) {
 }
 
 void AppleDiskImage::writeBlock(size_t block, const SectorBuffer& data) {
+    // ProDOS blocks exist only on 16-sector disks
+    if (m_geometry.sectorsPerTrack != SECTORS_16) {
+        throw UnsupportedFormatException("ProDOS blocks need 16 sectors per track");
+    }
+
     if (block >= getTotalBlocks()) {
         throw SectorNotFoundException(static_cast<int>(block / 8),
                                       static_cast<int>(block % 8));

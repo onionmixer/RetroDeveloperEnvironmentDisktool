@@ -1,5 +1,11 @@
 # Retro Developer Environment Disk Tool - Development Plan
 
+> **Historical document.** This is the original design / progress plan (status tables dated
+> 2026-01-02 and 2026-02-24). It is not updated with later work (Macintosh, NIB/NB2/WOZ
+> rewrite, DOS 3.2 read-only, DOS 3.3 file and bitmap fixes) and some designs here were never
+> built (e.g. the manifest-based `merge`). For current behaviour see `README.md`; for build and
+> tests see `HOWTO_COMPILE.md`.
+
 ## Implementation Status Summary (2026-01-02)
 
 | Category | Status | Notes |

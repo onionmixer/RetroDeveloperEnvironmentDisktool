@@ -33,24 +33,45 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::create(DiskImage* disk) {
         return nullptr;
     }
 
+    // Apple II 800K: ProDOS only (no DOS 3.3 on 3.5" disks)
+    if (isApple800KFormat(format)) {
+        if (disk->getFileSystemType() != FileSystemType::ProDOS) {
+            return nullptr;
+        }
+        auto prodos = std::make_unique<AppleProDOSHandler>();
+        if (prodos->initialize(disk)) {
+            return prodos;
+        }
+        return nullptr;
+    }
+
     // Apple disk formats
     if (format == DiskFormat::AppleDO || format == DiskFormat::ApplePO ||
-        format == DiskFormat::AppleNIB || format == DiskFormat::AppleWOZ1 ||
-        format == DiskFormat::AppleWOZ2) {
+        format == DiskFormat::AppleNIB || format == DiskFormat::AppleNIB2 ||
+        format == DiskFormat::AppleWOZ1 ||
+        format == DiskFormat::AppleWOZ2 || format == DiskFormat::AppleD13) {
         // Detect file system type from disk content
         FileSystemType fsType = disk->getFileSystemType();
 
+        // Nibble/bitstream images throw when a sector cannot be read (e.g. an
+        // unformatted track); while probing that only means "not this FS".
         if (fsType == FileSystemType::ProDOS) {
             auto prodos = std::make_unique<AppleProDOSHandler>();
-            if (prodos->initialize(disk)) {
-                return prodos;
+            try {
+                if (prodos->initialize(disk)) {
+                    return prodos;
+                }
+            } catch (const DiskException&) {
             }
         }
 
         // Try DOS 3.3 as fallback
         auto dos33 = std::make_unique<AppleDOS33Handler>();
-        if (dos33->initialize(disk)) {
-            return dos33;
+        try {
+            if (dos33->initialize(disk)) {
+                return dos33;
+            }
+        } catch (const DiskException&) {
         }
     }
 
@@ -111,6 +132,7 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::createForType(FileSystemTy
 
         case FileSystemType::Unknown:
         case FileSystemType::FAT16:
+        case FileSystemType::DOS32:    // read-only; never created/formatted
             return nullptr;
     }
     return nullptr;

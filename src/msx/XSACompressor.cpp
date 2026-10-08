@@ -97,10 +97,15 @@ std::vector<uint8_t> XSACompressor::compress(const std::vector<uint8_t>& data) {
         // Find best match at current position (searches existing index, then adds current)
         m_strLen = addString(m_winPos, m_strPos);
 
-        // Ensure valid distance (not matching self)
+        // Ensure valid distance (not matching self). The ring holds 8192
+        // bytes of which MAX_STR_LEN are look-ahead, so only distances up to
+        // SLIDING_WINDOW_SIZE - MAX_STR_LEN reach bytes the decoder has
+        // already written; stale index pointers can point further back (into
+        // look-ahead), which used to corrupt the output.
         if (m_strLen >= 2) {
             uint16_t distance = (m_winPos - m_strPos) & SLIDING_WINDOW_MASK;
-            if (distance == 0 || distance > m_freePos) {
+            if (distance == 0 || distance > m_freePos ||
+                distance > SLIDING_WINDOW_SIZE - MAX_STR_LEN) {
                 m_strLen = 0;  // Invalid match, treat as literal
             }
         }

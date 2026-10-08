@@ -76,6 +76,9 @@ public:
      */
     virtual DiskGeometry getGeometry() const = 0;
 
+    /** Number of the first sector on a track (0 for most formats; X68000: 1) */
+    virtual size_t firstSectorNumber() const { return 0; }
+
     /**
      * Check if the image is write-protected
      */

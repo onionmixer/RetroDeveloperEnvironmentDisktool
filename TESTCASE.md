@@ -1,6 +1,6 @@
 # TESTCASE
 
-README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이미지(XSA) 관련 흐름을 제외한 모든 기능을 검증하는 수동 테스트 시나리오다. Apple II, MSX, X68000 플랫폼을 모두 아우르며, 각 시나리오는 서로 독립적으로 실행할 수 있고 공통 준비 과정을 한 번만 수행하면 된다. 모든 단계는 단순 명령 실행에 그치지 않고, `list`/`info`/`validate`/`cmp` 등을 통해 결과 상태를 검증해야 한다.
+README.md를 기준으로 Apple II(DOS 3.3/ProDOS 섹터 이미지), MSX(DSK/DMK, XSA read-only 포함), X68000 기능을 검증하는 수동 테스트 시나리오다. Macintosh(HFS/MFS/DC42/MOOF), Apple II NIB/NB2/WOZ, DOS 3.2(13 섹터)는 `tests/test_*.sh` 자동 회귀로 검증한다(`HOWTO_COMPILE.md` *Running Tests*). 각 시나리오는 서로 독립적으로 실행할 수 있고 공통 준비 과정을 한 번만 수행하면 된다. 모든 단계는 단순 명령 실행에 그치지 않고, `list`/`info`/`validate`/`cmp` 등을 통해 결과 상태를 검증해야 한다.
 
 ## 공통 준비
 1. `rdedisktool` 바이너리가 `PATH`에 있거나 절대 경로로 호출 가능해야 한다.
@@ -16,9 +16,9 @@ README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이
 | 단계 | 절차 | 기대 결과 |
 |------|------|------------|
 |1|`rdedisktool create apple33.do -f do --fs dos33`|140KB 크기의 DOS 3.3 이미지가 생성되고 성공 메시지가 출력된다.|
-|2|`rdedisktool info apple33.do -v`|트랙/섹터 수, 여유 공간이 전형적인 빈 DOS 3.3 값(약 140KB)으로 표기된다.|
-|3|`rdedisktool add apple33.do tests/fixtures/HELLO.BAS HELLO.BAS`|파일이 루트에 추가되며 여유 공간 감소량이 파일 크기와 일치한다.|
-|4|`rdedisktool list apple33.do`|루트 목록에 HELLO.BAS가 보이고 속성/크기/타임스탬프가 기대와 일치한다.|
+|2|`rdedisktool info apple33.do -v`|35 트랙 × 16 섹터, 여유 공간 135,168 bytes(트랙 0·17 을 뺀 33 트랙)로 표기된다.|
+|3|`rdedisktool add apple33.do tests/fixtures/HELLO.BAS HELLO.BAS`|`--type` 이 없으므로 B 형식(주소 `$2000` 경고)으로 추가된다. 여유 공간은 256 바이트 섹터 단위로(T/S 목록 1 섹터 포함) 줄어든다.|
+|4|`rdedisktool list apple33.do`|루트 목록에 HELLO.BAS가 보이고 크기(섹터 단위)가 기대와 일치하고 Type 열이 `B` 다(잠긴 파일이면 Attr `L`). DOS 3.3 에는 타임스탬프가 없다.|
 |5|`rdedisktool info apple33.do`|파일 수, 여유 블록 수가 `list` 결과와 일치한다.|
 |6|`rdedisktool extract apple33.do HELLO.BAS ./HELLO_out.BAS && cmp tests/fixtures/HELLO.BAS ./HELLO_out.BAS`|호스트에 복사되고 내용이 완전히 동일하다.|
 |7|`rdedisktool delete apple33.do HELLO.BAS`|루트에서 파일이 제거되고 `list` 시 항목이 사라진다.|
@@ -66,9 +66,9 @@ README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이
 | 단계 | 절차 | 기대 결과 |
 |------|------|------------|
 |1|`rdedisktool create x68k.xdf -f xdf --fs human68k -n X68KDISK`|약 1.2MB 크기의 Human68k XDF 이미지가 생성되고 성공 메시지가 출력된다. 종료 코드는 0이어야 한다.|
-|2|`rdedisktool info x68k.xdf`|Format: X68000 XDF, Platform: X68000, Geometry: 154 tracks, 2 sides, 8 sectors/track, 1024 bytes/sector와 `File System: Human68k`가 표기된다.|
+|2|`rdedisktool info x68k.xdf`|Format: X68000 XDF, Platform: X68000, Tracks 77(실린더)·Sides 2·Sectors/Track 8·Bytes/Sector 1024, Total Size 1,261,568 bytes 와 `File System: Human68k`가 표기된다.|
 |3|`rdedisktool info x68k.xdf | rg -q "File System: Human68k"`|종료 코드 0이어야 하며, 문자열 미검출 시 인식 실패로 판단한다.|
-|4|`rdedisktool list x68k.xdf`|빈 디스크로 파일 수 0, Free space가 약 1.3MB로 표시된다. Volume: X68KDISK 확인.|
+|4|`rdedisktool list x68k.xdf`|빈 디스크로 파일 수 0, Volume: X68KDISK, Free space 1,250,304 bytes(BPB 총 1,232 − 11(부트 1·FAT 4·루트 6) = 1,221 클러스터) 확인.|
 |5|`rdedisktool add x68k.xdf tests/fixtures/GAME.X GAME.X`|파일이 루트에 추가되며 여유 공간 감소량이 파일 크기(클러스터 단위)와 일치한다.|
 |6|`rdedisktool add x68k.xdf tests/fixtures/long_filename_test.dat`|긴 파일명이 8.3 형식으로 변환됨(예: LONG_FIL.DAT)을 확인.|
 |7|`rdedisktool list x68k.xdf`|루트 목록에 GAME.X, LONG_FIL.DAT가 보이고 속성/크기가 기대와 일치한다.|
@@ -117,6 +117,7 @@ README.md를 기준으로 `rdedisktool`이 제공하는 기능 중 read-only 이
 |13|`rdedisktool info x68k_conv.dim`|Format: X68000 DIM, DIM Type 정보가 표시된다.|
 |14|`rdedisktool convert x68k_conv.dim x68k_back.xdf -f xdf`|DIM→XDF 재변환 성공.|
 |15|`rdedisktool list x68k_back.xdf`|재변환된 XDF에서 파일 목록이 원본과 동일.|
+|16|`cmp x68k_conv.xdf x68k_back.xdf`|XDF→DIM→XDF 가 바이트 단위로 같다(2026-10-08 이전 빌드는 트랙마다 8 번째 섹터를 잃었다).|
 
 ## 시나리오 7. MSX XSA 압축/복원 및 read-only 검증
 - **목적**: MSX DSK/DMK 이미지를 XSA로 압축하고, XSA에서 정보 조회·목록 열람·파일 추출이 가능함을 확인하며, 쓰기 작업은 차단되는지 검증한다.
