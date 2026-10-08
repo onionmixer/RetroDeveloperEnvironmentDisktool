@@ -3,8 +3,15 @@
 #   step: "type:TEXT"  type TEXT + Return, then wait $WAIT seconds (default 6)
 #         "wait:N"     wait N seconds
 #         "mem:ADDR,LEN"  save memory (hex) to mem_ADDR.bin
+#         "shot:NAME"  save the emulator window as NAME.png
+#         "key:KEYS"   xdotool key names (e.g. alt+o, Tab, Return), then wait $WAIT
 # env:  A2RUN_WORK  parent directory for the run directory (default $TMPDIR or /tmp)
 #       D2SRC       image for drive 2 (optional)
+#       A2RUN_MODEL iie (default: Apple //e Enhanced) or iicp (Apple //c Plus,
+#                   ROM 05 at IIC_ROM, default <workspace>/resource/AppleII/rom/
+#                   iicp_rom05.bin; 1 MHz)
+#       A2RUN_DISK35  //c Plus only: 800K .po/.2mg for the built-in 3.5" drive
+#                   (a copy, kept as d35.* in the run directory)
 #       SA2         sa2 binary (default: <workspace>/Emulator/AppleWin/build/sa2)
 #
 # Boots an Apple //e Enhanced in sa2 (AppleWin) with copies of the images and
@@ -36,7 +43,8 @@ if [[ "${1:-}" == "--inner" ]]; then
     exit 3
   fi
   D2ARGS=(); [[ -f "$RUN/d2.img" ]] && D2ARGS=(--d2 "$(cat "$RUN/d2.img")")
-  DISPLAY=$D "$SA2" -c "$RUN/aw.yaml" --no-audio -r "Configuration.Apple2 Type=17" \
+  MODEL=(); while IFS= read -r line; do MODEL+=(-r "$line"); done <"$RUN/model.args"
+  DISPLAY=$D "$SA2" -c "$RUN/aw.yaml" --no-audio "${MODEL[@]}" \
     --d1 "$(cat "$RUN/d1.img")" "${D2ARGS[@]}" >"$RUN/sa2.log" 2>&1 &
   SP=$!
   sleep "$BOOT"
@@ -60,6 +68,9 @@ if [[ "${1:-}" == "--inner" ]]; then
               sleep "${WAIT:-6}" ;;
       wait:*) sleep "${st#wait:}" ;;
       mem:*)  a=${st#mem:}; python3 -I "$HERE/memdump.py" "${a%%,*}" "${a#*,}" "$RUN/mem_${a%%,*}.bin" ;;
+      shot:*) DISPLAY=$D import -window "$W" "$RUN/${st#shot:}.png" 2>>"$RUN/shot.log" ;;
+      key:*)  DISPLAY=$D xdotool key --window "$W" --delay 150 ${st#key:} || { echo "a2run: key failed" >&2; break; }
+              sleep "${WAIT:-6}" ;;
     esac
   done
   rc=0
@@ -105,6 +116,23 @@ cp "$DISK" "$RUN/d1.${DISK##*.}"; echo "$RUN/d1.${DISK##*.}" >"$RUN/d1.img"
 if [[ -n "${D2SRC:-}" ]]; then
   cp "$D2SRC" "$RUN/d2.${D2SRC##*.}"; echo "$RUN/d2.${D2SRC##*.}" >"$RUN/d2.img"
 fi
+case "${A2RUN_MODEL:-iie}" in
+  iie)
+    [[ -z "${A2RUN_DISK35:-}" ]] || { echo "a2run: A2RUN_DISK35 needs A2RUN_MODEL=iicp" >&2; exit 3; }
+    echo "Configuration.Apple2 Type=17" >"$RUN/model.args" ;;
+  iicp)
+    ROM="${IIC_ROM:-$TOOL_ROOT/../resource/AppleII/rom/iicp_rom05.bin}"
+    [[ -f "$ROM" ]] || { echo "a2run: //c Plus ROM not found: $ROM" >&2; exit 3; }
+    D35=""
+    if [[ -n "${A2RUN_DISK35:-}" ]]; then
+      [[ -f "$A2RUN_DISK35" ]] || { echo "a2run: no image $A2RUN_DISK35" >&2; exit 3; }
+      D35="$RUN/d35.${A2RUN_DISK35##*.}"; cp "$A2RUN_DISK35" "$D35"; chmod u+w "$D35"
+    fi
+    printf '%s\n' "Configuration.Apple2 Type=32" "Configuration.IIc ROM=$ROM" \
+      "Configuration\\Slot 1.Card type=0" "Configuration.IIc Plus Accelerator=0" \
+      "Configuration.IIc Plus Disk35=$D35" >"$RUN/model.args" ;;
+  *) echo "a2run: A2RUN_MODEL must be iie or iicp" >&2; exit 3 ;;
+esac
 
 # Xvfb picks a free display and reports it on fd 9
 exec 9>"$RUN/xvfb.fd"
