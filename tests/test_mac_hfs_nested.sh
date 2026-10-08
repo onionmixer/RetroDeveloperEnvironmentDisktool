@@ -24,7 +24,12 @@ if [[ -f "$PY_TOOL" ]] && command -v python3 >/dev/null 2>&1; then
   HAVE_PY=1
 fi
 
-WORK="${WORK:-/tmp/rdedisktool_nested_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_nested.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 mdb_u32() {
@@ -146,13 +151,13 @@ TOPDIR_CNID=16  # first user CNID after format()
 # 10. negative: nested write to non-existent parent must fail cleanly
 set +e
 "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/v.img" "$INPUT" "Missing/file.txt" \
-    >/tmp/rdedisktool_nested.log 2>&1
+    >"$WORK/nested.log" 2>&1
 rc=$?
 set -e
 [[ $rc -ne 0 ]] || { echo "C1: write to missing parent should fail" >&2; exit 1; }
-rg -q "does not resolve" /tmp/rdedisktool_nested.log || {
+rg -q "does not resolve" "$WORK/nested.log" || {
   echo "C1: missing-parent error message not surfaced" >&2
-  cat /tmp/rdedisktool_nested.log >&2; exit 1
+  cat "$WORK/nested.log" >&2; exit 1
 }
 
 echo "[PASS] mac hfs nested mutation (C1)"

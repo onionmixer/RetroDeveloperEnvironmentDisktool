@@ -11,10 +11,11 @@ A cross-platform command-line tool for manipulating disk images used by retro co
 - **XSA compression**: Compress/decompress MSX disk images (LZ77 + Huffman; an empty 720 KB disk becomes about 9 KB)
 - **Macintosh forks**: AppleDouble v2 (`._<basename>` sidecar) and MacBinary v1 import (`add`) and export (`extract`) keep resource forks + Finder info
 - **Disk creation**: Create new formatted disk images (incl. empty 800K / 1440K HFS and 400K MFS volumes)
-- **Apple II nibble / bit images**: NIB, NB2 and WOZ read and write (DOS 3.3 RWTS-compatible encoding); 13-sector DOS 3.2 disks read-only
+- **Apple II nibble / bit images**: NIB, NB2 and WOZ read and write (DOS 3.3 RWTS-compatible encoding; WOZ 2.1 FLUX tracks read-only); 13-sector DOS 3.2 disks: `.d13` and 13-sector NIB/NB2/WOZ read, write, create (`--fs dos32`) and convert
 - **Apple II 3.5" 800K ProDOS**: 1600-block `.po` (`800po`) and `.2mg` (`800mg`) images — read, write, create, convert between the two
 - **Boot disk protection**: Multi-condition policy guards System / Finder files on bootable Macintosh / Apple II / MSX / X68000 disks
 - **Validation**: Verify disk image integrity (incl. DC42 ROR32+BE16 checksum)
+- **Repair**: `repair` corrects what older rdedisktool versions wrote wrong (DOS 3.3/3.2 VTOC bitmap, Human68k BPB size)
 - **Sector dump**: Raw sector/track data inspection
 - **Raw sector I/O**: `putraw` / `getraw` write and read fixed track/sector ranges on Apple II `.do` images for direct-boot (no-DOS) disk assembly, guarded by the DKFS build marker
 
@@ -36,11 +37,42 @@ Sector numbers: `.do`/`.dsk`/`.nib`/`.nb2`/`.woz` use DOS 3.3 logical sector num
 ProDOS logical sector numbers, 13-sector disks (`.d13` and 13-sector NIB/WOZ) use physical
 sector numbers. `convert` moves every sector to the same physical sector.
 
-13-sector (DOS 3.2) disks are **read-only**: `.nib`/`.nb2`/`.woz` tracks with `D5 AA B5`
-address fields (5-and-3 data) and `.d13` images are detected automatically, and
-`info`, `list`, `extract`, `validate` work (file system "DOS 3.2"). `add`/`delete`/`rename`
-are refused and leave the image unchanged. They convert only to `.d13` (`-f d13`), and `.d13`
-only holds 13-sector disks; 13-sector NIB/WOZ images are never written.
+Writing a sector to a `.nib`/`.nb2`/`.woz` image works like DOS 3.3 RWTS: rdedisktool finds the
+sector's address field and replaces only its data field (`D5 AA AD` … `DE AA`). Everything else
+on the track stays as it was — gaps, other sectors (also ones that cannot be read), extra marks a
+copy protection put there and weak bits (runs of zero bits). Only the sector being written must be
+readable. A data field holding timing bits is written back as plain 8-bit nibbles (the WOZ track
+gets that much shorter; a WOZ1 splice point after it moves along). Weak bits are not simulated:
+a sector that reads through them is unreadable, as its checksum fails.
+
+WOZ 2.1 FLUX tracks are read: each flux interval (125 ns ticks, `255` adding to the next byte)
+becomes `n` bit cells, `n` = ticks / the INFO optimal bit timing (32 = 4 µs) rounded half up -
+`n-1` zero bits and a one - and the sectors are read from those bits like any other track.
+They are never written: `add`/`delete`/`rename` on a WOZ with FLUX tracks is refused and the file
+left unchanged (convert it to `.do`/`.po`/`.nib`/`.woz` first). Checked on the Applesauce sample
+with every other track as FLUX: all sectors read, and the disk converted to `.po` boots in an
+emulator.
+
+13-sector (DOS 3.2) disks: `.nib`/`.nb2`/`.woz` tracks with `D5 AA B5` address fields
+(5-and-3 data) and `.d13` images are detected automatically, and `info`, `list`, `extract`,
+`validate` work (file system "DOS 3.2"), and so do `add`/`delete`/`rename`.
+The DOS 3.2 free-sector bitmap keeps a track's 13 bits as a big-endian word in bytes 0-1,
+sector s = bit s+3 (measured on the Apple DOS 3.1 / 3.2 / 3.2.1 masters). On NIB/NB2/WOZ a
+sector write replaces only its data field with 5-and-3 nibbles, like DOS 3.2 RWTS (same rules
+as the 16-sector case above). DOS 3.2 INIT writes address fields only, so the free sectors of
+a real DOS 3.2 disk often have no data field yet (Asimov's Utility/Plus masters: noise there);
+such a sector gets its data field after the address field as DOS 3.2 writes it (14 syncs,
+`D5 AA AD` .. `DE AA EB`; in a NIB down to 5 syncs when the gap is short) - with no room
+before the next address field the write is refused and the image left unchanged.
+`create x.d13 -f d13 --fs dos32` makes a DOS 3.2 volume byte-identical to what real DOS 3.2
+INIT writes (VTOC, catalog 17/12..17/1, tracks 0-2 and 17 in use) except the DOS image itself
+(tracks 0-2 stay empty: not bootable). 13-sector disks convert to `.d13`, `nib`, `nb2` and
+`woz`; NIB/WOZ tracks are laid out like a real DOS 3.2 disk (measured on an Applesauce capture
+of the DOS 3.2 System Master: 9-bit syncs, physical order 0,10,7,4,1,11,8,5,2,12,9,6,3 - that
+capture converted to `.d13` and back is bit-identical). `.d13` only holds 13-sector disks.
+Checked in an emulator: real DOS 3.2 reads files added this way to `.d13`, NIB and WOZ images
+(also into never-written sectors and on a created volume), writes next to them, and boots from
+a master converted from `.d13` to WOZ.
 
 **800K (3.5") images** hold ProDOS only and are a different medium from both the 5.25"
 images and Macintosh 800K disks:
@@ -90,7 +122,7 @@ images and Macintosh 800K disks:
 | File System | Platform | Subdirectories | Notes |
 |-------------|----------|----------------|-------|
 | DOS 3.3 | Apple II | No | VTOC-based allocation, 140KB max |
-| DOS 3.2 | Apple II | No | 13 sectors/track; **read-only** (`info`/`list`/`extract`/`validate`) |
+| DOS 3.2 | Apple II | No | 13 sectors/track; `.d13` and 13-sector NIB/NB2/WOZ read/write (`add`/`delete`/`rename`); `create` on `.d13` (`--fs dos32`) |
 | ProDOS | Apple II | Yes | Block-based allocation; 140 KB 5.25" images (280 blocks) and 800 KB 3.5" images (1600 blocks) |
 | MSX-DOS | MSX | Yes | FAT12, MSX-DOS 1/2 compatible |
 | Human68k | X68000 | Yes | FAT12-based, 1024-byte sectors, 8.3 filenames |
@@ -499,7 +531,7 @@ rdedisktool create <file> -f <format> [--fs <filesystem>] [-n <volume>] [-g <geo
 **Supported disk formats:**
 | Platform | Formats |
 |----------|---------|
-| Apple II | do, po, nib, nb2, woz (`woz1` is written as WOZ2 with a warning), d13 (blank, no file system), 800po (`*.po` only), 800mg (`*.2mg` only) |
+| Apple II | do, po, nib, nb2, woz (`woz1` is written as WOZ2 with a warning), d13 (`--fs dos32`, or blank), 800po (`*.po` only), 800mg (`*.2mg` only) |
 | MSX | msxdsk, dmk |
 | X68000 | xdf, dim |
 | Macintosh | mac_img, mac_moof (`mac_dc42` cannot be created — convert from `mac_img`) |
@@ -534,9 +566,13 @@ rdedisktool create mfs.img -f mac_img --fs mfs -n V -g 80:1:10:512
 rdedisktool create big.po  -f 800po --fs prodos -n BIGDISK
 rdedisktool create big.2mg -f 800mg --fs prodos -n BIGDISK
 
-# 5.25" Apple II images are always 35 tracks x 1 side x 16 sectors x 256 bytes (DO also
-# 13 sectors for DOS 3.2), 800K images 80:2:10:512; any other -g is refused before a
-# file is written.
+# 5.25" Apple II images are always 35 tracks x 1 side x 16 sectors x 256 bytes (DO, NIB,
+# NB2 and WOZ also 13 sectors for DOS 3.2), 800K images 80:2:10:512; any other -g is
+# refused before a file is written.
+
+# DOS 3.2 volume (13 sectors; no DOS image on tracks 0-2), then as a NIB or WOZ
+rdedisktool create dos32.d13 -f d13 --fs dos32
+rdedisktool convert dos32.d13 dos32.woz -f woz
 
 # Create blank disk (no filesystem)
 rdedisktool create blank.po -f po
@@ -583,8 +619,8 @@ gets a fresh header; when the input `.2mg` has a comment, creator data or the lo
 a warning says they are not carried over.
 
 Apple II: sectors are moved by physical position between DOS-order (`.do`/`.nib`/`.nb2`/`.woz`)
-and ProDOS-order (`.po`) images. 13-sector disks convert only to `.d13`, and `.d13` only
-accepts 13-sector disks. If a sector cannot be read (for example an
+and ProDOS-order (`.po`) images. 13-sector disks convert to `.d13`, `nib`, `nb2` or `woz`
+(DOS 3.2 tracks), and `.d13` only accepts 13-sector disks. If a sector cannot be read (for example an
 unformatted WOZ track), the image is still written, every missing sector is listed
 as a warning, and the exit code is **2**. Sectors are read with the same checks as
 DOS 3.3 RWTS (address/data epilogue `DE AA`, checksums); a sector whose address bytes
@@ -628,7 +664,7 @@ rdedisktool convert mac.image mac.img -f mac_img
 | Platform | Formats | Notes |
 |----------|---------|-------|
 | Apple II | do, po, nib, nb2, woz | Any direction; sectors keep their physical position |
-| Apple II | 13-sector nib/nb2/woz/d13 → d13 | DOS 3.2 disks; no other target |
+| Apple II | 13-sector nib/nb2/woz/d13 → d13, nib, nb2, woz | DOS 3.2 disks; NIB/WOZ get real DOS 3.2 track layout |
 | Apple II | 800po, 800mg | 3.5" 800K only, either direction; no other target |
 | MSX | msxdsk, dmk, xsa | Any direction; XSA output is compressed |
 | X68000 | xdf, dim | 2HD both ways, byte for byte |
@@ -663,6 +699,29 @@ rdedisktool validate corrupted.po
   "... chain loops back to ..." instead of running forever)
 - Boot block integrity (ProDOS)
 - Human68k: the BPB total sector count must fit the image
+
+#### repair - Correct what older rdedisktool versions wrote wrong
+```bash
+rdedisktool repair <image_file> [--dry-run]
+```
+
+`add`/`delete`/`rename` correct these on the way; `repair` does it without changing files:
+- DOS 3.3 / DOS 3.2: sectors the VTOC, the catalog or a file uses that the VTOC bitmap shows
+  as free (older versions reversed the bit order of a bitmap byte, so a new file could
+  overwrite them) are marked used. Sectors marked used that nothing refers to are only
+  reported - they may hold a DOS image or data outside the catalog.
+- Human68k: a BPB total sector count larger than the image (older `create` wrote 2,464 on a
+  1,232-sector disk) is set to the image size.
+
+Only those bytes change. A damaged catalog or track/sector list (a loop, a pointer off the
+disk) is not touched: exit code 1, image unchanged - see `validate`. `--dry-run` only
+reports; a disk with nothing to repair is left alone. On a boot disk the repair is blocked
+in strict mode and allowed with a warning in `--bootdisk-mode warn` (like `rename`).
+
+```bash
+rdedisktool repair --dry-run old.dsk
+rdedisktool repair old.xdf
+```
 
 The exit code is non-zero when errors are found.
 

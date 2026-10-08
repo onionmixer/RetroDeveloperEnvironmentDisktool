@@ -30,7 +30,12 @@ SIDECAR="$PROTO_DIR/%Hello.ad"
 [[ -f "$DATA_FORK" ]] || { echo "[SKIP] missing $DATA_FORK"; exit 0; }
 [[ -f "$SIDECAR"  ]] || { echo "[SKIP] missing $SIDECAR";  exit 0; }
 
-WORK="${WORK:-/tmp/rdedisktool_add_appledouble_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_add_appledouble.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 # 1. add --apple-double Hello.APPL — sidecar auto-discovered as
@@ -38,9 +43,9 @@ rm -rf "$WORK"; mkdir -p "$WORK"
 "$RDEDISKTOOL" create "$WORK/v.img" -f mac_img --fs hfs -n V \
     >/dev/null 2>&1
 "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/v.img" "$DATA_FORK" \
-    --apple-double >/tmp/rdedisktool_add_ad.log 2>&1 || {
+    --apple-double >"$WORK/add_ad.log" 2>&1 || {
   echo "C 1.1: add --apple-double failed" >&2
-  cat /tmp/rdedisktool_add_ad.log >&2
+  cat "$WORK/add_ad.log" >&2
   exit 1
 }
 "$RDEDISKTOOL" list "$WORK/v.img" | rg -q '^Hello' || {
@@ -111,13 +116,13 @@ cp "$DATA_FORK" "$WORK/orphan/Solo.APPL"
     >/dev/null 2>&1
 set +e
 "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/o.img" \
-    "$WORK/orphan/Solo.APPL" --apple-double >/tmp/rdedisktool_add_ad.log 2>&1
+    "$WORK/orphan/Solo.APPL" --apple-double >"$WORK/add_ad.log" 2>&1
 rc=$?
 set -e
 [[ $rc -ne 0 ]] || { echo "C 1.1: missing sidecar should fail" >&2; exit 1; }
-rg -q "cannot find sidecar" /tmp/rdedisktool_add_ad.log || {
+rg -q "cannot find sidecar" "$WORK/add_ad.log" || {
   echo "C 1.1: expected 'cannot find sidecar' message; got:" >&2
-  cat /tmp/rdedisktool_add_ad.log >&2
+  cat "$WORK/add_ad.log" >&2
   exit 1
 }
 

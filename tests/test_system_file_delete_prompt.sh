@@ -8,7 +8,12 @@ PROJECT_ROOT="$(cd "$TOOL_ROOT/.." && pwd)"
 RDEDISKTOOL="${RDEDISKTOOL:-$TOOL_ROOT/build/rdedisktool}"
 [[ -x "$RDEDISKTOOL" ]] || { echo "missing rdedisktool binary" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_system_file_prompt}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_system_file_prompt.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"
 mkdir -p "$WORK"
 
@@ -21,19 +26,19 @@ cancel_case() {
   local target="$2"
 
   set +e
-  printf '\n' | "$RDEDISKTOOL" --bootdisk-mode off delete "$img" "$target" >/tmp/rdedisktool_prompt.log 2>&1
+  printf '\n' | "$RDEDISKTOOL" --bootdisk-mode off delete "$img" "$target" >"$WORK/prompt.log" 2>&1
   local rc=$?
   set -e
 
   if [[ $rc -eq 0 ]]; then
     echo "expected cancel failure, but delete succeeded: $img $target" >&2
-    sed -n '1,120p' /tmp/rdedisktool_prompt.log >&2
+    sed -n '1,120p' "$WORK/prompt.log" >&2
     exit 1
   fi
 
-  rg -q "boot-critical file" /tmp/rdedisktool_prompt.log || {
+  rg -q "boot-critical file" "$WORK/prompt.log" || {
     echo "missing boot-critical prompt text" >&2
-    sed -n '1,120p' /tmp/rdedisktool_prompt.log >&2
+    sed -n '1,120p' "$WORK/prompt.log" >&2
     exit 1
   }
 

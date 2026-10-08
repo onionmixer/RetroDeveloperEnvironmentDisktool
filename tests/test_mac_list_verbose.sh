@@ -24,7 +24,12 @@ RDEDISKTOOL="${RDEDISKTOOL:-$TOOL_ROOT/build/rdedisktool}"
 FX="$TOOL_ROOT/tests/fixtures/macintosh/608_SystemTools.img"
 [[ -f "$FX" ]] || { echo "missing $FX" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_list_verbose_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_list_verbose.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 # 1. Verbose Mac listing: header has the new columns + known type/creator.

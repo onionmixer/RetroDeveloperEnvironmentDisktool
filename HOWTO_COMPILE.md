@@ -131,7 +131,7 @@ cmake --build . --verbose
 Expected output:
 ```
 Retro Developer Environment Disk Tool v1.0.0
-Supported platforms: Apple II, MSX, X68000
+Supported platforms: Apple II, MSX, X68000, Macintosh
 ```
 
 ### Building on Windows
@@ -352,8 +352,14 @@ cd /path/to/RetroDeveloperEnvironmentDisktool
 for t in tests/test_*.sh; do bash "$t" >/dev/null 2>&1 || echo "FAIL $t"; done
 ```
 
-Some tests need `python3` (independent reference checkers in `tests/tools/`) or workspace
-boot disks under `../diskwork/bootdisk/`. `tests/emu/` holds manual emulator checks (isolated
+Some tests need `python3` (independent reference checkers in `tests/tools/`: `a2_nibref.py`
+for NIB/WOZ, `a2_prodos_ref.py` for ProDOS) or workspace boot disks under
+`../diskwork/bootdisk/`. Tests that can also use a real disk image that is not committed print
+`(skip: … not judged)` when it is missing and still pass on their other checks: the A2 DeskTop
+1.5 800K image (`A2_REAL_800K_DIR`), the Asimov DOS 3.1/3.2 masters (`A2_REAL_D13_DIR`, default
+`../resource/AppleII/dos32`, sources and sha256 in its `SOURCE.txt`) and the Applesauce WOZ 2.1
+FLUX sample (`A2_REAL_FLUX`, default `../resource/AppleII/woz_flux/`). These are commercial
+images: never commit them. `tests/emu/` holds manual emulator checks (isolated
 AppleWin `sa2` + Xvfb) that are not part of this loop — see `tests/emu/README.md`.
 
 ## Project Structure
@@ -368,7 +374,7 @@ RetroDeveloperEnvironmentDisktool/
 ├── include/
 │   └── rdedisktool/        # Public headers (DiskImage, DiskImageFactory, FormatDetector,
 │       │                   #  FileSystemHandler, BootDiskPolicy, CLI, Types, Exceptions, CRC)
-│       ├── apple/          # Apple II formats (DO/PO/NIB/NB2/WOZ/D13, nibble encoder)
+│       ├── apple/          # Apple II formats (DO/PO/NIB/NB2/WOZ/D13, 800K PO/2MG, nibble encoder)
 │       ├── msx/            # MSX formats (DSK/DMK/XSA)
 │       ├── x68000/         # X68000 formats (XDF/DIM)
 │       ├── macintosh/      # Macintosh containers (IMG/DC42/MOOF)

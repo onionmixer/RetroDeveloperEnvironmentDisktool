@@ -1,6 +1,6 @@
 # TESTCASE
 
-README.md를 기준으로 Apple II(DOS 3.3/ProDOS 섹터 이미지), MSX(DSK/DMK, XSA read-only 포함), X68000 기능을 검증하는 수동 테스트 시나리오다. Macintosh(HFS/MFS/DC42/MOOF), Apple II NIB/NB2/WOZ, DOS 3.2(13 섹터)는 `tests/test_*.sh` 자동 회귀로 검증한다(`HOWTO_COMPILE.md` *Running Tests*). 각 시나리오는 서로 독립적으로 실행할 수 있고 공통 준비 과정을 한 번만 수행하면 된다. 모든 단계는 단순 명령 실행에 그치지 않고, `list`/`info`/`validate`/`cmp` 등을 통해 결과 상태를 검증해야 한다.
+README.md를 기준으로 Apple II(DOS 3.3/ProDOS 섹터 이미지), MSX(DSK/DMK, XSA read-only 포함), X68000 기능을 검증하는 수동 테스트 시나리오다. Macintosh(HFS/MFS/DC42/MOOF), Apple II NIB/NB2/WOZ(WOZ 2.1 FLUX 판독 포함), DOS 3.2(13 섹터: 읽기·쓰기·create·변환), Apple II 3.5" 800K ProDOS(`.po`/`.2mg`), ProDOS·DOS 3.3 손상(순환) 처리, `repair`(예전 rdedisktool 디스크 보정), `convert`/`create`/`extract` 출력 파일 규칙은 `tests/test_*.sh` 자동 회귀로 검증한다(`HOWTO_COMPILE.md` *Running Tests*). 각 시나리오는 서로 독립적으로 실행할 수 있고 공통 준비 과정을 한 번만 수행하면 된다. 모든 단계는 단순 명령 실행에 그치지 않고, `list`/`info`/`validate`/`cmp` 등을 통해 결과 상태를 검증해야 한다.
 
 ## 공통 준비
 1. `rdedisktool` 바이너리가 `PATH`에 있거나 절대 경로로 호출 가능해야 한다.

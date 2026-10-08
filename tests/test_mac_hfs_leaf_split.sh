@@ -28,7 +28,12 @@ if [[ -f "$PY_TOOL" ]] && command -v python3 >/dev/null 2>&1; then
   HAVE_PY=1
 fi
 
-WORK="${WORK:-/tmp/rdedisktool_leaf_split_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_leaf_split.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 "$RDEDISKTOOL" create "$WORK/v.img" -f mac_img --fs hfs -n "Split" \
@@ -74,12 +79,12 @@ print(struct.unpack('>H', d[ctOff+14:ctOff+16])[0])
 LAST_OK=5
 for i in $(seq 6 60); do
   if "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/v.img" "$INPUT" "f${i}.txt" \
-        >/tmp/rdedisktool_split.log 2>&1; then
+        >"$WORK/split.log" 2>&1; then
     LAST_OK=$i
   else
-    rg -q "B-tree map has no free nodes" /tmp/rdedisktool_split.log || {
+    rg -q "B-tree map has no free nodes" "$WORK/split.log" || {
       echo "C4: unexpected error at f${i}.txt:" >&2
-      cat /tmp/rdedisktool_split.log >&2
+      cat "$WORK/split.log" >&2
       exit 1
     }
     break

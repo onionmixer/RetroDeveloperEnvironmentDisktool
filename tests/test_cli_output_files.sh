@@ -83,7 +83,12 @@ if grep -q "Overwriting" err.txt; then fail "warning for a new file"; fi
 echo junk >ex.do
 rde convert a.po ex.do -f do >/dev/null 2>err.txt || fail "convert over a file"
 grep -q "Overwriting existing file: ex.do" err.txt || { cat err.txt; fail "no overwrite warning (convert)"; }
-cmp -s ok.DO ex.do || fail "convert did not replace the file"; pass
+cmp -s ok.DO ex.do || fail "convert did not replace the file"
+# a directory as output: no overwrite warning (nothing is overwritten); the write fails
+mkdir -p outdir
+rde extract a.po HELLO outdir >/dev/null 2>err.txt && fail "extract into a directory path accepted"
+if grep -q "Overwriting" err.txt; then cat err.txt; fail "overwrite warning for a directory"; fi
+pass
 # AppleDouble: data file and ._ sidecar
 echo mac >m.txt
 rde add mac.img m.txt Note >/dev/null

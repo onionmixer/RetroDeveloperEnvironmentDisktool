@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Per-run log: ctest -j runs these scripts in parallel
+LOG="$(mktemp "${TMPDIR:-/tmp}/rdedisktool_test.XXXXXX")"
+trap 'rm -f "$LOG"' EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$TOOL_ROOT/.." && pwd)"
@@ -16,7 +20,12 @@ FIXTURE="$TOOL_ROOT/tests/fixtures/README.TXT"
 [[ -f "$X68_SRC" ]] || { echo "missing $X68_SRC" >&2; exit 1; }
 [[ -f "$FIXTURE" ]] || { echo "missing $FIXTURE" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_invalid_bpb_guard}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_invalid_bpb_guard.XXXXXX")"
+  trap 'rm -f "$LOG"; [[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"
 mkdir -p "$WORK"
 cp "$MSX_SRC" "$WORK/msx_invalid_bpb.dsk"
@@ -30,32 +39,32 @@ assert_fail_with() {
   local pattern="$1"
   shift
   set +e
-  "$@" >/tmp/rdedisktool_test.log 2>&1
+  "$@" >"$LOG" 2>&1
   local rc=$?
   set -e
   if [[ $rc -eq 0 ]]; then
     echo "expected failure but succeeded: $*" >&2
-    sed -n '1,160p' /tmp/rdedisktool_test.log >&2
+    sed -n '1,160p' "$LOG" >&2
     exit 1
   fi
-  rg -q "$pattern" /tmp/rdedisktool_test.log || {
+  rg -q "$pattern" "$LOG" || {
     echo "expected pattern not found: $pattern" >&2
-    sed -n '1,160p' /tmp/rdedisktool_test.log >&2
+    sed -n '1,160p' "$LOG" >&2
     exit 1
   }
 }
 
-"$RDEDISKTOOL" info "$WORK/msx_invalid_bpb.dsk" -v >/tmp/rdedisktool_test.log 2>&1
-rg -q "Reason:\s+invalid_bpb_or_filesystem_init_failed" /tmp/rdedisktool_test.log || {
+"$RDEDISKTOOL" info "$WORK/msx_invalid_bpb.dsk" -v >"$LOG" 2>&1
+rg -q "Reason:\s+invalid_bpb_or_filesystem_init_failed" "$LOG" || {
   echo "missing invalid_bpb reason for MSX" >&2
-  sed -n '1,160p' /tmp/rdedisktool_test.log >&2
+  sed -n '1,160p' "$LOG" >&2
   exit 1
 }
 
-"$RDEDISKTOOL" info "$WORK/x68_invalid_bpb.xdf" -v >/tmp/rdedisktool_test.log 2>&1
-rg -q "Reason:\s+invalid_bpb_or_filesystem_init_failed" /tmp/rdedisktool_test.log || {
+"$RDEDISKTOOL" info "$WORK/x68_invalid_bpb.xdf" -v >"$LOG" 2>&1
+rg -q "Reason:\s+invalid_bpb_or_filesystem_init_failed" "$LOG" || {
   echo "missing invalid_bpb reason for X68000" >&2
-  sed -n '1,160p' /tmp/rdedisktool_test.log >&2
+  sed -n '1,160p' "$LOG" >&2
   exit 1
 }
 

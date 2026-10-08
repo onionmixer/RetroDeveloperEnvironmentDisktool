@@ -21,13 +21,18 @@ if [[ -f "$PY_TOOL" ]] && command -v python3 >/dev/null 2>&1; then
   HAVE_PY=1
 fi
 
-WORK="${WORK:-/tmp/rdedisktool_hfs_optb_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_hfs_optb.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 # === B3 (format): create a blank 1440K HFS volume ============================
 "$RDEDISKTOOL" create "$WORK/blank.img" -f mac_img --fs hfs -n "B3Vol" \
-    >/tmp/rdedisktool_optb.log 2>&1 || {
-  echo "B3 format failed" >&2; cat /tmp/rdedisktool_optb.log >&2; exit 1
+    >"$WORK/optb.log" 2>&1 || {
+  echo "B3 format failed" >&2; cat "$WORK/optb.log" >&2; exit 1
 }
 # rdedisktool reads it back as HFS with empty root.
 "$RDEDISKTOOL" list "$WORK/blank.img" | rg -q "Volume: B3Vol" || {
@@ -174,7 +179,7 @@ DIR_CNT=$(mdb_u32 "$WORK/dirvol.img" 0x58)
 # === B3 negative: format refuses unsupported geometries ======================
 set +e
 "$RDEDISKTOOL" create "$WORK/big.img" -f mac_img --fs hfs -n "Big" \
-    -g 80:2:36:512 >/tmp/rdedisktool_optb.log 2>&1
+    -g 80:2:36:512 >"$WORK/optb.log" 2>&1
 rc=$?
 set -e
 # 80*2*36*512 = 2949120 bytes (5760 sectors) — out of B3 scope.
@@ -182,10 +187,10 @@ set -e
 # layout, or filesystem init fails outright. Both are acceptable: we just
 # need the unsupported size NOT to silently produce a garbage volume.
 if [[ $rc -eq 0 ]]; then
-  rg -q "B3 scope" /tmp/rdedisktool_optb.log || \
-  rg -q "not implemented" /tmp/rdedisktool_optb.log || {
+  rg -q "B3 scope" "$WORK/optb.log" || \
+  rg -q "not implemented" "$WORK/optb.log" || {
     echo "B3 negative: unsupported geometry should refuse format" >&2
-    cat /tmp/rdedisktool_optb.log >&2
+    cat "$WORK/optb.log" >&2
     exit 1
   }
 fi

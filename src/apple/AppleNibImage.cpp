@@ -77,7 +77,6 @@ void AppleNibImage::load(const std::filesystem::path& path) {
 
     // Reset track cache
     std::fill(m_trackDecoded.begin(), m_trackDecoded.end(), false);
-    std::fill(m_trackDirty.begin(), m_trackDirty.end(), false);
     invalidateDetection();
 }
 
@@ -90,13 +89,6 @@ void AppleNibImage::save(const std::filesystem::path& path) {
 
     if (m_writeProtected && savePath == m_filePath) {
         throw WriteProtectedException();
-    }
-
-    // Rebuild any dirty tracks
-    for (size_t t = 0; t < TRACKS_35; ++t) {
-        if (m_trackDirty[t]) {
-            rebuildTrack(t);
-        }
     }
 
     std::ofstream file(savePath, std::ios::binary);
@@ -118,10 +110,11 @@ void AppleNibImage::save(const std::filesystem::path& path) {
 }
 
 void AppleNibImage::create(const DiskGeometry& geometry) {
-    requireLoadableGeometry(geometry, false);
+    requireLoadableGeometry(geometry, true);
     size_t tracks = geometry.tracks > 0 ? geometry.tracks : TRACKS_35;
-    initGeometry(tracks, SECTORS_16);
-    m_sectors13 = false;
+    // 13 sectors: DOS 3.2 tracks (the target of a .d13 conversion)
+    m_sectors13 = geometry.sectorsPerTrack == SECTORS_13;
+    initGeometry(tracks, m_sectors13 ? SECTORS_13 : SECTORS_16);
 
     // Track size follows the format this image was made for (NIB or NB2)
     m_trackSize = (m_format == DiskFormat::AppleNIB2) ? NB2_TRACK_SIZE : NIB_TRACK_SIZE;
@@ -135,9 +128,12 @@ void AppleNibImage::create(const DiskGeometry& geometry) {
             sector.resize(BYTES_PER_SECTOR, 0);
         }
 
-        // Build nibblized track
-        auto track = NibbleEncoder::buildNibTrack(sectorData, m_volumeNumber,
-                                                  static_cast<uint8_t>(t), m_trackSize);
+        // Build nibblized track (13 sectors: gap 1 takes what is left)
+        auto track = m_sectors13
+            ? NibbleEncoder::buildTrackNibbles13(sectorData, m_volumeNumber, static_cast<uint8_t>(t),
+                                                 m_trackSize - 13 * NibbleEncoder::SECTOR13_NIBBLES).nibbles
+            : NibbleEncoder::buildNibTrack(sectorData, m_volumeNumber,
+                                           static_cast<uint8_t>(t), m_trackSize);
 
         // Copy to raw data
         size_t offset = t * m_trackSize;
@@ -150,7 +146,6 @@ void AppleNibImage::create(const DiskGeometry& geometry) {
 
     // Reset cache
     std::fill(m_trackDecoded.begin(), m_trackDecoded.end(), false);
-    std::fill(m_trackDirty.begin(), m_trackDirty.end(), false);
     invalidateDetection();
 }
 
@@ -197,7 +192,6 @@ const std::vector<uint8_t>& AppleNibImage::detectionImage() const {
         m_detectionImage.assign(TRACKS_35 * spt * BYTES_PER_SECTOR, 0);
         const size_t tracks = std::min(m_geometry.tracks, TRACKS_35);
         for (size_t t = 0; t < tracks && (t + 1) * m_trackSize <= m_data.size(); ++t) {
-            // Pending sector writes live in the decoded cache until save()
             const NibbleEncoder::ParsedTrack parsed =
                 m_trackDecoded[t] ? m_decodedTracks[t] : parseRawTrack(t);
             for (size_t s = 0; s < spt; ++s) {
@@ -210,23 +204,6 @@ const std::vector<uint8_t>& AppleNibImage::detectionImage() const {
         m_detectionValid = true;
     }
     return m_detectionImage;
-}
-
-void AppleNibImage::rebuildTrack(size_t track) {
-    if (track >= TRACKS_35) return;
-
-    if (m_trackDecoded[track]) {
-        const NibbleEncoder::ParsedTrack& parsed = m_decodedTracks[track];
-        auto nibbleTrack = NibbleEncoder::buildNibTrack(
-            parsed.sectors,
-            parsed.volumeKnown ? parsed.volume : m_volumeNumber,
-            static_cast<uint8_t>(track), m_trackSize);
-
-        size_t offset = track * m_trackSize;
-        std::copy(nibbleTrack.begin(), nibbleTrack.end(), m_data.begin() + offset);
-
-        m_trackDirty[track] = false;
-    }
 }
 
 SectorBuffer AppleNibImage::readSector(size_t track, size_t /*side*/, size_t sector) {
@@ -249,10 +226,6 @@ void AppleNibImage::writeSector(size_t track, size_t /*side*/, size_t sector,
     if (m_writeProtected) {
         throw WriteProtectedException();
     }
-    if (m_sectors13) {
-        throw UnsupportedFormatException("13-sector (DOS 3.2) images are read-only");
-    }
-
     if (track >= m_geometry.tracks) {
         throw SectorNotFoundException(static_cast<int>(track), static_cast<int>(sector));
     }
@@ -260,21 +233,85 @@ void AppleNibImage::writeSector(size_t track, size_t /*side*/, size_t sector,
         throw SectorNotFoundException(static_cast<int>(track), static_cast<int>(sector));
     }
 
-    decodeTrackIfNeeded(track);
-
-    // The whole track is rebuilt on save, so every sector must be readable;
-    // otherwise unreadable sectors would be silently replaced.
-    if (!m_decodedTracks[track].allFound()) {
-        throw WriteException("Cannot write track " + std::to_string(track) +
-                             ": not all 16 sectors are readable");
+    // Like DOS 3.3 / 3.2 RWTS: find the sector, then replace only its data
+    // field (D5 AA AD .. DE AA; 6-and-2, or 5-and-3 on 13-sector tracks).
+    // Everything else on the track - other sectors, readable or not, and any
+    // copy-protection nibbles - stays as it is.
+    const size_t offset = track * m_trackSize;
+    if (offset + m_trackSize > m_data.size()) {
+        throw SectorNotFoundException(static_cast<int>(track), static_cast<int>(sector));
+    }
+    const NibbleEncoder::ParsedTrack before = parseRawTrack(track);
+    const bool unwritten = m_sectors13 && !before.found[sector] && before.addrOnly[sector];
+    if (!before.found[sector] && !unwritten) {
+        throw WriteException("Cannot write track " + std::to_string(track) + " sector " +
+                             std::to_string(sector) + ": the sector cannot be read");
     }
 
-    // Update sector data
-    std::vector<uint8_t>& dst = m_decodedTracks[track].sectors[sector];
-    dst = data;
-    dst.resize(BYTES_PER_SECTOR, 0);
+    SectorBuffer payload = data;
+    payload.resize(BYTES_PER_SECTOR, 0);
+    std::vector<uint8_t> field = m_sectors13 ? NibbleEncoder::dataFieldNibbles53(payload)
+                                             : NibbleEncoder::dataFieldNibbles(payload);
+    size_t at = before.dataAt[sector];
+    if (unwritten) {
+        // DOS 3.2 INIT wrote only the address field: the data field goes
+        // after its DE AA EB like DOS 3.2 writes it (real disks: 14 syncs,
+        // D5 AA AD .. DE AA EB), and must end before the next address field.
+        // NIB nibbles are byte-aligned (no sync needed to find the next D5):
+        // fewer syncs (down to 5) when the gap is short, 1 nibble kept free
+        const size_t addr = before.addrAt[sector];
+        auto byteAt = [&](size_t k) { return m_data[offset + k % m_trackSize]; };
+        size_t next = m_trackSize;
+        for (size_t d = 3; d < m_trackSize; ++d) {
+            if (byteAt(addr + d) == NibbleEncoder::ADDR_PROLOGUE_1 &&
+                byteAt(addr + d + 1) == NibbleEncoder::ADDR_PROLOGUE_2 &&
+                byteAt(addr + d + 2) == NibbleEncoder::ADDR_PROLOGUE_3_13) {
+                next = d;
+                break;
+            }
+        }
+        field.push_back(NibbleEncoder::EPILOGUE_3);
+        size_t syncs = 14;
+        while (syncs >= 5 && 14 + syncs + field.size() + 1 > next) {
+            --syncs;
+        }
+        if (syncs < 5) {
+            throw WriteException("Cannot write track " + std::to_string(track) + " sector " +
+                                 std::to_string(sector) +
+                                 ": no room for a data field before the next address field");
+        }
+        field.insert(field.begin(), syncs, 0xFF);
+        at = addr + 14;
+    }
+    const std::vector<uint8_t> saved(m_data.begin() + offset, m_data.begin() + offset + m_trackSize);
+    for (size_t j = 0; j < field.size(); ++j) {
+        // the parser saw the track twice in a row: positions wrap around
+        m_data[offset + (at + j) % m_trackSize] = field[j];
+    }
+    invalidateTrackCache(track);
 
-    m_trackDirty[track] = true;
+    // The write must read back, no other sector may change, and every
+    // address field (written sectors and unwritten ones) must still be there
+    decodeTrackIfNeeded(track);
+    const NibbleEncoder::ParsedTrack& after = m_decodedTracks[track];
+    bool ok = after.found[sector] && after.sectors[sector] == payload &&
+              after.addrSeen == before.addrSeen;
+    for (size_t s = 0; ok && s < before.sectorCount; ++s) {
+        if (s != sector && before.found[s] &&
+            (!after.found[s] || after.sectors[s] != before.sectors[s])) {
+            ok = false;
+        }
+        if (s != sector && before.addrOnly[s] && !after.addrOnly[s]) {
+            ok = false;
+        }
+    }
+    if (!ok) {
+        std::copy(saved.begin(), saved.end(), m_data.begin() + offset);
+        invalidateTrackCache(track);
+        throw WriteException("Cannot write track " + std::to_string(track) + " sector " +
+                             std::to_string(sector) + ": the track did not read back (left unchanged)");
+    }
+
     m_modified = true;
     invalidateDetection();
 }
@@ -294,7 +331,7 @@ void AppleNibImage::writeTrack(size_t track, size_t /*side*/, const TrackBuffer&
         throw WriteProtectedException();
     }
     if (m_sectors13) {
-        throw UnsupportedFormatException("13-sector (DOS 3.2) images are read-only");
+        throw UnsupportedFormatException("13-sector (DOS 3.2) tracks cannot be written whole");
     }
 
     if (track >= m_geometry.tracks) {
@@ -313,7 +350,6 @@ void AppleNibImage::writeTrack(size_t track, size_t /*side*/, const TrackBuffer&
 
     // Invalidate decoded cache for this track
     invalidateTrackCache(track);
-    m_trackDirty[track] = false;
     m_modified = true;
     invalidateDetection();
 }
@@ -351,7 +387,7 @@ std::unique_ptr<DiskImage> AppleNibImage::convertTo(DiskFormat format) const {
     }
 
     if (m_sectors13) {
-        throw UnsupportedFormatException("13-sector images convert only to .d13 (use the convert command)");
+        throw UnsupportedFormatException("13-sector images: use the convert command (d13, nib, nb2, woz)");
     }
 
     if (format == DiskFormat::AppleDO) {
@@ -360,7 +396,6 @@ std::unique_ptr<DiskImage> AppleNibImage::convertTo(DiskFormat format) const {
 
         // DO images use the same DOS 3.3 logical numbering
         for (size_t track = 0; track < m_geometry.tracks; ++track) {
-            // Pending sector writes live in the decoded cache until save()
             const NibbleEncoder::ParsedTrack parsed =
                 m_trackDecoded[track] ? m_decodedTracks[track] : parseRawTrack(track);
             for (size_t sector = 0; sector < SECTORS_16; ++sector) {
@@ -406,19 +441,17 @@ std::string AppleNibImage::getDiagnostics() const {
     oss << "Track Size: " << m_trackSize << " bytes\n";
     oss << "Tracks: " << m_geometry.tracks << "\n";
     oss << "Sectors/Track: " << m_geometry.sectorsPerTrack
-        << (m_sectors13 ? " (DOS 3.2, 5-and-3, read-only)" : "") << "\n";
+        << (m_sectors13 ? " (DOS 3.2, 5-and-3)" : "") << "\n";
     oss << "Volume Number: " << static_cast<int>(m_volumeNumber) << "\n";
     oss << "Write Protected: " << (m_writeProtected ? "Yes" : "No") << "\n";
     oss << "Modified: " << (m_modified ? "Yes" : "No") << "\n";
 
-    // Count cached/dirty tracks
-    int cached = 0, dirty = 0;
+    // Count cached tracks
+    int cached = 0;
     for (size_t t = 0; t < TRACKS_35; ++t) {
         if (m_trackDecoded[t]) ++cached;
-        if (m_trackDirty[t]) ++dirty;
     }
     oss << "Cached Tracks: " << cached << "\n";
-    oss << "Dirty Tracks: " << dirty << "\n";
 
     return oss.str();
 }
@@ -427,9 +460,6 @@ std::vector<std::string> AppleNibImage::readWarnings() const {
     std::vector<std::string> warnings;
     const size_t tracks = std::min(m_geometry.tracks, TRACKS_35);
     for (size_t t = 0; t < tracks; ++t) {
-        if (m_trackDirty[t]) {
-            continue;  // rebuilt as a standard track on save
-        }
         const NibbleEncoder::ParsedTrack parsed = parseRawTrack(t);
         for (size_t s = 0; s < m_geometry.sectorsPerTrack; ++s) {
             if (parsed.found[s] && parsed.fixedBitsMissing[s]) {

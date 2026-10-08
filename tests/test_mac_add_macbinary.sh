@@ -33,16 +33,21 @@ HELLO_AD="$PROTO_DIR/%Hello.ad"
 [[ -f "$HELLO_BIN" ]] || { echo "[SKIP] missing $HELLO_BIN — Retro68 prototype not built"; exit 0; }
 [[ -f "$HELLO_AD"  ]] || { echo "[SKIP] missing $HELLO_AD";  exit 0; }
 
-WORK="${WORK:-/tmp/rdedisktool_add_macbinary_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_add_macbinary.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 # 1. add --macbinary, no explicit target → name from MacBinary header.
 "$RDEDISKTOOL" create "$WORK/v.img" -f mac_img --fs hfs -n V \
     >/dev/null 2>&1
 "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/v.img" "$HELLO_BIN" \
-    --macbinary >/tmp/rdedisktool_add_mb.log 2>&1 || {
+    --macbinary >"$WORK/add_mb.log" 2>&1 || {
   echo "C 1.1: add --macbinary failed" >&2
-  cat /tmp/rdedisktool_add_mb.log >&2
+  cat "$WORK/add_mb.log" >&2
   exit 1
 }
 "$RDEDISKTOOL" list "$WORK/v.img" | rg -q '^Hello +' || {
@@ -133,20 +138,20 @@ fi
     -g 80:1:10:512 >/dev/null 2>&1
 set +e
 "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/mfs.img" "$HELLO_BIN" \
-    --macbinary >/tmp/rdedisktool_add_mb.log 2>&1
+    --macbinary >"$WORK/add_mb.log" 2>&1
 rc=$?
 set -e
 [[ $rc -ne 0 ]] || { echo "C 1.1: --macbinary on MFS should fail" >&2; exit 1; }
-rg -q "HFS only|HFS volume" /tmp/rdedisktool_add_mb.log || {
+rg -q "HFS only|HFS volume" "$WORK/add_mb.log" || {
   echo "C 1.1: expected 'HFS only/volume' rejection on MFS" >&2
-  cat /tmp/rdedisktool_add_mb.log >&2
+  cat "$WORK/add_mb.log" >&2
   exit 1
 }
 
 # 7. --macbinary + --apple-double together should fail cleanly.
 set +e
 "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/v.img" "$HELLO_BIN" \
-    --macbinary --apple-double >/tmp/rdedisktool_add_mb.log 2>&1
+    --macbinary --apple-double >"$WORK/add_mb.log" 2>&1
 rc=$?
 set -e
 [[ $rc -ne 0 ]] || { echo "C 1.1: --macbinary + --apple-double should be rejected" >&2; exit 1; }

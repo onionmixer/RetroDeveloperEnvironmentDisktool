@@ -117,6 +117,7 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::createForType(FileSystemTy
             return std::make_unique<MSXDOSHandler>();
 
         case FileSystemType::DOS33:
+        case FileSystemType::DOS32:    // format() picks DOS 3.2 from 13-sector geometry
             return std::make_unique<AppleDOS33Handler>();
 
         case FileSystemType::ProDOS:
@@ -132,7 +133,6 @@ std::unique_ptr<FileSystemHandler> FileSystemHandler::createForType(FileSystemTy
 
         case FileSystemType::Unknown:
         case FileSystemType::FAT16:
-        case FileSystemType::DOS32:    // read-only; never created/formatted
             return nullptr;
     }
     return nullptr;

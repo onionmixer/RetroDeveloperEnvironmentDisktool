@@ -48,12 +48,6 @@ FileSystemType AppleDOS33Handler::getType() const {
     return m_dos32 ? FileSystemType::DOS32 : FileSystemType::DOS33;
 }
 
-void AppleDOS33Handler::requireWritable() const {
-    if (m_dos32) {
-        throw UnsupportedFormatException("DOS 3.2 (13-sector) disks are read-only");
-    }
-}
-
 bool AppleDOS33Handler::initialize(DiskImage* disk) {
     if (!disk) {
         return false;
@@ -115,7 +109,11 @@ bool AppleDOS33Handler::parseVTOC() {
 }
 
 void AppleDOS33Handler::writeVTOC() {
-    std::vector<uint8_t> vtocData(SECTOR_SIZE, 0);
+    // Only the fields below are rewritten; every other byte of the VTOC stays
+    // as it is (byte 0 is 02 on DOS 3.2 and 04 on DOS 3.3 disks, DOS 3.1
+    // masters have values in 04-2E)
+    std::vector<uint8_t> vtocData = readSector(VTOC_TRACK, VTOC_SECTOR);
+    vtocData.resize(SECTOR_SIZE, 0);
 
     // Write VTOC header
     vtocData[0x01] = m_vtoc.firstCatalogTrack;
@@ -163,7 +161,6 @@ void AppleDOS33Handler::writeSector(size_t track, size_t sector, const std::vect
     if (!m_disk) {
         return;
     }
-    requireWritable();
     // DOS 3.3 and Apple II disk images use 0-based sector numbers
     m_disk->writeSector(track, 0, dosSectorInImage(m_disk, sector), data);
 }
@@ -325,57 +322,57 @@ void AppleDOS33Handler::writeTSList(const std::vector<TSPair>& lists, const std:
     }
 }
 
-bool AppleDOS33Handler::isSectorFree(size_t track, size_t sector) const {
-    if (track >= MAX_TRACKS || sector >= m_vtoc.sectorsPerTrack || sector >= 16) {
+bool AppleDOS33Handler::bitmapBit(size_t track, size_t sector, size_t& byteIndex,
+                                  uint8_t& mask) const {
+    if (track >= MAX_TRACKS || sector >= m_vtoc.sectorsPerTrack || sector >= SECTORS_PER_TRACK) {
         return false;
     }
+    // Bit = 1 means free. DOS 3.3: byte 0 bit k = sector 8+k, byte 1 bit k =
+    // sector k. DOS 3.2 (13 sectors): bytes 0-1 form a big-endian word and
+    // sector s is its bit s+3 - measured on the Apple DOS 3.1, 3.2 Standard /
+    // Plus / Utility and 3.2.1 masters: every sector the catalog and the
+    // track/sector lists use is marked used (the DOS 3.3 layout disagrees on
+    // all of them).
+    const size_t bit = m_dos32 ? sector + 3 : sector;
+    byteIndex = bit >= 8 ? 0 : 1;
+    mask = static_cast<uint8_t>(1 << (bit % 8));
+    return true;
+}
 
-    // DOS 3.2 (13 sectors): bytes 0-1 form a big-endian word and sector s is
-    // its bit s+3 (bit = 1 means free). Inferred from the free sectors of
-    // real DOS 3.2 masters; only used for the free count (read-only).
-    if (m_dos32) {
-        const size_t bit = sector + 3;
-        return (m_vtoc.trackBitmap[track][bit >= 8 ? 0 : 1] & (1 << (bit % 8))) != 0;
-    }
-
-    // Bitmap: bytes 0-1 contain sector bits
-    // Bit = 1 means free, bit = 0 means used
-    // Byte 0 bit k = sector 8+k, byte 1 bit k = sector k
-    // (sector 15 = bit 7 of byte 0, sector 0 = bit 0 of byte 1)
-    int byteIndex = sector >= 8 ? 0 : 1;
-    int bitIndex = static_cast<int>(sector % 8);
-
-    return (m_vtoc.trackBitmap[track][byteIndex] & (1 << bitIndex)) != 0;
+bool AppleDOS33Handler::isSectorFree(size_t track, size_t sector) const {
+    size_t byteIndex = 0;
+    uint8_t mask = 0;
+    return bitmapBit(track, sector, byteIndex, mask) &&
+           (m_vtoc.trackBitmap[track][byteIndex] & mask) != 0;
 }
 
 void AppleDOS33Handler::markSectorUsed(size_t track, size_t sector) {
-    if (track >= MAX_TRACKS || sector >= 16) {
+    size_t byteIndex = 0;
+    uint8_t mask = 0;
+    if (!bitmapBit(track, sector, byteIndex, mask)) {
         return;
     }
-    requireWritable();
-
-    int byteIndex = sector >= 8 ? 0 : 1;
-    int bitIndex = static_cast<int>(sector % 8);
-
-    m_vtoc.trackBitmap[track][byteIndex] &= ~(1 << bitIndex);
+    m_vtoc.trackBitmap[track][byteIndex] &= static_cast<uint8_t>(~mask);
 }
 
 void AppleDOS33Handler::markSectorFree(size_t track, size_t sector) {
-    if (track >= MAX_TRACKS || sector >= 16) {
+    size_t byteIndex = 0;
+    uint8_t mask = 0;
+    if (!bitmapBit(track, sector, byteIndex, mask)) {
         return;
     }
-    requireWritable();
-
-    int byteIndex = sector >= 8 ? 0 : 1;
-    int bitIndex = static_cast<int>(sector % 8);
-
-    m_vtoc.trackBitmap[track][byteIndex] |= (1 << bitIndex);
+    m_vtoc.trackBitmap[track][byteIndex] |= mask;
 }
 
 AppleDOS33Handler::TSPair AppleDOS33Handler::allocateSector() {
     // Allocation follows the direction in VTOC
     int track = m_vtoc.lastTrackAllocated;
-    int direction = m_vtoc.allocationDirection;
+    // Any value other than -1 is searched upwards (a direction of 0 would
+    // look at the same track again and again)
+    int direction = m_vtoc.allocationDirection == -1 ? -1 : 1;
+    if (track <= 0 || track >= static_cast<int>(m_vtoc.tracksPerDisk)) {
+        track = static_cast<int>(VTOC_TRACK);
+    }
 
     // Search for free sector
     for (int t = 0; t < static_cast<int>(m_vtoc.tracksPerDisk); ++t) {
@@ -463,6 +460,72 @@ size_t AppleDOS33Handler::markReferencedSectorsUsed() {
         }
     }
     return fixed;
+}
+
+// Older rdedisktool versions stored the bitmap bits of a byte in reverse
+// order: sectors in use show as free (a new file would overwrite them) and
+// free ones as used. The first is corrected (as add does); the second is
+// only reported - a sector no file refers to may still hold a DOS image or
+// data that is not in the catalog. The structure is checked first: on a
+// damaged catalog or T/S list a partial scan must not be saved.
+FileSystemHandler::RepairResult AppleDOS33Handler::repairOlderWrites(bool apply) {
+    RepairResult out;
+    for (const auto& issue : validateExtended().issues) {
+        if (issue.severity == ValidationSeverity::Error &&
+            issue.message.find("is used but marked free") == std::string::npos) {
+            throw WriteException("the catalog / track-sector lists are damaged (" + issue.message +
+                                 "); nothing was repaired - see validate");
+        }
+    }
+
+    const VTOC saved = m_vtoc;
+    try {
+        // Sectors something refers to: claimed on a bitmap with every sector free
+        for (size_t t = 0; t < m_vtoc.tracksPerDisk; ++t) {
+            for (size_t s = 0; s < m_vtoc.sectorsPerTrack; ++s) {
+                markSectorFree(t, s);
+            }
+        }
+        markReferencedSectorsUsed();
+        const VTOC referenced = m_vtoc;
+        m_vtoc = saved;
+
+        std::string list;
+        size_t fixed = 0, unreferenced = 0;
+        for (size_t t = 0; t < m_vtoc.tracksPerDisk; ++t) {
+            for (size_t s = 0; s < m_vtoc.sectorsPerTrack; ++s) {
+                m_vtoc = referenced;
+                const bool inUse = !isSectorFree(t, s);
+                m_vtoc = saved;
+                const bool markedFree = isSectorFree(t, s);
+                if (inUse && markedFree) {
+                    if (fixed < 8) {
+                        list += (fixed ? ", T" : "T") + std::to_string(t) + "/S" + std::to_string(s);
+                    }
+                    ++fixed;
+                } else if (!inUse && !markedFree && t > 2 && t != VTOC_TRACK) {
+                    ++unreferenced;
+                }
+            }
+        }
+        if (fixed) {
+            out.fixes.push_back(std::to_string(fixed) + " sector(s) in use marked free in the VTOC "
+                                "bitmap -> marked used (" + list + (fixed > 8 ? ", ..." : "") + ")");
+        }
+        if (unreferenced) {
+            out.notes.push_back(std::to_string(unreferenced) + " sector(s) outside tracks 0-2 and " +
+                                std::to_string(VTOC_TRACK) + " are marked used but no file refers "
+                                "to them; left as they are");
+        }
+        if (apply && fixed) {
+            markReferencedSectorsUsed();
+            writeVTOC();
+        }
+    } catch (...) {
+        m_vtoc = saved;
+        throw;
+    }
+    return out;
 }
 
 size_t AppleDOS33Handler::countFreeSectors() const {
@@ -699,8 +762,6 @@ bool AppleDOS33Handler::writeFile(const std::string& filename,
                                    const std::vector<uint8_t>& data,
                                    const FileMetadata& metadata) {
     m_lastWriteWarnings.clear();
-    requireWritable();
-
     // Resolve the type and build the on-disk bytes before touching the disk
     const uint8_t fileType = resolveFileType(metadata);
     const bool hasLengthHeader = fileType == FILETYPE_BINARY ||
@@ -865,7 +926,6 @@ bool AppleDOS33Handler::writeFile(const std::string& filename,
 }
 
 bool AppleDOS33Handler::deleteFile(const std::string& filename) {
-    requireWritable();
     int index = findCatalogEntry(filename);
     if (index < 0) {
         return false;
@@ -954,7 +1014,6 @@ bool AppleDOS33Handler::deleteFile(const std::string& filename) {
 }
 
 bool AppleDOS33Handler::renameFile(const std::string& oldName, const std::string& newName) {
-    requireWritable();
     int index = findCatalogEntry(oldName);
     if (index < 0) {
         return false;
@@ -1023,16 +1082,21 @@ bool AppleDOS33Handler::format(const std::string& /*volumeName*/) {
     }
 
     auto geom = m_disk->getGeometry();
-    if (geom.sectorsPerTrack != SECTORS_PER_TRACK) {
-        throw UnsupportedFormatException("DOS 3.3 format needs 16 sectors per track "
-                                         "(13-sector DOS 3.2 disks are read-only)");
+    if (geom.sectorsPerTrack != SECTORS_PER_TRACK && geom.sectorsPerTrack != 13) {
+        throw UnsupportedFormatException("DOS 3.3 format needs 16 sectors per track, "
+                                         "DOS 3.2 13");
     }
+    // DOS 3.2 (13 sectors): VTOC, catalog and bitmap as real DOS 3.2 INIT
+    // writes them (measured: VTOC 02 11 0C 02 .. FE, catalog 17/12 .. 17/1,
+    // tracks 0-2 and 17 in use). The DOS image itself is not written.
+    m_dos32 = geom.sectorsPerTrack == 13;
+    const size_t firstCatalogSector = m_dos32 ? 12 : FIRST_CATALOG_SECTOR;
 
     // Initialize VTOC
     std::memset(&m_vtoc, 0, sizeof(VTOC));
     m_vtoc.firstCatalogTrack = CATALOG_TRACK;
-    m_vtoc.firstCatalogSector = FIRST_CATALOG_SECTOR;
-    m_vtoc.dosRelease = 3;  // DOS 3.3
+    m_vtoc.firstCatalogSector = static_cast<uint8_t>(firstCatalogSector);
+    m_vtoc.dosRelease = m_dos32 ? 2 : 3;
     m_vtoc.volumeNumber = 254;  // Default volume number
     m_vtoc.maxTSPairs = 122;
     m_vtoc.lastTrackAllocated = VTOC_TRACK;
@@ -1042,27 +1106,31 @@ bool AppleDOS33Handler::format(const std::string& /*volumeName*/) {
     m_vtoc.bytesPerSector = static_cast<uint16_t>(geom.bytesPerSector);
 
     // Initialize track bitmap - all sectors free except track 0 and 17
+    // (DOS 3.2: tracks 0-2 and 17, the free bits of a track are FF F8)
     for (size_t t = 0; t < MAX_TRACKS; ++t) {
         if (t < m_vtoc.tracksPerDisk) {
-            if (t == 0 || t == VTOC_TRACK) {
-                // Track 0 (DOS) and track 17 (catalog) are used
+            const bool used = t == 0 || t == VTOC_TRACK || (m_dos32 && t <= 2);
+            if (used) {
                 m_vtoc.trackBitmap[t][0] = 0x00;
                 m_vtoc.trackBitmap[t][1] = 0x00;
             } else {
                 // All sectors free
                 m_vtoc.trackBitmap[t][0] = 0xFF;
-                m_vtoc.trackBitmap[t][1] = 0xFF;
+                m_vtoc.trackBitmap[t][1] = m_dos32 ? 0xF8 : 0xFF;
             }
             m_vtoc.trackBitmap[t][2] = 0x00;
             m_vtoc.trackBitmap[t][3] = 0x00;
         }
     }
 
-    // Write VTOC
+    // Write VTOC (on a clean sector: format starts a new volume)
+    std::vector<uint8_t> blank(SECTOR_SIZE, 0);
+    blank[0x00] = m_dos32 ? 0x02 : 0x00;
+    writeSector(VTOC_TRACK, VTOC_SECTOR, blank);
     writeVTOC();
 
-    // Initialize catalog sectors (15 down to 1)
-    for (int s = static_cast<int>(FIRST_CATALOG_SECTOR); s >= 1; --s) {
+    // Initialize catalog sectors (15 down to 1; DOS 3.2: 12 down to 1)
+    for (int s = static_cast<int>(firstCatalogSector); s >= 1; --s) {
         std::vector<uint8_t> catSector(SECTOR_SIZE, 0);
 
         // Next catalog sector

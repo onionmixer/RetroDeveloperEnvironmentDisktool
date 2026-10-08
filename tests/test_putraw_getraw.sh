@@ -12,23 +12,29 @@ TOOL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 RDEDISKTOOL="${RDEDISKTOOL:-$TOOL_ROOT/build/rdedisktool}"
 [[ -x "$RDEDISKTOOL" ]] || { echo "missing rdedisktool binary" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_putraw_getraw}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_putraw_getraw.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"
 mkdir -p "$WORK"
 cd "$WORK"
+WORK="$PWD"   # absolute: logs below are "$WORK/..."
 
 assert_ok() {   # description, command...
   local desc="$1"; shift
-  set +e; "$@" >/tmp/rde_pg.log 2>&1; local rc=$?; set -e
+  set +e; "$@" >"$WORK/pg.log" 2>&1; local rc=$?; set -e
   if [[ $rc -ne 0 ]]; then
-    echo "[FAIL] expected success: $desc" >&2; sed -n '1,80p' /tmp/rde_pg.log >&2; exit 1
+    echo "[FAIL] expected success: $desc" >&2; sed -n '1,80p' "$WORK/pg.log" >&2; exit 1
   fi
 }
 assert_fail() { # description, command...
   local desc="$1"; shift
-  set +e; "$@" >/tmp/rde_pg.log 2>&1; local rc=$?; set -e
+  set +e; "$@" >"$WORK/pg.log" 2>&1; local rc=$?; set -e
   if [[ $rc -eq 0 ]]; then
-    echo "[FAIL] expected rejection but succeeded: $desc" >&2; sed -n '1,80p' /tmp/rde_pg.log >&2; exit 1
+    echo "[FAIL] expected rejection but succeeded: $desc" >&2; sed -n '1,80p' "$WORK/pg.log" >&2; exit 1
   fi
 }
 

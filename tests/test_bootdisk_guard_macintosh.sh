@@ -10,6 +10,10 @@
 
 set -euo pipefail
 
+# Per-run log: ctest -j runs these scripts in parallel
+LOG="$(mktemp "${TMPDIR:-/tmp}/rdedisktool_test.XXXXXX")"
+trap 'rm -f "$LOG"' EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -19,24 +23,29 @@ RDEDISKTOOL="${RDEDISKTOOL:-$TOOL_ROOT/build/rdedisktool}"
 FIXTURE="$TOOL_ROOT/tests/fixtures/macintosh/608_SystemTools.img"
 [[ -f "$FIXTURE" ]] || { echo "missing $FIXTURE" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_boot_guard_macintosh_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_boot_guard_macintosh.XXXXXX")"
+  trap 'rm -f "$LOG"; [[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 cp "$FIXTURE" "$WORK/608.img"
 ORIG_SHA=$(sha256sum "$FIXTURE" | awk '{print $1}')
 
 assert_fail_blocked() {
   set +e
-  "$@" >/tmp/rdedisktool_test.log 2>&1
+  "$@" >"$LOG" 2>&1
   local rc=$?
   set -e
   if [[ $rc -eq 0 ]]; then
     echo "expected boot-protection failure but command succeeded: $*" >&2
-    sed -n '1,80p' /tmp/rdedisktool_test.log >&2
+    sed -n '1,80p' "$LOG" >&2
     exit 1
   fi
-  rg -q "Boot disk protection" /tmp/rdedisktool_test.log || {
+  rg -q "Boot disk protection" "$LOG" || {
     echo "expected 'Boot disk protection' message; got:" >&2
-    cat /tmp/rdedisktool_test.log >&2
+    cat "$LOG" >&2
     exit 1
   }
 }
@@ -48,21 +57,21 @@ assert_fail_blocked() {
 # so the failure surfaces as "Failed to write file to disk image".
 assert_fail_any() {
   set +e
-  "$@" >/tmp/rdedisktool_test.log 2>&1
+  "$@" >"$LOG" 2>&1
   local rc=$?
   set -e
   if [[ $rc -eq 0 ]]; then
     echo "expected failure but command succeeded: $*" >&2
-    sed -n '1,80p' /tmp/rdedisktool_test.log >&2
+    sed -n '1,80p' "$LOG" >&2
     exit 1
   fi
 }
 
 # 1. Boot detection on the bootable HFS sample.
-"$RDEDISKTOOL" --bootdisk-mode strict info "$WORK/608.img" -v >/tmp/rdedisktool_test.log 2>&1
-rg -q "BootDisk:\s+yes"          /tmp/rdedisktool_test.log || { echo "BootDisk:yes missing"  >&2; cat /tmp/rdedisktool_test.log; exit 1; }
-rg -q "Profile:\s+macintosh"     /tmp/rdedisktool_test.log || { echo "Profile:macintosh missing" >&2; cat /tmp/rdedisktool_test.log; exit 1; }
-rg -q "Confidence:\s+high"       /tmp/rdedisktool_test.log || { echo "Confidence:high missing"   >&2; cat /tmp/rdedisktool_test.log; exit 1; }
+"$RDEDISKTOOL" --bootdisk-mode strict info "$WORK/608.img" -v >"$LOG" 2>&1
+rg -q "BootDisk:\s+yes"          "$LOG" || { echo "BootDisk:yes missing"  >&2; cat "$LOG"; exit 1; }
+rg -q "Profile:\s+macintosh"     "$LOG" || { echo "Profile:macintosh missing" >&2; cat "$LOG"; exit 1; }
+rg -q "Confidence:\s+high"       "$LOG" || { echo "Confidence:high missing"   >&2; cat "$LOG"; exit 1; }
 
 # 2. delete is blocked by strict policy.
 assert_fail_blocked "$RDEDISKTOOL" --bootdisk-mode strict delete "$WORK/608.img" "System Folder/System"
@@ -74,7 +83,7 @@ assert_fail_blocked "$RDEDISKTOOL" --bootdisk-mode strict delete "$WORK/608.img"
 #    failure; the boot-block bytes invariant in step 5 stays the real guard.
 
 # 4. extract of a regular data fork still succeeds (read-only path).
-"$RDEDISKTOOL" extract "$WORK/608.img" "Read Me" "$WORK/ReadMe.bin" >/tmp/rdedisktool_test.log 2>&1
+"$RDEDISKTOOL" extract "$WORK/608.img" "Read Me" "$WORK/ReadMe.bin" >"$LOG" 2>&1
 [[ -s "$WORK/ReadMe.bin" ]] || { echo "extract produced empty file" >&2; exit 1; }
 
 # 5. Boot block region (sectors 0..1 = first 1024 bytes) is unchanged.

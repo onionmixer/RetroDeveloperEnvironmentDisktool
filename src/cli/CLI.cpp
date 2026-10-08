@@ -126,6 +126,7 @@ bool isSameFile(const std::string& a, const std::string& b) {
 rde::FileSystemType fileSystemFromString(const std::string& str) {
     std::string s = toLower(str);
     if (s == "dos33" || s == "dos3.3") return rde::FileSystemType::DOS33;
+    if (s == "dos32" || s == "dos3.2") return rde::FileSystemType::DOS32;
     if (s == "prodos") return rde::FileSystemType::ProDOS;
     if (s == "msxdos" || s == "msxdos1") return rde::FileSystemType::MSXDOS1;
     if (s == "msxdos2") return rde::FileSystemType::MSXDOS2;
@@ -159,6 +160,10 @@ bool isFileSystemCompatible(rde::DiskFormat format, rde::FileSystemType fsType) 
 
     if (rde::isApple800KFormat(format)) {
         return fsType == rde::FileSystemType::ProDOS;  // no DOS 3.3 on 800K
+    }
+    // 13 sectors per track: DOS 3.2 only, and DOS 3.2 only there
+    if (format == rde::DiskFormat::AppleD13 || fsType == rde::FileSystemType::DOS32) {
+        return format == rde::DiskFormat::AppleD13 && fsType == rde::FileSystemType::DOS32;
     }
     if (isApple) {
         return (fsType == rde::FileSystemType::DOS33 ||
@@ -486,6 +491,11 @@ void CLI::initCommands() {
         "Rename file or directory in disk image",
         "rename <image_file> <old_name> <new_name>");
 
+    registerCommand("repair",
+        [this](const std::vector<std::string>& args) { return cmdRepair(args); },
+        "Correct what older rdedisktool versions wrote wrong",
+        "repair <image_file> [--dry-run]");
+
     registerCommand("create",
         [this](const std::vector<std::string>& args) { return cmdCreate(args); },
         "Create new disk image",
@@ -670,7 +680,7 @@ void CLI::printHelp() const {
     std::cout << "Supported Formats:\n";
     std::cout << "  Apple II:   .do, .dsk (DOS order), .po (ProDOS order),\n";
     std::cout << "              .nib/.nb2 (Nibble), .woz (WOZ v1/v2),\n";
-    std::cout << "              .d13 (DOS 3.2 13-sector, read-only),\n";
+    std::cout << "              .d13 (DOS 3.2 13-sector; also 13-sector NIB/WOZ),\n";
     std::cout << "              .po 819200 bytes (3.5\" 800K ProDOS, -f 800po),\n";
     std::cout << "              .2mg (800K ProDOS in 2MG container, -f 800mg)\n";
     std::cout << "  MSX:        .dsk (Raw sector), .dmk (DMK), .xsa (XSA compressed)\n";
@@ -703,7 +713,7 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  -g, --geometry <spec>   Custom geometry: tracks:sides:sectors:bytes\n";
         std::cout << "  --force                 Overwrite existing file\n";
         std::cout << "\nSupported Formats:\n";
-        std::cout << "  Apple II:  do, po, nib, nb2, woz, woz1, woz2, d13 (blank only),\n";
+        std::cout << "  Apple II:  do, po, nib, nb2, woz, woz1, woz2, d13 (DOS 3.2, 13 sectors),\n";
         std::cout << "             800po (3.5\" 800K ProDOS block image), 800mg (same in .2mg)\n";
         std::cout << "  MSX:       msxdsk, dmk\n";
         std::cout << "  X68000:    xdf, dim\n";
@@ -711,7 +721,8 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "             mac_moof (Applesauce MOOF, GCR 400K/800K + MFM 1.44M)\n";
         std::cout << "             (mac_dc42 cannot be created: create mac_img, then convert)\n";
         std::cout << "\nSupported Filesystems:\n";
-        std::cout << "  Apple II:  dos33, prodos (800po/800mg: prodos only)\n";
+        std::cout << "  Apple II:  dos33, prodos (800po/800mg: prodos only), dos32 (d13 only;\n";
+        std::cout << "             no DOS image on tracks 0-2, which stay marked in use)\n";
         std::cout << "  MSX:       msxdos, fat12\n";
         std::cout << "  X68000:    human68k\n";
         std::cout << "  Macintosh: hfs (800K or 1440K), mfs (400K floppy only)\n";
@@ -726,6 +737,7 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "              — supply -g 80:1:10:512 for 400K MFS\n";
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool create disk.do -f do --fs dos33\n";
+        std::cout << "  rdedisktool create disk.d13 -f d13 --fs dos32\n";
         std::cout << "  rdedisktool create game.po -f po --fs prodos -n MYGAME\n";
         std::cout << "  rdedisktool create msx.dsk -f msxdsk --fs msxdos -n MSXDISK\n";
         std::cout << "  rdedisktool create x68k.xdf -f xdf --fs human68k -n X68KDISK\n";
@@ -831,9 +843,11 @@ void CLI::printCommandHelp(const std::string& command) const {
     } else if (command == "convert") {
         std::cout << "\nOptions:\n";
         std::cout << "  -f, --format <fmt> Output disk format (auto-detected from extension if not specified)\n";
+        std::cout << "\nThe output may not be the input image, nor carry the extension of another\n";
+        std::cout << "format (.dsk/.img are shared); an existing file is overwritten with a warning.\n";
         std::cout << "\nSupported Conversions:\n";
         std::cout << "  Apple II:  do, po, nib, nb2, woz (any direction)\n";
-        std::cout << "             13-sector (DOS 3.2) disks -> d13 only\n";
+        std::cout << "             13-sector (DOS 3.2) disks -> d13, nib, nb2, woz\n";
         std::cout << "             800po <-> 800mg (3.5\" 800K) only\n";
         std::cout << "  MSX:       dsk <-> dmk <-> xsa\n";
         std::cout << "  X68000:    xdf <-> dim\n";
@@ -879,6 +893,8 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "                  path, not a directory.\n";
         std::cout << "  --macbinary     Write a single MacBinary v1 .bin file (128-byte header\n";
         std::cout << "                  + data fork + rsrc fork, padded to 128B blocks).\n";
+        std::cout << "\nThe output may not be the image itself; an existing file is overwritten\n";
+        std::cout << "with a warning.\n";
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool extract game.dsk PLAYER.BIN ./player.bin\n";
         std::cout << "  rdedisktool extract game.dsk GAMES/GAME.COM\n";
@@ -902,6 +918,19 @@ void CLI::printCommandHelp(const std::string& command) const {
         std::cout << "  rdedisktool rename disk.po DIR1/FILE.BIN DIR1/NEWFILE.BIN\n";
         std::cout << "  rdedisktool rename disk.dsk MYDIR NEWDIR\n";
         std::cout << "  rdedisktool rename disk.xdf SUBDIR/OLD.SYS SUBDIR/NEW.SYS\n";
+    } else if (command == "repair") {
+        std::cout << "\nCorrects damage older rdedisktool versions left on a disk (add/delete/\n";
+        std::cout << "rename correct it too, on the way):\n";
+        std::cout << "  DOS 3.3 / 3.2: sectors a file, the catalog or the VTOC uses that the\n";
+        std::cout << "                 VTOC bitmap shows as free -> marked used (sectors marked\n";
+        std::cout << "                 used that nothing refers to are only reported)\n";
+        std::cout << "  Human68k:      a BPB total larger than the image -> the image size\n";
+        std::cout << "A damaged catalog / track-sector list is not touched (see validate).\n";
+        std::cout << "\nOptions:\n";
+        std::cout << "  --dry-run   Report what would be corrected; write nothing\n";
+        std::cout << "\nExamples:\n";
+        std::cout << "  rdedisktool repair --dry-run old.dsk\n";
+        std::cout << "  rdedisktool repair old.xdf\n";
     } else if (command == "validate") {
         std::cout << "\nExamples:\n";
         std::cout << "  rdedisktool validate mydisk.dsk\n";
@@ -1595,7 +1624,7 @@ int CLI::cmdExtract(const std::vector<std::string>& args) {
             }
         }
         for (const auto& out : outputs) {
-            if (std::filesystem::exists(out)) {
+            if (std::filesystem::exists(out) && !std::filesystem::is_directory(out)) {
                 printWarning("Overwriting existing file: " + out);
             }
         }
@@ -2086,6 +2115,75 @@ int CLI::cmdDelete(const std::vector<std::string>& args) {
     }
 }
 
+int CLI::cmdRepair(const std::vector<std::string>& args) {
+    std::string imagePath;
+    bool dryRun = false;
+    for (const auto& a : args) {
+        if (a == "--dry-run") {
+            dryRun = true;
+        } else if (imagePath.empty()) {
+            imagePath = a;
+        } else {
+            printError("Unexpected argument: " + a);
+            printCommandHelp("repair");
+            return 1;
+        }
+    }
+    if (imagePath.empty()) {
+        printError("Missing image file argument");
+        printCommandHelp("repair");
+        return 1;
+    }
+
+    try {
+        auto disk = loadDiskImage(imagePath);
+        if (!disk) {
+            return 1;
+        }
+
+        // What there is to correct (nothing is changed yet)
+        const auto found = disk.handler->repairOlderWrites(false);
+        for (const auto& n : found.notes) {
+            std::cout << "Note: " << n << "\n";
+        }
+        if (found.fixes.empty()) {
+            std::cout << "Nothing to repair\n";
+            return 0;
+        }
+        if (dryRun) {
+            for (const auto& f : found.fixes) {
+                std::cout << "Would repair: " << f << "\n";
+            }
+            return 0;
+        }
+
+        auto det = BootDiskPolicy::detect(imagePath, *disk.image, disk.handler.get(), m_forcedBootProfile);
+        auto policy = BootDiskPolicy::canMutate(det, m_bootDiskMode, MutationOp::Repair, "", m_forceBootDisk);
+        if (!policy.allowed) {
+            printError(policy.reason);
+            if (policy.needsForce) {
+                printError("Hint: use --force-bootdisk to override intentionally.");
+            }
+            return 1;
+        }
+        if (!policy.reason.empty()) {
+            std::cerr << policy.reason << "\n";
+        }
+
+        const auto result = disk.handler->repairOlderWrites(true);
+        for (const auto& f : result.fixes) {
+            std::cout << "Repaired: " << f << "\n";
+        }
+        if (!dryRun && !saveDiskImage(disk.image.get(), "repair")) {
+            return 1;
+        }
+        return 0;
+    } catch (const DiskException& e) {
+        printError(e.what());
+        return 1;
+    }
+}
+
 int CLI::cmdRename(const std::vector<std::string>& args) {
     if (args.size() < 3) {
         printError("Missing arguments");
@@ -2368,13 +2466,13 @@ int CLI::cmdCreate(const std::vector<std::string>& args) {
         fsType = fileSystemFromString(filesystemStr);
         if (fsType == FileSystemType::Unknown) {
             printError("Unknown filesystem: " + filesystemStr);
-            printError("Supported filesystems: dos33, prodos, msxdos, fat12, human68k");
+            printError("Supported filesystems: dos33, dos32, prodos, msxdos, fat12, human68k, hfs, mfs");
             return 1;
         }
         if (!isFileSystemCompatible(format, fsType)) {
             printError("Filesystem '" + filesystemStr + "' is not compatible with format '" +
                        formatToString(format) + "'");
-            printError("Apple II formats support: dos33, prodos (800po/800mg: prodos only)");
+            printError("Apple II formats support: dos33, prodos (800po/800mg: prodos only; d13: dos32 only)");
             printError("MSX formats support: msxdos, fat12");
             printError("X68000 formats support: human68k");
             return 1;
@@ -2554,18 +2652,25 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
                          outputPath);
         }
 
-        // 13-sector (DOS 3.2) disks only convert to .d13, and .d13 only
-        // holds 13-sector disks: the sectors of one do not fit the other.
+        // 13-sector (DOS 3.2) disks convert to .d13, NIB, NB2 or WOZ (13-sector
+        // tracks as DOS 3.2 writes them), and .d13 only holds 13-sector disks:
+        // the sectors of one do not fit a 16-sector image.
+        const bool to13Capable = outputFormat == DiskFormat::AppleD13 ||
+                                 outputFormat == DiskFormat::AppleNIB ||
+                                 outputFormat == DiskFormat::AppleNIB2 ||
+                                 outputFormat == DiskFormat::AppleWOZ1 ||
+                                 outputFormat == DiskFormat::AppleWOZ2;
         if (inputPlatform == Platform::AppleII &&
-            (geom.sectorsPerTrack == 13) != (outputFormat == DiskFormat::AppleD13)) {
+            ((geom.sectorsPerTrack == 13 && !to13Capable) ||
+             (geom.sectorsPerTrack != 13 && outputFormat == DiskFormat::AppleD13))) {
             printError(geom.sectorsPerTrack == 13
-                           ? "13-sector (DOS 3.2) disks convert only to .d13 (-f d13)"
+                           ? "13-sector (DOS 3.2) disks convert only to d13, nib, nb2 or woz"
                            : ".d13 holds 13-sector (DOS 3.2) disks only; this disk has " +
                                  std::to_string(geom.sectorsPerTrack) + " sectors per track");
             return 1;
         }
 
-        if (std::filesystem::exists(outputPath)) {
+        if (std::filesystem::exists(outputPath) && !std::filesystem::is_directory(outputPath)) {
             printWarning("Overwriting existing file: " + outputPath);
         }
 

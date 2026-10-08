@@ -15,10 +15,18 @@ RDEDISKTOOL="${RDEDISKTOOL:-$TOOL_ROOT/build/rdedisktool}"
 
 FX="$TOOL_ROOT/tests/fixtures/macintosh"
 
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_macdc42.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
+rm -rf "$WORK"; mkdir -p "$WORK"
+
 # 1. Verify integrity of the fixtures themselves before anything else runs.
-( cd "$FX" && sha256sum -c SHA256SUMS >/tmp/macdc42_sha.log 2>&1 ) || {
+( cd "$FX" && sha256sum -c SHA256SUMS >"$WORK/sha.log" 2>&1 ) || {
   echo "fixture sha256 mismatch — aborting" >&2
-  cat /tmp/macdc42_sha.log >&2
+  cat "$WORK/sha.log" >&2
   exit 1
 }
 
@@ -38,24 +46,22 @@ for f in \
 done
 
 # 3. 1-byte-flipped DC42 copy must surface as a checksum mismatch.
-WORK="${WORK:-/tmp/rdedisktool_macdc42_$$}"
-rm -rf "$WORK"; mkdir -p "$WORK"
 cp "$FX/systemtools.image" "$WORK/corrupt.image"
 # Flip a byte well inside the data payload (header + 0x100 byte offset).
 printf '\xff' | dd of="$WORK/corrupt.image" bs=1 seek=$((0x100)) count=1 conv=notrunc >/dev/null 2>&1
 
 set +e
-"$RDEDISKTOOL" validate "$WORK/corrupt.image" >/tmp/macdc42_corrupt.log 2>&1
+"$RDEDISKTOOL" validate "$WORK/corrupt.image" >"$WORK/corrupt.log" 2>&1
 rc=$?
 set -e
 if [[ $rc -eq 0 ]]; then
   echo "expected validate to fail on corrupt DC42 but it succeeded" >&2
-  cat /tmp/macdc42_corrupt.log >&2
+  cat "$WORK/corrupt.log" >&2
   exit 1
 fi
-if ! rg -q "DC42 data checksum mismatch" /tmp/macdc42_corrupt.log; then
+if ! rg -q "DC42 data checksum mismatch" "$WORK/corrupt.log"; then
   echo "expected 'DC42 data checksum mismatch' in stderr; got:" >&2
-  cat /tmp/macdc42_corrupt.log >&2
+  cat "$WORK/corrupt.log" >&2
   exit 1
 fi
 

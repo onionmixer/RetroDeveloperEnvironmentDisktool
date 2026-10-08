@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
-# 13-sector (DOS 3.2) disks: read-only support.
+# 13-sector (DOS 3.2) disks: reading (writing: test_apple_d13_write.sh for .d13,
+# test_apple_d13_nibwoz_write.sh for NIB/NB2/WOZ).
 #
 # Expected values come from tests/tools/a2_nibref.py (5-and-3 model derived
 # from real DOS 3.2 masters), never from rdedisktool:
 #   - a synthetic DOS 3.2 disk (.d13) with two files and a known free count
 #   - NIB / rotated NIB / NB2 / WOZ2 / WOZ1 images of it and of a random .d13
 # Checks: detection (13 sectors, "DOS 3.2"), convert -> .d13 byte-identical,
-# list / extract / free space, every write refused with the image unchanged,
+# list / extract / free space,
 # conversions between 13- and 16-sector formats refused, 16-sector images
 # still read as 16-sector.
-# Optional: A2_REAL_D13_DIR = directory with "Apple DOS 3.2.1 Standard.nib",
-# its ".d13" and "DOS 3.2 System Master.woz" (asimov images/masters).
+# Optional: A2_REAL_D13_DIR (default ../resource/AppleII/dos32, not committed)
+# = directory with "Apple DOS 3.2.1 Standard.nib", its ".d13" and
+# "DOS 3.2 System Master.woz" (asimov images/masters). Every real .d13 there is
+# also used to check the DOS 3.2 free-sector bitmap layout: bytes 0-1 of a
+# track entry form a big-endian word, sector s is bit s+3 (measured 2026-10-08
+# on the Apple DOS 3.1 / 3.2 Standard / Plus / Utility / 3.2.1 masters: every
+# sector the catalog and track/sector lists use is marked used; the DOS 3.3
+# layout disagrees on all of them).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -78,22 +85,15 @@ for img in "$WORK/fs.d13" "$WORK"/fs_*.nib "$WORK"/fs_*.nb2 "$WORK"/fs_*.woz; do
     cmp -s "$WORK/fs.d13" "$WORK/back.d13" || fail "$n: convert -> d13 not byte-identical"; pass
   fi
 
-  # writes are refused and leave the image unchanged
-  cp "$img" "$WORK/try.${n##*.}"
-  echo x >"$WORK/t.txt"
-  for cmd in "add $WORK/try.${n##*.} $WORK/t.txt NEW" "delete $WORK/try.${n##*.} HELLO" \
-             "rename $WORK/try.${n##*.} HELLO HI"; do
-    # shellcheck disable=SC2086
-    [[ $(rc_of "$RDEDISKTOOL" --bootdisk-mode warn $cmd) != 0 ]] || fail "$n: ${cmd%% *} accepted"
-    grep -q "read-only" "$WORK/out.log" || { cat "$WORK/out.log" >&2; fail "$n: ${cmd%% *} refused for another reason"; }
-    cmp -s "$img" "$WORK/try.${n##*.}" || fail "$n: ${cmd%% *} changed the image"; pass
-  done
+  # (writes: .d13 in test_apple_d13_write.sh, 13-sector NIB/NB2/WOZ in
+  # test_apple_d13_nibwoz_write.sh)
 
-  # 13 -> 16-sector formats refused, nothing written
-  for to in do po nib woz; do
+  # 13 -> 16-sector formats refused, nothing written (13-sector NIB/WOZ
+  # output: test_apple_d13_create_convert.sh)
+  for to in do po; do
     rm -f "$WORK/no.$to"
     [[ $(rc_of "$RDEDISKTOOL" convert "$img" "$WORK/no.$to" -f "$to") == 1 ]] || fail "$n: convert -> $to accepted"
-    grep -q "convert only to .d13" "$WORK/out.log" || { cat "$WORK/out.log" >&2; fail "$n: -> $to refused for another reason"; }
+    grep -q "convert only to d13, nib, nb2 or woz" "$WORK/out.log" || { cat "$WORK/out.log" >&2; fail "$n: -> $to refused for another reason"; }
     [[ ! -e "$WORK/no.$to" ]] || fail "$n: -> $to wrote a file"; pass
   done
 done
@@ -149,7 +149,8 @@ for f in do nib woz; do
 done
 
 # --- optional: real DOS 3.2 masters
-if [[ -n "${A2_REAL_D13_DIR:-}" ]]; then
+A2_REAL_D13_DIR="${A2_REAL_D13_DIR:-$TOOL_ROOT/../resource/AppleII/dos32}"
+if [[ -f "$A2_REAL_D13_DIR/Apple DOS 3.2.1 Standard.d13" ]]; then
   R="$A2_REAL_D13_DIR"
   for need in "Apple DOS 3.2.1 Standard.nib" "Apple DOS 3.2.1 Standard.d13" "DOS 3.2 System Master.woz"; do
     [[ -f "$R/$need" ]] || fail "A2_REAL_D13_DIR: missing $need"
@@ -158,7 +159,39 @@ if [[ -n "${A2_REAL_D13_DIR:-}" ]]; then
   cmp -s "$R/Apple DOS 3.2.1 Standard.d13" "$WORK/real.d13" || fail "real nib -> d13 != shipped d13"; pass
   "$RDEDISKTOOL" list "$R/DOS 3.2 System Master.woz" >"$WORK/list.txt"
   grep -q "^14 file(s)" "$WORK/list.txt" && grep -q "^APPLE-TREK " "$WORK/list.txt" || fail "real woz list"; pass
-  echo "  (real DOS 3.2 masters checked)"
+  # free-sector bitmap layout on every real .d13
+  n=0
+  for img in "$R"/*.d13; do
+    want=$(python3 -I - "$img" <<'EOF'
+import sys
+d = open(sys.argv[1], 'rb').read()
+sec = lambda t, s: d[(t * 13 + s) * 256:(t * 13 + s + 1) * 256]
+v = sec(17, 0)
+free = lambda t, s: (((v[0x38 + 4 * t] << 8) | v[0x39 + 4 * t]) >> (s + 3)) & 1
+used, cat = {(17, 0)}, (v[1], v[2])
+while cat != (0, 0) and cat not in used:
+    used.add(cat); c = sec(*cat)
+    for i in range(7):
+        ts = (c[0x0B + i * 0x23], c[0x0C + i * 0x23])
+        while ts[0] not in (0, 0xFF) and ts[0] < 35 and ts[1] < 13 and ts not in used:
+            used.add(ts); l = sec(*ts)
+            used |= {(l[0x0C + 2 * k], l[0x0D + 2 * k]) for k in range(122)} - {(0, 0)}
+            ts = (l[1], l[2])
+    cat = (c[1], c[2])
+bad = [ts for ts in used if ts[0] >= 3 and ts[0] < 35 and ts[1] < 13 and free(*ts)]
+if bad:
+    sys.exit('in use but marked free: %s' % bad[:5])
+print(sum(free(t, s) for t in range(35) for s in range(13)) * 256)
+EOF
+) || fail "$(basename "$img"): DOS 3.2 bitmap"
+    got=$("$RDEDISKTOOL" list "$img" | sed -n 's/^Free space: \([0-9]*\) bytes/\1/p')
+    [[ "$got" == "$want" ]] || fail "$(basename "$img"): free space $got, want $want"
+    n=$((n + 1))
+  done
+  [[ $n -ge 1 ]] || fail "no real .d13"; pass
+  echo "  (real DOS 3.2 masters checked: $n .d13)"
+else
+  echo "  (skip: real DOS 3.2 masters missing; not judged)"
 fi
 
 echo "PASS test_apple_d13_read ($CHECKS checks)"

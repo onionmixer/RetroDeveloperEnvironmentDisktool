@@ -46,6 +46,7 @@ public:
     bool format(const std::string& volumeName = "") override;
     std::string getVolumeName() const override;
     ValidationResult validateExtended() const override;
+    RepairResult repairOlderWrites(bool apply) override;
 
     /**
      * Resolve a user file type for DOS 3.3: T/I/A/B/S/R, the ProDOS names
@@ -115,9 +116,7 @@ private:
 
     // Cached VTOC
     VTOC m_vtoc;
-    bool m_dos32 = false;  // 13-sector DOS 3.2 disk: read-only
-
-    void requireWritable() const;
+    bool m_dos32 = false;  // 13-sector DOS 3.2 disk (own bitmap layout, see bitmapBit)
 
     std::vector<std::string> m_lastWriteWarnings;
 
@@ -138,6 +137,9 @@ private:
     void writeTSList(const std::vector<TSPair>& lists, const std::vector<TSPair>& pairs);
     std::vector<uint8_t> readFileBytes(const std::string& filename, uint8_t& fileType) const;
 
+    // Byte (0/1) and mask of a sector's free bit in its track entry; false
+    // for a sector the disk does not have
+    bool bitmapBit(size_t track, size_t sector, size_t& byteIndex, uint8_t& mask) const;
     bool isSectorFree(size_t track, size_t sector) const;
     void markSectorUsed(size_t track, size_t sector);
     void markSectorFree(size_t track, size_t sector);

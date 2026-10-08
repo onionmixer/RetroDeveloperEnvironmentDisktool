@@ -123,6 +123,17 @@ public:
      *  that does not match the image); empty for most file systems. */
     virtual std::vector<std::string> mountWarnings() const { return {}; }
 
+    /** What the repair command corrects: damage older rdedisktool versions
+     *  left on a disk. `fixes` are the corrections (made when apply is true,
+     *  only reported otherwise) - the image is saved only when there are
+     *  some; `notes` are findings left as they are. Throws when the disk is
+     *  damaged in a way a repair must not touch (nothing is changed then). */
+    struct RepairResult {
+        std::vector<std::string> fixes;
+        std::vector<std::string> notes;
+    };
+    virtual RepairResult repairOlderWrites(bool /*apply*/) { return {}; }
+
     //=========================================================================
     // Directory Operations (optional - may not be supported by all file systems)
     //=========================================================================

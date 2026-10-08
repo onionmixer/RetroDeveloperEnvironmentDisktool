@@ -254,7 +254,8 @@ BootDiskDecision BootDiskPolicy::canMutate(const BootDiskDetection& det,
             op == MutationOp::Delete ||
             op == MutationOp::Mkdir  ||
             op == MutationOp::Rmdir  ||
-            op == MutationOp::Rename;
+            op == MutationOp::Rename ||
+            op == MutationOp::Repair;
         if (isDestructive) {
             out.allowed = true;
             out.reason =

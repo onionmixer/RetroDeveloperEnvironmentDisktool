@@ -52,6 +52,7 @@ public:
     bool isDirectory(const std::string& path) const override;
     ValidationResult validateExtended() const override;
     std::vector<std::string> mountWarnings() const override;
+    RepairResult repairOlderWrites(bool apply) override;
 
     // Cluster information
     struct ClusterInfo {

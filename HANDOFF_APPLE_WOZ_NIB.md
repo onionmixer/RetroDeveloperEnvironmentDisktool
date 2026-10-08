@@ -1,7 +1,7 @@
 # HANDOFF — rdedisktool Apple II WOZ(및 NIB) 지원 개선
 
 > 작성 2026-10-07 · 출처: sa2(AppleWin) IIc 지원 작업 중 발견(`DKFS_retro/prototype_20_AppleII/PLAN_99_A2_SA2_IIC.md` §11-9 참고)
-> 상태: **완료(2026-10-07)** — 결과·원인 정정·동작 변경은 맨 아래 §7. 아래 §0–§6 은 조사 당시 기록(원문 유지).
+> 상태: **완료(2026-10-07) · 후속 완료(2026-10-08)** — 결과·원인 정정·동작 변경은 맨 아래 §7(§7-6 이 최신). 아래 §0–§6 은 조사 당시 기록(원문 유지).
 
 ## 0. 한 장 요약
 
@@ -115,7 +115,7 @@ $T convert dos33.dsk x.nib -f nib ; $T convert x.nib rtn.dsk -f do              
 
 - 에뮬레이터 검증 도구 보존: `tests/emu/`(README 참조) — `emu_apple_boot_check.sh`(수동 · DOS 3.3 부팅 CATALOG·SAVE 쓰기·ProDOS 부팅을 WOZ/NIB/NB2 로 대조 · 9 판정 · 옛 인코더 빌드면 9/9 실패) · `a2run.sh`(네트워크 네임스페이스 격리 sa2 · 격리 확인 실패 시 sa2 를 띄우지 않음 · 종료/신호 시 전부 정리).
 
-### 7-4b. 13 섹터(DOS 3.2) 읽기 전용(2026-10-08)
+### 7-4b. 13 섹터(DOS 3.2) 읽기 전용(2026-10-08 · 이후 쓰기·생성·변환 지원 → §7-6)
 - NIB/NB2/WOZ 의 트랙 0 이 `D5 AA B5` 주소장이면 13 섹터로 판정(35×13 · 물리 = DOS 3.2 논리) · 5-and-3 디코더(실디스크 nib↔d13 비트 상관으로 도출) · 에필로그 `DE AA` 필수. 새 형식 `.d13`(`AppleD13Image`).
 - 파일시스템 "DOS 3.2"(DOS 3.3 처리기의 읽기 전용 모드): `info`/`list`/`extract`/`validate` · 쓰기 명령은 이미지를 바꾸지 않고 거부 · 13↔16 섹터 형식 간 변환 거부(13 섹터는 `.d13` 로만).
 - 빈 섹터 비트맵: 16 비트 워드(바이트 0 상위)의 bit (섹터+3) — 실제 DOS 3.2 마스터 2 장의 빈 섹터(T14 S0~2)로 추정 · 빈 공간 표시에만 쓰임.
@@ -127,7 +127,16 @@ $T convert dos33.dsk x.nib -f nib ; $T convert x.nib rtn.dsk -f do              
 - 예제 `Examples/Tutorial_apple_dos33_01/Tutorial_apple_dos33_01.do` 재생성(옛 도구 비트맵 · 실제 DOS SAVE 시 HELLO 3 섹터 손상 위험) — HOWTO 명령 그대로 · VTOC 1 섹터만 다름.
 - 시험 `test_apple_dos33_bitmap.sh`(31 판정 · HEAD 빌드는 실패) · 변이 5/5 · `tests/emu` 4 번 항목(실제 DOS BSAVE 대조) · 기존 31/31.
 
-### 7-5. 남은 것
-- 비표준(복제 방지) 트랙 부분 갱신 · 약한 비트 · 13 섹터 쓰기·생성(읽기 전용만 지원).
-- DOS 3.3 부트 보호는 트랙 0 만(트랙 0~2 확장은 rdedisktool 포맷 디스크에서 오탐 — 실측 후 취소).
+### 7-5. 남은 것(2026-10-07 기록 → 2026-10-08 처리 결과)
+- ~~비표준(복제 방지) 트랙 부분 갱신~~ → §7-6 ✅ · 약한 비트 무작위 재현 → **하지 않음**(읽을 수 없는 섹터로 둠) · ~~13 섹터 쓰기·생성~~ → §7-6 ✅.
+- DOS 3.3 부트 보호는 트랙 0 만(트랙 0~2 확장은 rdedisktool 포맷 디스크에서 오탐 — 실측 후 취소) — 그대로.
 
+### 7-6. 후속(2026-10-08)
+- **NIB/WOZ 섹터 쓰기 = 데이터 필드만 교체**(RWTS 방식): 주소 필드·갭·다른 섹터(읽을 수 없는 것 포함)·복제 방지 니블·약한 비트 유지 · 대상 섹터만 읽히면 됨 · 쓴 뒤 재해독 확인, 실패 시 원상 복구 · 타이밍 비트가 있는 필드는 8 비트 니블로 다시 써서 트랙이 짧아짐(WOZ1 splice point 이동) · WRIT 청크 폐기. 시험 `test_apple_nibwoz_partial_write.sh`.
+- **DOS 3.2 쓰기**: `.d13`·13 섹터 NIB/NB2/WOZ 에 add/delete/rename(5-and-3 인코더 · 비트맵 bit s+3 은 Apple 마스터 5 장으로 확정) · 실제 DOS 3.2 `INIT` 는 주소 필드만 쓰므로 아직 쓴 적 없는 섹터에는 주소 필드 뒤에 데이터 필드를 새로 씀(동기 14 + D5 AA AD..DE AA EB) · 공간이 없으면 거부·불변. 시험 `test_apple_d13_write.sh` · `test_apple_d13_nibwoz_write.sh`.
+- **DOS 3.2 생성·변환**: `create x.d13 -f d13 --fs dos32` = 실제 INIT 의 VTOC·카탈로그와 바이트 동일(DOS 본체 제외) · `.d13` → 13 섹터 nib/nb2/woz(실기 캡처 배치: 9 비트 동기, 물리 순서 0,10,7,4,1,11,8,5,2,12,9,6,3 · System Master 캡처 왕복이 비트 동일). 시험 `test_apple_d13_create_convert.sh`.
+- **WOZ 2.1 FLUX 판독**(읽기 전용): 간격 / optimal bit timing 을 반올림해 비트열로 · 쓰기와 FLUX 가 있는 WOZ 저장은 거부 · Applesauce 시험 이미지(짝수 트랙 FLUX)가 전부 읽히고 `.po` 로 변환하면 부팅. 시험 `test_apple_woz_read.sh` §4.
+- **VTOC**: 쓸 때 rdedisktool 이 모르는 바이트 유지(바이트 0 등) · 할당 방향 0 처리 · `repair` 명령(예전 비트 순서로 비어 보이는 사용 중 섹터를 사용 표시, Human68k 과대 BPB). 시험 `test_repair_older_writes.sh`.
+- 에뮬레이터 점검 `tests/emu/emu_apple_boot_check.sh` 5~8 추가(DOS 3.2 · FLUX) — 22/22.
+- 하지 않기로 확정: 실제 DOS 와 같은 할당 순서 · FLUX 트랙 쓰기 · 트랙 0 이 빈 13 섹터 이미지의 검출.
+- 실디스크(커밋 안 함): `resource/AppleII/dos32`(Asimov DOS 3.1/3.2 마스터) · `resource/AppleII/woz_flux`(Applesauce FLUX 샘플) — 각 `SOURCE.txt` 에 출처·sha256.

@@ -63,7 +63,7 @@ public:
         return m_sectors13 ? SectorOrder::Physical : SectorOrder::DOS;
     }
 
-    /** True when the tracks are 13-sector (DOS 3.2): read-only */
+    /** True when the tracks are 13-sector (DOS 3.2, 5-and-3) */
     bool isThirteenSector() const { return m_sectors13; }
 
     //=========================================================================
@@ -76,10 +76,6 @@ public:
     size_t getTrackSize() const { return m_trackSize; }
 
 
-    /**
-     * Rebuild nibble track from decoded sectors
-     */
-    void rebuildTrack(size_t track);
 
     /**
      * Get/set volume number (used in address fields)
@@ -105,7 +101,6 @@ private:
     // Cached decoded sectors per track (indexed by DOS logical sector)
     std::array<NibbleEncoder::ParsedTrack, TRACKS_35> m_decodedTracks;
     std::array<bool, TRACKS_35> m_trackDecoded = {};
-    std::array<bool, TRACKS_35> m_trackDirty = {};
 
     // DOS-order sector image for file system detection
     mutable std::vector<uint8_t> m_detectionImage;

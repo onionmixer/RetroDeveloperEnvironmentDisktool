@@ -8,8 +8,8 @@ namespace rde {
 /**
  * Apple DOS 3.2 sector image (.d13): 35 tracks x 13 sectors x 256 bytes
  * (116,480 bytes), sectors in physical order (DOS 3.2 has no software
- * interleave). Read with the DOS 3.2 file system (read-only); written only
- * as the output of `convert` from 13-sector NIB/WOZ images.
+ * interleave). Read and written with the DOS 3.2 file system; also the
+ * output of `convert` from 13-sector NIB/WOZ images.
  */
 class AppleD13Image : public AppleDOImage {
 public:

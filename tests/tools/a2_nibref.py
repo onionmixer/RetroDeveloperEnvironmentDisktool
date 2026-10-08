@@ -183,8 +183,26 @@ def track_units13(d13, t, vol=254, gap1=89, gap2=6, gap3=27, sync_bits=10):
     return units
 
 
+# Measured on the Applesauce capture "DOS 3.2 System Master.woz" (35 tracks
+# alike): 16 nine-bit syncs, then per sector in this physical order address
+# field + DE AA EB, 14 syncs, data field + DE AA EB, 28 syncs; 49,882 bits.
+ORDER13_REAL = [0, 10, 7, 4, 1, 11, 8, 5, 2, 12, 9, 6, 3]
+
+
+def track_units13_real(d13, t, vol=254, gap1=16, sync_bits=9):
+    """13-sector track laid out like real DOS 3.2 writes it (see ORDER13_REAL)."""
+    units = [(0xFF, sync_bits)] * gap1
+    for p in ORDER13_REAL:
+        units += [(x, 8) for x in b'\xd5\xaa\xb5' + enc44(vol) + enc44(t) + enc44(p) + enc44(vol ^ t ^ p) + b'\xde\xaa\xeb']
+        units += [(0xFF, sync_bits)] * 14
+        units += [(x, 8) for x in b'\xd5\xaa\xad' + encode53(d13[(t * 13 + p) * 256:(t * 13 + p + 1) * 256]) + b'\xde\xaa\xeb']
+        units += [(0xFF, sync_bits)] * 28
+    return units
+
+
 def parse_stream13(nibs, track):
-    """{physical: dict(vol, data, raw)} for DOS 3.2 sectors, same validity rules as 16-sector."""
+    """{physical: dict(vol, data, raw, dp)} for DOS 3.2 sectors, same validity rules as 16-sector
+    (dp = index of the data prologue D5 of D5 AA AD)."""
     res, i, n = {}, 0, len(nibs)
     while i + 14 <= n:
         if nibs[i:i + 3] != [0xD5, 0xAA, 0xB5] or nibs[i + 11:i + 13] != [0xDE, 0xAA]:
@@ -210,7 +228,7 @@ def parse_stream13(nibs, track):
             i += 1
             continue
         if ok and sec not in res:
-            res[sec] = dict(vol=vol, data=data, raw=bytes(nibs[dp + 3:dp + 414]))
+            res[sec] = dict(vol=vol, data=data, raw=bytes(nibs[dp + 3:dp + 414]), dp=dp)
         i = dp + 416 if ok else i + 1
     return res
 
@@ -241,6 +259,20 @@ def make_13(kind, d13, out):
                 tr = tr[r:] + tr[:r]
             res += tr
         open(out, 'wb').write(res)
+        return 0
+    if kind in ('realnib', 'realnb2'):
+        size = 6384 if kind == 'realnb2' else 6656
+        res = bytearray()
+        for t in range(35):
+            body = bytes(v for v, _ in track_units13_real(d13, t, gap1=0))
+            res += b'\xff' * (size - len(body)) + body          # gap 1 takes what is left
+        open(out, 'wb').write(res)
+        return 0
+    if kind == 'realwoz':
+        info = bytearray(info_chunk(largest=13))
+        info[38] = 2
+        open(out, 'wb').write(woz2([units_to_bits(track_units13_real(d13, t)) for t in range(35)],
+                                   standard_tmap(35), info=bytes(info)))
         return 0
     tracks = [units_to_bits(track_units13(d13, t)) for t in range(35)]
     if kind == 'woz':
@@ -600,6 +632,46 @@ def read_woz(path):
     return w
 
 
+def flux_bits(raw, timing=32):
+    """WOZ 2.1 FLUX bytes -> bits: ticks (125 ns) per transition, 255 adds to
+    the next byte; n = ticks / timing rounded half up (>= 1): n-1 zeros, a one."""
+    bits, acc = [], 0
+    for b in raw:
+        acc += b
+        if b == 255:
+            continue
+        n = max(1, (2 * acc + timing) // (2 * timing))
+        bits += [0] * (n - 1) + [1]
+        acc = 0
+    return bits
+
+
+def flux_decode(path, out):
+    """16-sector WOZ with FLUX and/or bit tracks -> DOS-order sectors (all must read)."""
+    w = read_woz(path)
+    d, info = w['raw'], w['info']
+    timing = info[39] or 32
+    get = {c[0]: c for c in w['chunks']}
+    fm = list(get[b'FLUX'][2][:160]) if b'FLUX' in get and info[0] >= 3 else [0xFF] * 160
+    trks = get[b'TRKS'][2]
+    res = bytearray(35 * 16 * 256)
+    for t in range(35):
+        if fm[4 * t] != 0xFF:
+            sb, bc, nb = struct.unpack('<HHI', trks[fm[4 * t] * 8:fm[4 * t] * 8 + 8])
+            bits = flux_bits(d[sb * 512:sb * 512 + nb], timing)
+        else:
+            bits = woz_track(w, t)
+        f = parse_stream([v for v, _ in lss(bits, 2)], t)
+        if len(f) != 16:
+            print('track %d: %d sectors' % (t, len(f)))
+            return 1
+        for p, s in f.items():
+            L = DOS_P2L[p]
+            res[(t * 16 + L) * 256:(t * 16 + L + 1) * 256] = s['data']
+    open(out, 'wb').write(res)
+    return 0
+
+
 def woz_track(w, t):
     idx = w['tmap'][4 * t]
     if idx == 0xFF or idx not in w['tracks']:
@@ -718,7 +790,7 @@ def make_woz(kind, dsk, out):
     rnd = random.Random(1234)
     tracks = []
     for t in range(35):
-        if kind in ('standard', 'woz1', 'flux', 'bad-bitcount', 'bad-block', 'bad-tmap'):
+        if kind in ('standard', 'woz1', 'flux', 'flux-even', 'bad-bitcount', 'bad-block', 'bad-tmap'):
             bits = units_to_bits(track_units(dsk, t))
         elif kind == 'sync8':
             # 8-bit syncs and a bit count that is not a multiple of 8
@@ -739,6 +811,54 @@ def make_woz(kind, dsk, out):
     tmap = standard_tmap(35)
     if kind == 'woz1':
         data = woz1(tracks, tmap)
+    elif kind == 'flux-even':
+        # Like the Applesauce sample "ProDOS User's Disk": even tracks as FLUX
+        # (WOZ 2.1), odd tracks as bits. Flux bytes = ticks (125 ns) between
+        # 1 bits: cells * 32 + jitter of up to +-10 ticks; 255 continues into
+        # the next byte: on every FLUX track the last gap-2 sync before the
+        # first data field carries 12 more zero bits (480 ticks to the D5:
+        # 255 + 225), so reading 255 as an interval of its own puts a 1 there
+        # and the data prologue is framed wrong
+        jr = random.Random(77)
+        def to_flux(bits):
+            ones = [i for i, b in enumerate(bits) if b]
+            out = bytearray()
+            for k, pos in enumerate(ones):
+                cells = pos - ones[k - 1] if k else pos + len(bits) - ones[-1]
+                ticks = cells * 32 + jr.randint(-10, 10)
+                while ticks >= 255:
+                    out.append(255); ticks -= 255
+                out.append(ticks)
+            return bytes(out)
+        bit_tracks, flux_tracks = [], []
+        for t in range(35):
+            if t % 2 == 0:
+                u = track_units(dsk, t)
+                j = next(i for i in range(len(u)) if [v for v, _ in u[i:i + 3]] == [0xD5, 0xAA, 0xAD])
+                assert u[j - 1][0] == 0xFF
+                u[j - 1] = (0xFF, u[j - 1][1] + 12)
+                flux_tracks.append((t, units_to_bits(u)))
+            else:
+                bit_tracks.append((t, list(tracks[t])))
+        tm = [0xFF] * 160
+        fl = [0xFF] * 160
+        entries, blobs, block = bytearray(1280), bytearray(), 3
+        for i, (t, b) in enumerate(bit_tracks + flux_tracks):
+            raw = pack(b) if t % 2 else to_flux(b)
+            n = (len(raw) + 511) // 512
+            struct.pack_into('<HHI', entries, i * 8, block, n, len(b) if t % 2 else len(raw))
+            blobs += raw + bytes(n * 512 - len(raw))
+            block += n
+            for q in (4 * t - 1, 4 * t, 4 * t + 1):
+                if 0 <= q < 160:
+                    (tm if t % 2 else fl)[q] = i
+        trks = bytes(entries) + bytes(blobs)
+        largest_flux = max((len(to_flux(b)) + 511) // 512 for _, b in flux_tracks)
+        flux_offset = 256 + len(trks)
+        assert flux_offset % 512 == 0
+        info = info_chunk(version=3, largest=13, flux_block=flux_offset // 512, largest_flux=largest_flux)
+        body = chunk(b'INFO', info) + chunk(b'TMAP', bytes(tm)) + chunk(b'TRKS', trks) + chunk(b'FLUX', bytes(fl))
+        data = b'WOZ2\xff\x0a\x0d\x0a' + struct.pack('<I', zlib.crc32(body) & 0xFFFFFFFF) + body
     elif kind == 'flux':
         # INFO v3 + FLUX map: quarter track 0 (track 0) is flux entry 35
         flux_bytes = bytes(rnd.randrange(1, 255) for _ in range(512))
@@ -901,6 +1021,8 @@ def main(argv):
         return woz_info(args[0])
     if cmd == 'order-check':
         return order_check(args[0], args[1], args[2])
+    if cmd == 'flux-decode':
+        return flux_decode(args[0], args[1])
     if cmd == 'make-13':
         return make_13(args[0], open(args[1], 'rb').read(), args[2])
     if cmd == 'make-dos33-partial':

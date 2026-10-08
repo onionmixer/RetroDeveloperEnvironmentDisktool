@@ -39,7 +39,7 @@ enum class DiskFormat {
     MacIMG,         // Raw 512-byte sector image (.img / .dsk)
     MacDC42,        // Apple Disk Copy 4.2 container (.image / .dc42)
     MacMOOF,        // Applesauce MOOF (.moof) — bitstream/flux GCR/MFM
-    AppleD13,       // DOS 3.2 13-sector sector image (.d13, read-only use)
+    AppleD13,       // DOS 3.2 13-sector sector image (.d13)
     Apple800PO,     // Apple II 3.5" 800K ProDOS-order block image (.po, 819,200 bytes)
     Apple800MG      // the same 800K image in a 2MG container (.2mg)
 };
@@ -60,7 +60,7 @@ enum class FileSystemType {
     // Macintosh
     HFS,            // Hierarchical File System
     MFS,            // Macintosh File System (flat)
-    DOS32           // Apple DOS 3.2 (13 sectors/track, read-only)
+    DOS32           // Apple DOS 3.2 (13 sectors/track)
 };
 
 // Sector order for Apple II

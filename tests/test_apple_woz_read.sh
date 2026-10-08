@@ -82,7 +82,7 @@ nibref make-nib standard "$WORK/dos.do" "$WORK/clean.nib"
 [[ $(rc_of "$RDEDISKTOOL" convert "$WORK/clean.nib" "$WORK/clean.do" -f do) == 0 ]] || fail "clean NIB"
 ! grep -q "misses fixed bits" "$WORK/out.log" || fail "clean NIB must not warn"; pass
 
-# 2. WOZ1: read, then write one file and check that only rebuilt tracks change
+# 2. WOZ1: read, then write one file; tracks keep their splice points
 nibref make-woz woz1 "$WORK/dos.do" "$WORK/w1.woz"
 "$RDEDISKTOOL" info "$WORK/w1.woz" | grep -q "Format: Apple II WOZ v1" || fail "WOZ1 format"; pass
 "$RDEDISKTOOL" convert "$WORK/w1.woz" "$WORK/w1.do" -f do >/dev/null || fail "convert WOZ1"
@@ -101,8 +101,10 @@ import struct, sys
 d = open(sys.argv[1], 'rb').read()
 trks = d.index(b'TRKS') + 8
 splices = [struct.unpack('<H', d[trks + i * 6656 + 6650:trks + i * 6656 + 6652])[0] for i in range(35)]
-# DOS 3.3 writes the catalog/VTOC track 17: rebuilt -> 0xFFFF; others unchanged
-sys.exit(0 if splices[17] == 0xFFFF and splices.count(0x1234) >= 30 else 1)
+# DOS 3.3 writes the catalog/VTOC track 17. A sector write replaces only the
+# data field (same length), so every track keeps its splice point (before
+# 2026-10-08 a written track was rebuilt and lost it: 0xFFFF)
+sys.exit(0 if splices == [0x1234] * 35 else 1)
 EOF
 pass
 
@@ -124,14 +126,39 @@ nibref sparse-woz "$WORK/pro.woz" "$WORK/track5.woz" 5
 [[ $(rc_of "$RDEDISKTOOL" info "$WORK/track5.woz") == 0 ]] || fail "info on unformatted WOZ"
 grep -q "File System: Unknown" "$WORK/out.log" || fail "unformatted WOZ is Unknown"; pass
 
-# 4. FLUX track (WOZ 2.1): container info works, sector access refuses
+# 4. FLUX tracks (WOZ 2.1) are read (flux intervals -> bits, n = ticks / 32
+#    rounded half up), never written
+#    a) track 0 = 512 random flux bytes: no sectors there (exit 2, track 0
+#       listed), writes refused, image unchanged
 nibref make-woz flux "$WORK/dos.do" "$WORK/flux.woz"
 [[ $(rc_of "$RDEDISKTOOL" info "$WORK/flux.woz") == 0 ]] || fail "info on FLUX WOZ"
 [[ $(rc_of "$RDEDISKTOOL" convert "$WORK/flux.woz" "$WORK/flux.do" -f do) == 2 ]] || fail "FLUX convert exit 2"
-grep -q "FLUX" "$WORK/out.log" || fail "FLUX reason reported"; pass
+grep -q "T0/" "$WORK/out.log" || fail "unreadable FLUX track 0 reported"; pass
 cp "$WORK/flux.woz" "$WORK/flux_copy.woz"
 [[ $(rc_of "$RDEDISKTOOL" add "$WORK/flux.woz" "$WORK/blob2.bin" BLOB2) != 0 ]] || fail "write to FLUX WOZ must fail"
 same "$WORK/flux_copy.woz" "$WORK/flux.woz" "FLUX WOZ unchanged after refused write"
+#    b) even tracks as FLUX with +-10 tick jitter and 255 continuations (like
+#       the Applesauce sample): every sector = the source .do
+nibref make-woz flux-even "$WORK/dos.do" "$WORK/fluxeven.woz"
+[[ $(rc_of "$RDEDISKTOOL" convert "$WORK/fluxeven.woz" "$WORK/fluxeven.do" -f do) == 0 ]] || { cat "$WORK/out.log" >&2; fail "FLUX (even tracks) convert"; }
+same "$WORK/dos.do" "$WORK/fluxeven.do" "FLUX tracks decode to the source sectors"
+cp "$WORK/fluxeven.woz" "$WORK/fluxeven_copy.woz"
+[[ $(rc_of "$RDEDISKTOOL" add "$WORK/fluxeven.woz" "$WORK/blob2.bin" BLOB2) != 0 ]] || fail "add to a WOZ with FLUX tracks must fail"
+grep -q "FLUX" "$WORK/out.log" || { cat "$WORK/out.log" >&2; fail "FLUX refusal reason"; }
+same "$WORK/fluxeven_copy.woz" "$WORK/fluxeven.woz" "FLUX WOZ unchanged after refused add"
+#    c) optional real capture (A2_REAL_FLUX, default ../resource/AppleII/woz_flux):
+#       every track readable, = an independent decode of the same file
+FLUX_DEFAULT="$TOOL_ROOT/../resource/AppleII/woz_flux/ProDOS User's Disk - Disk 1, Side A.woz"
+FLUX_REAL="${A2_REAL_FLUX:-$FLUX_DEFAULT}"
+if [[ -f "$FLUX_REAL" ]]; then
+  [[ $(rc_of "$RDEDISKTOOL" convert "$FLUX_REAL" "$WORK/real.do" -f do) == 0 ]] || { cat "$WORK/out.log" >&2; fail "real FLUX capture convert"; }
+  nibref flux-decode "$FLUX_REAL" "$WORK/real_ref.do"
+  same "$WORK/real_ref.do" "$WORK/real.do" "real FLUX capture = independent decode"
+  [[ $(rc_of "$RDEDISKTOOL" info "$FLUX_REAL") == 0 ]] && grep -q "File System: ProDOS" "$WORK/out.log" || fail "real FLUX capture: ProDOS"
+  pass
+else
+  echo "  (skip: $FLUX_REAL missing; not judged)"
+fi
 
 # 5. Damaged TRKS tables are rejected cleanly
 for kind in bad-bitcount bad-block; do

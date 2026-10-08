@@ -17,6 +17,10 @@
 
 set -euo pipefail
 
+# Per-run log: ctest -j runs these scripts in parallel
+LOG="$(mktemp "${TMPDIR:-/tmp}/rdedisktool_test.XXXXXX")"
+trap 'rm -f "$LOG"' EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -34,7 +38,12 @@ FX_FULL="$TOOL_ROOT/tests/fixtures/macintosh/stuffit_expander_5.5.img"
 [[ -f "$FX_BOOT" ]] || { echo "missing $FX_BOOT" >&2; exit 1; }
 [[ -f "$FX_FULL" ]] || { echo "missing $FX_FULL" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_hfs_write_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_hfs_write.XXXXXX")"
+  trap 'rm -f "$LOG"; [[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 # 1. Synthesize a non-bootable HFS image by zeroing the LK signature on a
@@ -50,8 +59,8 @@ INPUT_SHA=$(sha256sum "$INPUT" | awk '{print $1}')
 
 # 2. add succeeds on the non-bootable image.
 "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/nonboot.img" "$INPUT" "Hello.txt" \
-    >/tmp/rdedisktool_test.log 2>&1 || {
-  echo "HFS add failed" >&2; cat /tmp/rdedisktool_test.log >&2; exit 1
+    >"$LOG" 2>&1 || {
+  echo "HFS add failed" >&2; cat "$LOG" >&2; exit 1
 }
 
 # 3. rdedisktool extract round-trip.
@@ -87,7 +96,7 @@ ORIG_BOOT_BLOCK=$(head -c 1024 "$WORK/boot.img" | sha256sum | awk '{print $1}')
 #     real invariant is that the boot block bytes (sectors 0..1) stay
 #     untouched, so the LK signature + System/Finder names are preserved.
 "$RDEDISKTOOL" --bootdisk-mode strict add "$WORK/boot.img" "$INPUT" "RegularFile.txt" \
-    >/tmp/rdedisktool_test.log 2>&1 || true
+    >"$LOG" 2>&1 || true
 NEW_BOOT_BLOCK=$(head -c 1024 "$WORK/boot.img" | sha256sum | awk '{print $1}')
 [[ "$ORIG_BOOT_BLOCK" == "$NEW_BOOT_BLOCK" ]] || {
   echo "bootable image's boot block was mutated by safe-add" >&2
@@ -100,13 +109,13 @@ NEW_BOOT_BLOCK=$(head -c 1024 "$WORK/boot.img" | sha256sum | awk '{print $1}')
 #     Note: M7 does not implement HFS delete, but the policy fires first.
 set +e
 "$RDEDISKTOOL" --bootdisk-mode strict delete "$WORK/boot.img" "System Folder/System" \
-    >/tmp/rdedisktool_test.log 2>&1
+    >"$LOG" 2>&1
 rc=$?
 set -e
 [[ $rc -ne 0 ]] || { echo "expected delete of System Folder/System to fail" >&2; exit 1; }
-rg -q "Boot disk protection" /tmp/rdedisktool_test.log || {
+rg -q "Boot disk protection" "$LOG" || {
   echo "expected 'Boot disk protection' message; got:" >&2
-  cat /tmp/rdedisktool_test.log >&2; exit 1
+  cat "$LOG" >&2; exit 1
 }
 
 # 6. C4: catalog leaf split. The stuffit_expander fixture has its single
@@ -115,9 +124,9 @@ rg -q "Boot disk protection" /tmp/rdedisktool_test.log || {
 #    and the add succeeds, surviving cross-tool read.
 cp "$FX_FULL" "$WORK/full.img"
 "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/full.img" "$INPUT" "Hello.txt" \
-    >/tmp/rdedisktool_test.log 2>&1 || {
+    >"$LOG" 2>&1 || {
   echo "C4: full-leaf add should now succeed via split" >&2
-  cat /tmp/rdedisktool_test.log >&2
+  cat "$LOG" >&2
   exit 1
 }
 "$RDEDISKTOOL" list "$WORK/full.img" | rg -q "Hello.txt" || {

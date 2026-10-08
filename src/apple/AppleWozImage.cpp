@@ -93,16 +93,18 @@ void AppleWozImage::load(const std::filesystem::path& path) {
 
     // 13-sector (DOS 3.2) or 16-sector tracks, decided by track 0's content
     m_sectors13 = false;
-    if (trackIndexFor(0) >= 0 && !isFluxTrack(0)) {
-        const TrackInfo& t0 = m_tracks[trackIndexFor(0)];
-        m_sectors13 = NibbleEncoder::looksLike13Sector(
-            NibbleEncoder::wozBitsToNibbles(t0.bits, t0.bitCount, 2), 0);
+    {
+        std::vector<uint8_t> bits;
+        uint32_t bitCount = 0;
+        if (readableBits(0, bits, bitCount)) {
+            m_sectors13 = NibbleEncoder::looksLike13Sector(
+                NibbleEncoder::wozBitsToNibbles(bits, bitCount, 2), 0);
+        }
     }
     initGeometry(TRACKS_35, m_sectors13 ? SECTORS_13 : SECTORS_16);
 
     m_modified = false;
     std::fill(m_sectorsCached.begin(), m_sectorsCached.end(), false);
-    std::fill(m_trackDirty.begin(), m_trackDirty.end(), false);
     invalidateDetection();
 }
 
@@ -318,12 +320,6 @@ void AppleWozImage::save(const std::filesystem::path& path) {
         throw UnsupportedFormatException("Saving WOZ files with FLUX tracks is not supported");
     }
 
-    for (size_t t = 0; t < TRACKS_35; ++t) {
-        if (m_trackDirty[t]) {
-            rebuildTrack(t);
-        }
-    }
-
     auto wozData = buildWozFile();
 
     std::ofstream file(savePath, std::ios::binary);
@@ -520,10 +516,11 @@ AppleWozImage::TrackInfo AppleWozImage::makeStandardTrack(
 }
 
 void AppleWozImage::create(const DiskGeometry& geometry) {
-    requireLoadableGeometry(geometry, false);
+    requireLoadableGeometry(geometry, true);
     size_t tracks = geometry.tracks > 0 ? geometry.tracks : TRACKS_35;
-    initGeometry(tracks, SECTORS_16);
-    m_sectors13 = false;
+    // 13 sectors: DOS 3.2 tracks (the target of a .d13 conversion)
+    m_sectors13 = geometry.sectorsPerTrack == SECTORS_13;
+    initGeometry(tracks, m_sectors13 ? SECTORS_13 : SECTORS_16);
 
     m_wozVersion = 2;
     m_infoVersion = 2;
@@ -533,7 +530,7 @@ void AppleWozImage::create(const DiskGeometry& geometry) {
     m_synchronized = false;
     m_cleaned = true;
     m_diskSides = 1;
-    m_bootSectorFormat = 1;  // 16-sector
+    m_bootSectorFormat = m_sectors13 ? 2 : 1;  // 13- or 16-sector
     m_optimalBitTiming = 32;
     m_creator = "rdedisktool";
     m_metadata.clear();
@@ -558,7 +555,17 @@ void AppleWozImage::create(const DiskGeometry& geometry) {
     }
     m_tracks.assign(tracks, TrackInfo{});
     for (size_t t = 0; t < tracks; ++t) {
-        m_tracks[t] = makeStandardTrack(sectorData, 254, static_cast<uint8_t>(t));
+        if (m_sectors13) {
+            TrackInfo info;
+            const auto nibbles = NibbleEncoder::buildTrackNibbles13(
+                sectorData, 254, static_cast<uint8_t>(t), NibbleEncoder::WOZ13_GAP1_SYNCS);
+            info.bits = NibbleEncoder::nibblesToWozBits(nibbles, info.bitCount, 9);
+            info.bytesUsed = static_cast<uint16_t>(info.bits.size());
+            info.splicePoint = 0xFFFF;
+            m_tracks[t] = std::move(info);
+        } else {
+            m_tracks[t] = makeStandardTrack(sectorData, 254, static_cast<uint8_t>(t));
+        }
     }
 
     // Build the file data
@@ -567,7 +574,6 @@ void AppleWozImage::create(const DiskGeometry& geometry) {
     m_modified = true;
     m_filePath.clear();
     std::fill(m_sectorsCached.begin(), m_sectorsCached.end(), false);
-    std::fill(m_trackDirty.begin(), m_trackDirty.end(), false);
     invalidateDetection();
 }
 
@@ -592,13 +598,78 @@ bool AppleWozImage::isFluxTrack(size_t track) const {
     return m_hasFlux && track * 4 < TMAP_SIZE && m_fluxMap[track * 4] != 0xFF;
 }
 
-NibbleEncoder::ParsedTrack AppleWozImage::parseTrackBits(size_t track) const {
+int AppleWozImage::fluxIndexFor(size_t track) const {
+    if (!isFluxTrack(track)) {
+        return -1;
+    }
+    const uint8_t index = m_fluxMap[track * 4];
+    if (index >= m_tracks.size() || m_tracks[index].bitCount == 0) {
+        return -1;
+    }
+    return index;
+}
+
+bool AppleWozImage::isFluxEntry(int index) const {
+    return m_hasFlux && index >= 0 &&
+           std::find(m_fluxMap.begin(), m_fluxMap.end(), static_cast<uint8_t>(index)) !=
+               m_fluxMap.end();
+}
+
+std::vector<uint8_t> AppleWozImage::fluxToBits(const TrackInfo& t, uint32_t& bitCount) const {
+    // Each byte: ticks (125 ns) since the previous flux transition; 255 adds
+    // to the next byte. A transition is a 1 bit; an interval of n bit cells
+    // (n = ticks / optimal bit timing, rounded half up, at least 1) is n-1
+    // zero bits and the one. The stream loops without a time warp.
+    const uint32_t timing = m_optimalBitTiming != 0 ? m_optimalBitTiming : 32;
+    std::vector<uint8_t> bits;
+    uint32_t count = 0;
+    auto push = [&](int bit) {
+        if ((count & 7) == 0) bits.push_back(0);
+        if (bit) bits.back() |= static_cast<uint8_t>(0x80 >> (count & 7));
+        ++count;
+    };
+    const size_t n = std::min<size_t>(t.bitCount, t.bits.size());
+    uint64_t ticks = 0;
+    for (size_t i = 0; i < n; ++i) {
+        ticks += t.bits[i];
+        if (t.bits[i] == 255) {
+            continue;
+        }
+        const uint64_t cells = std::max<uint64_t>(1, (2 * ticks + timing) / (2 * timing));
+        for (uint64_t k = 1; k < cells; ++k) push(0);
+        push(1);
+        ticks = 0;
+    }
+    bitCount = count;
+    return bits;
+}
+
+bool AppleWozImage::readableBits(size_t track, std::vector<uint8_t>& bits,
+                                 uint32_t& bitCount) const {
+    const int flux = fluxIndexFor(track);
+    if (flux >= 0) {
+        bits = fluxToBits(m_tracks[flux], bitCount);
+        return bitCount > 0;
+    }
+    if (isFluxTrack(track)) {
+        return false;   // FLUX map entry without data: the TMAP one is not used
+    }
     const int index = trackIndexFor(track);
-    if (index < 0 || isFluxTrack(track)) {
+    if (index < 0) {
+        return false;
+    }
+    bits = m_tracks[index].bits;
+    bitCount = m_tracks[index].bitCount;
+    return true;
+}
+
+NibbleEncoder::ParsedTrack AppleWozImage::parseTrackBits(size_t track) const {
+    std::vector<uint8_t> bits;
+    uint32_t bitCount = 0;
+    if (!readableBits(track, bits, bitCount)) {
         return {};
     }
-    const TrackInfo& info = m_tracks[index];
-    auto nibbles = NibbleEncoder::wozBitsToNibbles(info.bits, info.bitCount, 2);
+    auto nibbles = NibbleEncoder::wozBitsToNibbles(bits, bitCount, 2);
     return m_sectors13 ? NibbleEncoder::parseNibbleStream13(nibbles, static_cast<uint8_t>(track))
                        : NibbleEncoder::parseNibbleStream(nibbles, static_cast<uint8_t>(track));
 }
@@ -622,7 +693,6 @@ const std::vector<uint8_t>& AppleWozImage::detectionImage() const {
         m_detectionImage.assign(TRACKS_35 * spt * BYTES_PER_SECTOR, 0);
         const size_t tracks = std::min(m_geometry.tracks, TRACKS_35);
         for (size_t t = 0; t < tracks; ++t) {
-            // Pending sector writes live in the decoded cache until save()
             const NibbleEncoder::ParsedTrack parsed =
                 m_sectorsCached[t] ? m_decodedSectors[t] : parseTrackBits(t);
             for (size_t s = 0; s < spt; ++s) {
@@ -644,11 +714,6 @@ SectorBuffer AppleWozImage::readSector(size_t track, size_t /*side*/, size_t sec
     if (sector >= m_geometry.sectorsPerTrack) {
         throw SectorNotFoundException(static_cast<int>(track), static_cast<int>(sector));
     }
-    if (isFluxTrack(track)) {
-        throw UnsupportedFormatException("Track " + std::to_string(track) +
-                                         " is stored as FLUX data (not supported)");
-    }
-
     decodeSectorsForTrack(track);
     if (!m_decodedSectors[track].found[sector]) {
         throw SectorNotFoundException(static_cast<int>(track), static_cast<int>(sector));
@@ -661,55 +726,169 @@ void AppleWozImage::writeSector(size_t track, size_t /*side*/, size_t sector,
     if (m_writeProtected) {
         throw WriteProtectedException();
     }
-    if (m_sectors13) {
-        throw UnsupportedFormatException("13-sector (DOS 3.2) images are read-only");
-    }
-
     if (track >= m_geometry.tracks || track >= TRACKS_35) {
         throw SectorNotFoundException(static_cast<int>(track), static_cast<int>(sector));
     }
     if (sector >= m_geometry.sectorsPerTrack) {
         throw SectorNotFoundException(static_cast<int>(track), static_cast<int>(sector));
     }
-    if (isFluxTrack(track)) {
+    // FLUX data is only read, never written (also when the TMAP entry is
+    // FLUX data another map entry points at)
+    if (isFluxTrack(track) || isFluxEntry(trackIndexFor(track))) {
         throw UnsupportedFormatException("Track " + std::to_string(track) +
-                                         " is stored as FLUX data (not supported)");
+                                         " is stored as FLUX data (read-only)");
     }
 
-    decodeSectorsForTrack(track);
-
-    // The whole track is rebuilt on save, so every sector must be readable;
-    // otherwise unreadable sectors would be silently replaced.
-    if (trackIndexFor(track) < 0 || !m_decodedSectors[track].allFound()) {
-        throw WriteException("Cannot write track " + std::to_string(track) +
-                             ": not all 16 sectors are readable");
-    }
-
-    std::vector<uint8_t>& dst = m_decodedSectors[track].sectors[sector];
-    dst = data;
-    dst.resize(BYTES_PER_SECTOR, 0);
-
-    m_trackDirty[track] = true;
-    m_modified = true;
-    invalidateDetection();
-}
-
-void AppleWozImage::rebuildTrack(size_t track) {
     const int index = trackIndexFor(track);
-    if (index < 0 || !m_sectorsCached[track]) {
-        return;
+    if (index < 0) {
+        throw SectorNotFoundException(static_cast<int>(track), static_cast<int>(sector));
     }
-    const NibbleEncoder::ParsedTrack& parsed = m_decodedSectors[track];
-    TrackInfo rebuilt = makeStandardTrack(parsed.sectors,
-                                          parsed.volumeKnown ? parsed.volume : 254,
-                                          static_cast<uint8_t>(track));
-    rebuilt.startingBlock = m_tracks[index].startingBlock;
-    m_tracks[index] = std::move(rebuilt);
+    TrackInfo& info = m_tracks[index];
 
-    // A rebuilt track no longer keeps any cross-track alignment
-    m_synchronized = false;
-    m_tracksChanged = true;
-    m_trackDirty[track] = false;
+    // Like DOS 3.3 / 3.2 RWTS: find the sector, then replace only its data
+    // field (D5 AA AD .. DE AA; 6-and-2, or 5-and-3 on 13-sector tracks).
+    // Address fields, gaps, other sectors - readable or not - and anything a
+    // copy protection put on the track stay as they are.
+    std::vector<uint64_t> firstBit;
+    const auto nibbles = NibbleEncoder::wozBitsToNibbles(info.bits, info.bitCount, 2, &firstBit);
+    const NibbleEncoder::ParsedTrack before = m_sectors13
+        ? NibbleEncoder::parseNibbleStream13(nibbles, static_cast<uint8_t>(track))
+        : NibbleEncoder::parseNibbleStream(nibbles, static_cast<uint8_t>(track));
+    const bool unwritten = m_sectors13 && !before.found[sector] && before.addrOnly[sector];
+    if (!before.found[sector] && !unwritten) {
+        throw WriteException("Cannot write track " + std::to_string(track) + " sector " +
+                             std::to_string(sector) + ": the sector cannot be read");
+    }
+
+    SectorBuffer payload = data;
+    payload.resize(BYTES_PER_SECTOR, 0);
+    const std::vector<uint8_t> field = m_sectors13 ? NibbleEncoder::dataFieldNibbles53(payload)
+                                                   : NibbleEncoder::dataFieldNibbles(payload);
+    // The bits written, MSB first
+    std::vector<uint8_t> written;
+    auto emit = [&](int bit) { written.push_back(static_cast<uint8_t>(bit)); };
+    auto putNibble = [&](uint8_t v) { for (int b = 7; b >= 0; --b) emit((v >> b) & 1); };
+    uint64_t start = 0, oldLength = 0;
+    if (unwritten) {
+        // DOS 3.2 INIT wrote only the address field: the data field goes
+        // after its DE AA EB as DOS 3.2 writes it (real capture: 14 nine-bit
+        // syncs FF+0, D5 AA AD .. DE AA EB), over the same number of bits,
+        // and must end before the next address field (4 syncs kept)
+        const size_t addr = before.addrAt[sector];
+        start = firstBit[addr + 13] + 8;
+        uint64_t limit = firstBit[addr] + info.bitCount;
+        for (size_t k = addr + 3; k + 2 < nibbles.size(); ++k) {
+            if (nibbles[k] == NibbleEncoder::ADDR_PROLOGUE_1 &&
+                nibbles[k + 1] == NibbleEncoder::ADDR_PROLOGUE_2 &&
+                nibbles[k + 2] == NibbleEncoder::ADDR_PROLOGUE_3_13) {
+                limit = firstBit[k];
+                break;
+            }
+        }
+        const uint64_t fieldBits = (field.size() + 1) * 8;
+        size_t syncs = 14;
+        while (syncs >= 5 && start + syncs * 9 + fieldBits + 4 * 9 > limit) {
+            --syncs;
+        }
+        if (syncs < 5) {
+            throw WriteException("Cannot write track " + std::to_string(track) + " sector " +
+                                 std::to_string(sector) +
+                                 ": no room for a data field before the next address field");
+        }
+        for (size_t k = 0; k < syncs; ++k) {
+            putNibble(0xFF);
+            emit(0);
+        }
+        for (uint8_t v : field) putNibble(v);
+        putNibble(NibbleEncoder::EPILOGUE_3);
+        oldLength = written.size();
+    } else {
+        const size_t firstNibble = before.dataAt[sector];
+        start = firstBit[firstNibble];
+        oldLength = firstBit[firstNibble + field.size() - 1] + 8 - start;
+        for (uint8_t v : field) putNibble(v);
+    }
+    const uint64_t newLength = written.size();
+    auto fieldBit = [&](uint64_t j) { return written[j]; };
+
+    const TrackInfo saved = info;
+    const bool savedSync = m_synchronized;
+    if (oldLength == newLength) {
+        for (uint64_t j = 0; j < newLength; ++j) {
+            const uint32_t pos = static_cast<uint32_t>((start + j) % info.bitCount);
+            const uint8_t mask = static_cast<uint8_t>(0x80 >> (pos & 7));
+            info.bits[pos >> 3] = static_cast<uint8_t>(fieldBit(j) ? (info.bits[pos >> 3] | mask)
+                                                                   : (info.bits[pos >> 3] & ~mask));
+        }
+    } else {
+        // Timing bits inside the old field: written back as plain 8-bit
+        // nibbles (as RWTS writes them), so the track gets shorter or longer
+        const uint64_t from = start % info.bitCount;
+        if (from + oldLength > info.bitCount) {
+            throw WriteException("Cannot write track " + std::to_string(track) + " sector " +
+                                 std::to_string(sector) +
+                                 ": its data field has timing bits and crosses the track start");
+        }
+        auto oldBit = [&](uint64_t pos) { return (saved.bits[pos >> 3] >> (7 - (pos & 7))) & 1; };
+        const uint64_t total = info.bitCount - oldLength + newLength;
+        std::vector<uint8_t> bits((total + 7) / 8, 0);
+        uint64_t out = 0;
+        auto put = [&](int bit) {
+            if (bit) bits[out >> 3] |= static_cast<uint8_t>(0x80 >> (out & 7));
+            ++out;
+        };
+        for (uint64_t pos = 0; pos < from; ++pos) put(oldBit(pos));
+        for (uint64_t j = 0; j < newLength; ++j) put(fieldBit(j));
+        for (uint64_t pos = from + oldLength; pos < saved.bitCount; ++pos) put(oldBit(pos));
+        info.bits = std::move(bits);
+        info.bitCount = static_cast<uint32_t>(total);
+        info.bytesUsed = static_cast<uint16_t>(info.bits.size());
+        // WOZ1 splice point (a bit index): moves with the bits after the
+        // field, is lost when it was inside the rewritten field
+        if (info.splicePoint != 0xFFFF && info.splicePoint >= from) {
+            info.splicePoint = info.splicePoint >= from + oldLength
+                ? static_cast<uint16_t>(info.splicePoint + newLength - oldLength)
+                : static_cast<uint16_t>(0xFFFF);
+        }
+        m_synchronized = false;   // track lengths no longer line up
+    }
+
+    // Every logical track stored in this TRKS entry must be decoded again
+    auto invalidate = [&]() {
+        for (size_t t = 0; t < TRACKS_35; ++t) {
+            if (trackIndexFor(t) == index) {
+                m_sectorsCached[t] = false;
+            }
+        }
+        invalidateDetection();
+    };
+    invalidate();
+
+    // The write must read back, no other sector may change, and every
+    // address field (written sectors and unwritten ones) must still be there
+    decodeSectorsForTrack(track);
+    const NibbleEncoder::ParsedTrack& after = m_decodedSectors[track];
+    bool ok = after.found[sector] && after.sectors[sector] == payload &&
+              after.addrSeen == before.addrSeen;
+    for (size_t s = 0; ok && s < before.sectorCount; ++s) {
+        if (s != sector && before.found[s] &&
+            (!after.found[s] || after.sectors[s] != before.sectors[s])) {
+            ok = false;
+        }
+        if (s != sector && before.addrOnly[s] && !after.addrOnly[s]) {
+            ok = false;
+        }
+    }
+    if (!ok) {
+        info = saved;
+        m_synchronized = savedSync;
+        invalidate();
+        throw WriteException("Cannot write track " + std::to_string(track) + " sector " +
+                             std::to_string(sector) + ": the track did not read back (left unchanged)");
+    }
+
+    m_tracksChanged = true;   // WRIT hints describe the old bitstreams
+    m_modified = true;
 }
 
 TrackBuffer AppleWozImage::readTrack(size_t track, size_t /*side*/) {
@@ -717,12 +896,12 @@ TrackBuffer AppleWozImage::readTrack(size_t track, size_t /*side*/) {
         throw SectorNotFoundException(static_cast<int>(track), 0);
     }
 
-    const int index = trackIndexFor(track);
-    if (index < 0) {
+    std::vector<uint8_t> bits;
+    uint32_t bitCount = 0;
+    if (!readableBits(track, bits, bitCount)) {
         return TrackBuffer(NibbleEncoder::TRACK_NIBBLE_SIZE, 0xFF);
     }
-
-    return m_tracks[index].bits;
+    return bits;
 }
 
 void AppleWozImage::writeTrack(size_t track, size_t /*side*/, const TrackBuffer& data) {
@@ -730,11 +909,15 @@ void AppleWozImage::writeTrack(size_t track, size_t /*side*/, const TrackBuffer&
         throw WriteProtectedException();
     }
     if (m_sectors13) {
-        throw UnsupportedFormatException("13-sector (DOS 3.2) images are read-only");
+        throw UnsupportedFormatException("13-sector (DOS 3.2) tracks cannot be written whole");
     }
 
     if (track >= m_geometry.tracks || track >= TRACKS_35) {
         throw SectorNotFoundException(static_cast<int>(track), 0);
+    }
+    if (isFluxTrack(track) || isFluxEntry(m_trackMap[track * 4])) {
+        throw UnsupportedFormatException("Track " + std::to_string(track) +
+                                         " is stored as FLUX data (read-only)");
     }
 
     uint8_t trackIndex = m_trackMap[track * 4];
@@ -753,7 +936,6 @@ void AppleWozImage::writeTrack(size_t track, size_t /*side*/, const TrackBuffer&
 
     // Invalidate sector cache
     m_sectorsCached[track] = false;
-    m_trackDirty[track] = false;
     m_tracksChanged = true;
     m_synchronized = false;
 
@@ -825,7 +1007,7 @@ std::unique_ptr<DiskImage> AppleWozImage::convertTo(DiskFormat format) const {
     }
 
     if (m_sectors13) {
-        throw UnsupportedFormatException("13-sector images convert only to .d13 (use the convert command)");
+        throw UnsupportedFormatException("13-sector images: use the convert command (d13, nib, nb2, woz)");
     }
 
     if (format == DiskFormat::AppleDO) {
@@ -834,11 +1016,6 @@ std::unique_ptr<DiskImage> AppleWozImage::convertTo(DiskFormat format) const {
 
         // DO images use the same DOS 3.3 logical numbering
         for (size_t track = 0; track < m_geometry.tracks && track < TRACKS_35; ++track) {
-            if (isFluxTrack(track)) {
-                throw UnsupportedFormatException("Track " + std::to_string(track) +
-                                                 " is stored as FLUX data (not supported)");
-            }
-            // Pending sector writes live in the decoded cache until save()
             const NibbleEncoder::ParsedTrack parsed =
                 m_sectorsCached[track] ? m_decodedSectors[track] : parseTrackBits(track);
             for (size_t sector = 0; sector < SECTORS_16; ++sector) {
@@ -894,14 +1071,18 @@ std::string AppleWozImage::getDiagnostics() const {
     // Count valid tracks
     int validTracks = 0;
     for (size_t t = 0; t < 35; ++t) {
-        if (trackIndexFor(t) >= 0) ++validTracks;
+        if (trackIndexFor(t) >= 0 || fluxIndexFor(t) >= 0) ++validTracks;
     }
     oss << "Valid Tracks: " << validTracks << "\n";
     oss << "Sectors/Track: " << m_geometry.sectorsPerTrack
-        << (m_sectors13 ? " (DOS 3.2, 5-and-3, read-only)" : "") << "\n";
+        << (m_sectors13 ? " (DOS 3.2, 5-and-3)" : "") << "\n";
     oss << "Total Track Entries: " << m_tracks.size() << "\n";
     if (m_hasFlux) {
-        oss << "FLUX Tracks: present (sector access not supported)\n";
+        int flux = 0;
+        for (size_t t = 0; t < TRACKS_35; ++t) {
+            if (fluxIndexFor(t) >= 0) ++flux;
+        }
+        oss << "FLUX Tracks: " << flux << " (read; never written - the image is not saved)\n";
     }
 
     if (!m_metadata.empty()) {
@@ -918,9 +1099,6 @@ std::vector<std::string> AppleWozImage::readWarnings() const {
     std::vector<std::string> warnings;
     const size_t tracks = std::min(m_geometry.tracks, TRACKS_35);
     for (size_t t = 0; t < tracks; ++t) {
-        if (m_trackDirty[t]) {
-            continue;  // rebuilt as a standard track on save
-        }
         const NibbleEncoder::ParsedTrack parsed = parseTrackBits(t);
         for (size_t s = 0; s < m_geometry.sectorsPerTrack; ++s) {
             if (parsed.found[s] && parsed.fixedBitsMissing[s]) {

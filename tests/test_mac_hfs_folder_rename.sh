@@ -23,7 +23,12 @@ if [[ -f "$PY_TOOL" ]] && command -v python3 >/dev/null 2>&1; then
   HAVE_PY=1
 fi
 
-WORK="${WORK:-/tmp/rdedisktool_folder_rename_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_folder_rename.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 
 "$RDEDISKTOOL" create "$WORK/v.img" -f mac_img --fs hfs -n "RenVol" \
@@ -97,7 +102,7 @@ fi
 # 6. Negative: cross-folder rename refused.
 set +e
 "$RDEDISKTOOL" --bootdisk-mode off rename "$WORK/v.img" \
-    "X" "SomeOther/Sub" >/tmp/rdedisktool_c2.log 2>&1
+    "X" "SomeOther/Sub" >"$WORK/c2.log" 2>&1
 rc=$?
 set -e
 [[ $rc -ne 0 ]] || { echo "C2: cross-folder rename should fail" >&2; exit 1; }
@@ -105,16 +110,16 @@ set -e
 # 7. Negative: name conflict refused. (Need free leaf for the second mkdir;
 #    if the leaf is full this just verifies we don't crash.)
 "$RDEDISKTOOL" --bootdisk-mode off mkdir "$WORK/v.img" "Y" \
-    >/tmp/rdedisktool_c2.log 2>&1 || true
+    >"$WORK/c2.log" 2>&1 || true
 if "$RDEDISKTOOL" list "$WORK/v.img" | rg -q "Y.*DIR"; then
   set +e
   "$RDEDISKTOOL" --bootdisk-mode off rename "$WORK/v.img" "X" "Y" \
-      >/tmp/rdedisktool_c2.log 2>&1
+      >"$WORK/c2.log" 2>&1
   rc=$?
   set -e
   [[ $rc -ne 0 ]] || {
     echo "C2: rename to existing name should fail" >&2
-    cat /tmp/rdedisktool_c2.log >&2
+    cat "$WORK/c2.log" >&2
     exit 1
   }
 fi
@@ -122,7 +127,7 @@ fi
 # 8. Negative: rename of root volume folder refused.
 set +e
 "$RDEDISKTOOL" --bootdisk-mode off rename "$WORK/v.img" "" "NewVol" \
-    >/tmp/rdedisktool_c2.log 2>&1
+    >"$WORK/c2.log" 2>&1
 rc=$?
 set -e
 # (CLI may reject empty oldName before reaching the handler — either is fine,

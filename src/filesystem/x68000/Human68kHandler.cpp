@@ -82,6 +82,18 @@ std::vector<std::string> Human68kHandler::mountWarnings() const {
             std::to_string(m_totalSectors) + ". The BPB is corrected when the disk is changed."};
 }
 
+FileSystemHandler::RepairResult Human68kHandler::repairOlderWrites(bool apply) {
+    RepairResult out;
+    if (m_bpbNeedsRepair) {
+        out.fixes.push_back("BPB total sectors " + std::to_string(m_bpbOversizedTotal) +
+                            " (more than the image) -> " + std::to_string(m_totalSectors));
+        if (apply) {
+            repairOversizedBpb();
+        }
+    }
+    return out;
+}
+
 ValidationResult Human68kHandler::validateExtended() const {
     ValidationResult result;
     if (m_bpbNeedsRepair) {

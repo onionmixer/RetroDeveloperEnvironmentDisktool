@@ -22,9 +22,14 @@ namespace rde {
  *
  * readSector/writeSector take DOS 3.3 logical sector numbers (same as .do).
  * Sectors are decoded from the bitstream of each whole track's quarter track
- * (4 * track). Writing a sector rebuilds that track as a standard DOS 3.3
- * track, so it is only allowed when all 16 sectors of the track are readable.
- * FLUX-encoded tracks (WOZ 2.1) are not supported for sector access.
+ * (4 * track). Writing a sector replaces only that sector's data field in
+ * the bitstream (as DOS 3.3 RWTS does); the rest of the track - gaps, other
+ * sectors, unreadable or copy-protection data, weak (zero) bits - is kept.
+ * Only the written sector has to be readable.
+ * FLUX-encoded tracks (WOZ 2.1) are read: the flux intervals become a
+ * bitstream (n = interval / optimal bit timing, rounded half up: n-1 zero
+ * bits and a one bit) for the same reader. They are never written, and a WOZ
+ * with FLUX tracks is not saved.
  */
 class AppleWozImage : public AppleDiskImage {
 public:
@@ -82,7 +87,7 @@ public:
         return m_sectors13 ? SectorOrder::Physical : SectorOrder::DOS;
     }
 
-    /** True when the tracks are 13-sector (DOS 3.2): read-only */
+    /** True when the tracks are 13-sector (DOS 3.2, 5-and-3) */
     bool isThirteenSector() const { return m_sectors13; }
 
     //=========================================================================
@@ -187,7 +192,6 @@ private:
     // Decoded sector cache (indexed by DOS logical sector)
     std::array<NibbleEncoder::ParsedTrack, TRACKS_35> m_decodedSectors;
     std::array<bool, TRACKS_35> m_sectorsCached = {};
-    std::array<bool, TRACKS_35> m_trackDirty = {};
 
     // DOS-order sector image for file system detection
     mutable std::vector<uint8_t> m_detectionImage;
@@ -210,9 +214,14 @@ private:
     // Decoding helpers
     int trackIndexFor(size_t track) const;   // TRKS index of whole track, -1 if none
     bool isFluxTrack(size_t track) const;
+    int fluxIndexFor(size_t track) const;    // TRKS index of the track's FLUX data, -1 if none
+    bool isFluxEntry(int index) const;       // any FLUX map entry points at this TRKS entry
+    // The bitstream sectors are read from: the TRKS bits, or FLUX data
+    // turned into bits. False when the track has neither.
+    bool readableBits(size_t track, std::vector<uint8_t>& bits, uint32_t& bitCount) const;
+    std::vector<uint8_t> fluxToBits(const TrackInfo& t, uint32_t& bitCount) const;
     NibbleEncoder::ParsedTrack parseTrackBits(size_t track) const;
     void decodeSectorsForTrack(size_t track);
-    void rebuildTrack(size_t track);
     void invalidateDetection();
     static TrackInfo makeStandardTrack(const std::array<std::vector<uint8_t>, 16>& sectors,
                                        uint8_t volume, uint8_t track);

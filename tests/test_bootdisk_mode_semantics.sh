@@ -22,7 +22,12 @@ RDEDISKTOOL="${RDEDISKTOOL:-$TOOL_ROOT/build/rdedisktool}"
 FX="$TOOL_ROOT/tests/fixtures/macintosh/608_SystemTools.img"
 [[ -f "$FX" ]] || { echo "missing $FX" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_bootdisk_semantics_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_bootdisk_semantics.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 printf 'plain\n' > "$WORK/in.txt"
 
@@ -30,17 +35,17 @@ printf 'plain\n' > "$WORK/in.txt"
 cp "$FX" "$WORK/strict.img"
 set +e
 "$RDEDISKTOOL" --bootdisk-mode strict delete "$WORK/strict.img" "TeachText" \
-    >/tmp/rdedisktool_modes.log 2>&1
+    >"$WORK/modes.log" 2>&1
 rc=$?
 set -e
 [[ $rc -ne 0 ]] || {
   echo "strict + delete on bootdisk should be blocked, but exited 0" >&2
-  cat /tmp/rdedisktool_modes.log >&2
+  cat "$WORK/modes.log" >&2
   exit 1
 }
-rg -q "Boot disk protection.*strict.*blocked" /tmp/rdedisktool_modes.log || {
+rg -q "Boot disk protection.*strict.*blocked" "$WORK/modes.log" || {
   echo "strict + delete: expected 'Boot disk protection (strict): ... blocked'" >&2
-  cat /tmp/rdedisktool_modes.log >&2
+  cat "$WORK/modes.log" >&2
   exit 1
 }
 
@@ -81,14 +86,14 @@ for mode in strict warn; do
   cp "$FX" "$WORK/sa_$mode.img"
   ORIG_BOOT=$(head -c 1024 "$WORK/sa_$mode.img" | sha256sum | awk '{print $1}')
   "$RDEDISKTOOL" --bootdisk-mode "$mode" add "$WORK/sa_$mode.img" \
-      "$WORK/in.txt" "Probe_$mode.txt" >/tmp/rdedisktool_modes.log 2>&1 || {
+      "$WORK/in.txt" "Probe_$mode.txt" >"$WORK/modes.log" 2>&1 || {
     echo "$mode + add: failed" >&2
-    cat /tmp/rdedisktool_modes.log >&2
+    cat "$WORK/modes.log" >&2
     exit 1
   }
-  rg -q "Bootdisk safe-add verification enabled" /tmp/rdedisktool_modes.log || {
+  rg -q "Bootdisk safe-add verification enabled" "$WORK/modes.log" || {
     echo "$mode + add: expected safe-add verification message, got:" >&2
-    cat /tmp/rdedisktool_modes.log >&2
+    cat "$WORK/modes.log" >&2
     exit 1
   }
   NEW_BOOT=$(head -c 1024 "$WORK/sa_$mode.img" | sha256sum | awk '{print $1}')
@@ -102,17 +107,17 @@ done
 cp "$FX" "$WORK/critical.img"
 set +e
 echo n | "$RDEDISKTOOL" --bootdisk-mode warn delete "$WORK/critical.img" \
-    "System Folder/System" >/tmp/rdedisktool_modes.log 2>&1
+    "System Folder/System" >"$WORK/modes.log" 2>&1
 rc=$?
 set -e
 [[ $rc -ne 0 ]] || {
   echo "warn + delete System (critical) with 'n' input should reject" >&2
-  cat /tmp/rdedisktool_modes.log >&2
+  cat "$WORK/modes.log" >&2
   exit 1
 }
-rg -q "boot-critical file" /tmp/rdedisktool_modes.log || {
+rg -q "boot-critical file" "$WORK/modes.log" || {
   echo "warn + delete System: expected 'boot-critical file' prompt, got:" >&2
-  cat /tmp/rdedisktool_modes.log >&2
+  cat "$WORK/modes.log" >&2
   exit 1
 }
 "$RDEDISKTOOL" list "$WORK/critical.img" "System Folder" \
@@ -126,9 +131,9 @@ rg -q "boot-critical file" /tmp/rdedisktool_modes.log || {
 cp "$FX" "$WORK/force.img"
 "$RDEDISKTOOL" --bootdisk-mode warn --force-system-file delete \
     "$WORK/force.img" "System Folder/System" \
-    >/tmp/rdedisktool_modes.log 2>&1 || {
+    >"$WORK/modes.log" 2>&1 || {
   echo "warn + --force-system-file delete System should succeed" >&2
-  cat /tmp/rdedisktool_modes.log >&2
+  cat "$WORK/modes.log" >&2
   exit 1
 }
 if "$RDEDISKTOOL" list "$WORK/force.img" "System Folder" \

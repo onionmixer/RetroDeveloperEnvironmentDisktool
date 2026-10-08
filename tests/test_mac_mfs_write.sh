@@ -9,6 +9,10 @@
 
 set -euo pipefail
 
+# Per-run log: ctest -j runs these scripts in parallel
+LOG="$(mktemp "${TMPDIR:-/tmp}/rdedisktool_test.XXXXXX")"
+trap 'rm -f "$LOG"' EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
@@ -25,7 +29,12 @@ fi
 FX="$TOOL_ROOT/tests/fixtures/macintosh/empty_mfs.img"
 [[ -f "$FX" ]] || { echo "missing $FX" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_mfs_write_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_mfs_write.XXXXXX")"
+  trap 'rm -f "$LOG"; [[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 cp "$FX" "$WORK/test.img"
 
@@ -35,8 +44,8 @@ INPUT_SHA=$(sha256sum "$INPUT" | awk '{print $1}')
 
 # 1. add succeeds.
 "$RDEDISKTOOL" --bootdisk-mode off add "$WORK/test.img" "$INPUT" "Hello.txt" \
-    >/tmp/rdedisktool_test.log 2>&1 || {
-  echo "add failed" >&2; cat /tmp/rdedisktool_test.log >&2; exit 1
+    >"$LOG" 2>&1 || {
+  echo "add failed" >&2; cat "$LOG" >&2; exit 1
 }
 
 # 2. rdedisktool extract round-trip = SHA identical

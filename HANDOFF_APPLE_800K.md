@@ -1,7 +1,7 @@
 # HANDOFF — rdedisktool Apple II 800K(3.5") 지원 작업 기준
 
 > 작성 2026-10-08 · 출처: sa2 //c Plus 내장 3.5" 작업(`DKFS_retro/prototype_20_AppleII/PLAN_99_A2_SA2_IIC.md` §18)
-> 상태: **조사·실측 완료 · 코드 무변경** — 이 문서만 보고 다음 세션이 이어서 작업할 수 있게 쓴다.
+> 상태: **완료(2026-10-08)** — 결과는 맨 아래 §7. §0–§6 은 조사 당시 기록(원문 유지). 남은 것: S7 MAME 수동 확인(§7-4).
 
 ## 0. 한 장 요약
 | 항목 | 현재(2026-10-08 실측) | 목표 |
@@ -71,3 +71,28 @@ $T create n800.2mg -f 2mg --fs prodos -n NEW800 --force               # Error: U
 - 시험 이미지·롬은 **저장소에 넣지 않는다**(`.gitignore` 규칙 유지) · 커밋은 요청 시만 · 공유 인덱스라 `git commit --only`.
 - 다른 세션이 같은 `build/rdedisktool` 을 재빌드할 수 있다(2026-10-08 한 번 겹침: 링크 중 실행 → "허가 거부").
 - 계획 → codex 교차검토(코딩 전) → 전건 재검증 → 구현 → §5 순서. WOZ/NIB 결함은 별도 문서 `HANDOFF_APPLE_WOZ_NIB.md`.
+
+## 7. 결과 (2026-10-08 · 후속 세션)
+
+### 7-1. §0 목표별 결과
+| 항목 | 결과 |
+|---|---|
+| 800K ProDOS `.po`(819,200 B) | ✅ 형식 `800po` — 열기·목록·추출·추가·삭제·이름 변경·mkdir·rmdir · 확장자 `.po` + 크기 819,200 B 로만 감지(Macintosh 800K 와 혼용 안 함: `.img`/`.dsk` 는 Apple 로 열지 않음) |
+| `.2mg` | ✅ 형식 `800mg` — 읽기·쓰기(파일 전체 유지, 데이터 범위만 갱신) · 헤더 바이트 그대로 · 잠금 비트(bit 31) = 쓰기 보호 · 잘못된 헤더 거부 · `GMI2`(Bernie ][ The Rescue) 허용 · `.po` ⇄ `.2mg` 변환 |
+| 800K ProDOS 생성 | ✅ `create x.po -f 800po --fs prodos -n NAME` / `-f 800mg` → 1600 블록 볼륨(빈 볼륨의 모든 바이트를 Technical Reference B.2.2 기준 python 이미지와 대조) · 부팅 블록은 쓰지 않음 |
+| (선택) 3.5" GCR 비트스트림 | 하지 않음(사용자 결정: 800K 블록 이미지만) |
+
+### 7-2. 함께 고친 것
+- ProDOS 처리기의 280 블록 가정 제거 · 희소 파일 판독 · 디렉터리별 file_count 검증.
+- 부트 보호: 800K 는 블록 0-1(512 B 섹터 0-1)만, 블록 2 는 쓰기 가능.
+- ProDOS `mkdir`: 하위 디렉터리 머리 parent_pointer/parent_entry 결함 수정 · 머리·항목 바이트를 실 ProDOS 2.4.3 CREATE 와 같게(MAME 실측) · 볼륨 이름 검사.
+- 변환 경계: `800po` 는 `*.po`, `800mg` 는 `*.2mg` 로만 · `convert -f` 대소문자 무시 · 모르는 값은 오류.
+- 범위 밖이던 것: ProDOS validate 강화(모든 블록 계수·잃어버린 블록 경고) · ProDOS/DOS 3.3 체인 순환 방지 · ProDOS Total Space = 데이터 영역 · CLI 출력 파일 규칙(입력 = 출력 거부, 다른 형식 확장자 거부, 덮어쓰기 경고).
+
+### 7-3. 커밋·시험
+- 커밋: `aee1809`(800K S0-S6 등) · `abb5b2a`(mkdir = ProDOS CREATE, 순환 방지, validate, 출력 규칙, GMI2) · 이후 변경은 미커밋.
+- 시험: `test_apple_800k.sh` · `test_apple_800k_2mg.sh` · `test_apple_800k_create.sh` · `test_apple_800k_convert_names.sh` · `test_bootdisk_guard_prodos_800k.sh` · `test_apple_prodos_sparse.sh` · `test_apple_prodos_mkdir_parent.sh` · `test_apple_prodos_validate_loops.sh` · `test_cli_output_files.sh` — 독립 판독기 `tests/tools/a2_prodos_ref.py` · A2 DeskTop 실디스크 경로는 선택(`A2_REAL_800K_DIR`, 없으면 "not judged").
+- 사용법: `README.md`(800po/800mg 절) · 상세 기록: 로컬 `PLAN_APPLE_800K.md`(git 제외).
+
+### 7-4. 남은 것
+- S7 MAME 수동 확인(사용자 실행): rdedisktool 로 파일을 더한 A2 DeskTop 사본이 바탕화면까지 부팅하는지 · `-flop3` 에 rdedisktool 이 만든 800K 볼륨을 넣고 ProDOS 에서 `CAT`(명령은 §5 MAME 오라클).

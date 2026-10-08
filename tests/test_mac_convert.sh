@@ -27,7 +27,12 @@ SRC_DC42="$FX_DIR/systemtools.image"
 [[ -f "$SRC_IMG" ]] || { echo "missing $SRC_IMG" >&2; exit 1; }
 [[ -f "$SRC_DC42" ]] || { echo "missing $SRC_DC42" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_mac_convert_$$}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_mac_convert.XXXXXX")"
+  trap '[[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"; mkdir -p "$WORK"
 SRC_SHA=$(sha256sum "$SRC_IMG" | awk '{print $1}')
 

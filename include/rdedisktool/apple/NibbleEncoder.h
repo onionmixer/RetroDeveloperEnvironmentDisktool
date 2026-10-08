@@ -113,6 +113,16 @@ public:
         // Address field of the accepted copy misses a fixed 1 bit of the
         // 4-and-4 pattern (DOS 3.3 still reads it; reported as a warning)
         std::array<bool, 16> fixedBitsMissing = {};
+        // Nibble index of the data prologue (D5 of D5 AA AD) of the accepted
+        // copy, in the stream given to the parser; valid when found[] is set
+        std::array<uint32_t, 16> dataAt = {};
+        // 13-sector tracks only: a valid address field with no data field
+        // after it - a sector DOS 3.2 INIT formatted but nothing ever wrote
+        // (INIT writes address fields only). addrAt = nibble index of its D5.
+        // addrSeen: a valid address field of that sector was found at all.
+        std::array<bool, 16> addrOnly = {};
+        std::array<uint32_t, 16> addrAt = {};
+        std::array<bool, 16> addrSeen = {};
         uint8_t volume = 254;
         bool volumeKnown = false;
         uint8_t sectorCount = 16;   // 13 for DOS 3.2 tracks
@@ -140,7 +150,8 @@ public:
      * @param bitCount Output: number of valid bits
      */
     static std::vector<uint8_t> nibblesToWozBits(const TrackNibbles& track,
-                                                 uint32_t& bitCount);
+                                                 uint32_t& bitCount, int syncBits = 10);
+    // syncBits: bits of a self-sync nibble (FF + zeros); 9 on 13-sector disks
 
     /**
      * Read nibbles from a circular WOZ bitstream the way the Disk II state
@@ -150,7 +161,17 @@ public:
      */
     static std::vector<uint8_t> wozBitsToNibbles(const std::vector<uint8_t>& bits,
                                                  uint32_t bitCount,
-                                                 int revolutions = 2);
+                                                 int revolutions = 2,
+                                                 std::vector<uint64_t>* firstBit = nullptr);
+    // firstBit (optional): for each nibble, the bit index (counted over the
+    // revolutions, so modulo bitCount gives the track position) of its first
+    // 1 bit; the nibble occupies that bit and the next 7.
+
+    // Nibbles DOS 3.3 RWTS writes for a sector's data field, up to the second
+    // epilogue byte: D5 AA AD, 343 data nibbles, DE AA (348 nibbles). A sector
+    // write replaces exactly these on the track and leaves the rest as it is.
+    static constexpr size_t DATA_FIELD_NIBBLES = 3 + NIBBLIZED_SIZE + 2;
+    static std::vector<uint8_t> dataFieldNibbles(const std::vector<uint8_t>& data);
 
     /**
      * Decode a nibble stream into sectors. The stream should cover the track
@@ -164,7 +185,7 @@ public:
                                          uint8_t track);
 
     //=========================================================================
-    // DOS 3.2 (13 sectors per track, 5-and-3 encoding) - read only
+    // DOS 3.2 (13 sectors per track, 5-and-3 encoding)
     //=========================================================================
 
     static constexpr uint8_t ADDR_PROLOGUE_3_13 = 0xB5;  // D5 AA B5
@@ -175,6 +196,32 @@ public:
      * or checksum). Bit layout derived from real DOS 3.2 disks.
      */
     static std::vector<uint8_t> decodeSector53(const std::vector<uint8_t>& nibbles);
+
+    /**
+     * Encode 256 bytes to 411 5-and-3 nibbles (the inverse of decodeSector53;
+     * the two value bits no byte uses are written as 0, as DOS 3.2 does).
+     */
+    static std::vector<uint8_t> encodeSector53(const std::vector<uint8_t>& data);
+
+    // Nibbles DOS 3.2 RWTS writes for a sector's data field, up to the second
+    // epilogue byte: D5 AA AD, 411 data nibbles, DE AA (416 nibbles).
+    static constexpr size_t DATA_FIELD53_NIBBLES = 3 + NIBBLIZED53_SIZE + 2;
+    static std::vector<uint8_t> dataFieldNibbles53(const std::vector<uint8_t>& data);
+
+    /**
+     * A 13-sector track as real DOS 3.2 writes it (every sector with its data
+     * field), measured on an Applesauce capture of the DOS 3.2 System Master:
+     * gap 1 syncs, then per sector in the physical order 0,10,7,4,1,11,8,5,2,
+     * 12,9,6,3: D5 AA B5 + 4-and-4 volume/track/sector/checksum + DE AA EB,
+     * 14 syncs, D5 AA AD + 411 nibbles + DE AA EB, 28 syncs. Syncs are 9 bits
+     * in WOZ (FF + 0); the capture has 16 before sector 0 (49,882 bits).
+     * @param sectors 13 sector buffers indexed by physical sector
+     */
+    static constexpr size_t SECTOR13_NIBBLES = 14 + 14 + 417 + 28;
+    static constexpr size_t WOZ13_GAP1_SYNCS = 16;
+    static TrackNibbles buildTrackNibbles13(
+        const std::array<std::vector<uint8_t>, 16>& sectors,
+        uint8_t volume, uint8_t track, size_t gap1Syncs);
 
     /**
      * Decode a nibble stream of a 13-sector track. Sectors are indexed by

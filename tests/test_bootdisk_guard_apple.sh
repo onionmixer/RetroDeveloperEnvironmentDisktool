@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Per-run log: ctest -j runs these scripts in parallel
+LOG="$(mktemp "${TMPDIR:-/tmp}/rdedisktool_test.XXXXXX")"
+trap 'rm -f "$LOG"' EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$TOOL_ROOT/.." && pwd)"
@@ -18,7 +22,12 @@ FIXTURE="$TOOL_ROOT/tests/fixtures/README.TXT"
 [[ -f "$PRODOS243_SRC" ]] || { echo "missing $PRODOS243_SRC" >&2; exit 1; }
 [[ -f "$FIXTURE" ]] || { echo "missing $FIXTURE" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_boot_guard_apple}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_boot_guard_apple.XXXXXX")"
+  trap 'rm -f "$LOG"; [[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"
 mkdir -p "$WORK"
 cp "$DOS33_SRC" "$WORK/dos33.dsk"
@@ -32,31 +41,31 @@ cp "$PRODOS243_SRC" "$WORK/prodos243.po"
 
 assert_fail() {
   set +e
-  "$@" >/tmp/rdedisktool_test.log 2>&1
+  "$@" >"$LOG" 2>&1
   local rc=$?
   set -e
   if [[ $rc -eq 0 ]]; then
     echo "expected failure but succeeded: $*" >&2
-    sed -n '1,120p' /tmp/rdedisktool_test.log >&2
+    sed -n '1,120p' "$LOG" >&2
     exit 1
   fi
 }
 
 assert_not_policy_blocked() {
   set +e
-  "$@" >/tmp/rdedisktool_test.log 2>&1
+  "$@" >"$LOG" 2>&1
   local rc=$?
   set -e
-  if rg -q "Boot disk protection" /tmp/rdedisktool_test.log; then
+  if rg -q "Boot disk protection" "$LOG"; then
     echo "force override was still blocked by policy: $*" >&2
-    sed -n '1,120p' /tmp/rdedisktool_test.log >&2
+    sed -n '1,120p' "$LOG" >&2
     exit 1
   fi
   return $rc
 }
 
-"$RDEDISKTOOL" --bootdisk-mode strict info "$WORK/prodos242.dsk" -v >/tmp/rdedisktool_test.log 2>&1
-rg -q "BootDisk:\s+yes" /tmp/rdedisktool_test.log || { echo "bootdisk detection missing for prodos" >&2; sed -n '1,120p' /tmp/rdedisktool_test.log; exit 1; }
+"$RDEDISKTOOL" --bootdisk-mode strict info "$WORK/prodos242.dsk" -v >"$LOG" 2>&1
+rg -q "BootDisk:\s+yes" "$LOG" || { echo "bootdisk detection missing for prodos" >&2; sed -n '1,120p' "$LOG"; exit 1; }
 
 # expect_add <rc: ok|fail> <log pattern> <cmd...>: the outcome of an add is judged,
 # not just "not blocked by policy"
@@ -66,12 +75,12 @@ expect_add() {
   assert_not_policy_blocked "$@" || rc=$?
   if [[ $want == ok && $rc -ne 0 ]] || [[ $want == fail && $rc -eq 0 ]]; then
     echo "expected add to $want (rc=$rc): $*" >&2
-    sed -n '1,120p' /tmp/rdedisktool_test.log >&2
+    sed -n '1,120p' "$LOG" >&2
     exit 1
   fi
-  rg -q "$pattern" /tmp/rdedisktool_test.log || {
+  rg -q "$pattern" "$LOG" || {
     echo "expected '$pattern' from: $*" >&2
-    sed -n '1,120p' /tmp/rdedisktool_test.log >&2
+    sed -n '1,120p' "$LOG" >&2
     exit 1
   }
 }

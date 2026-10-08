@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Per-run log: ctest -j runs these scripts in parallel
+LOG="$(mktemp "${TMPDIR:-/tmp}/rdedisktool_test.XXXXXX")"
+trap 'rm -f "$LOG"' EXIT
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PROJECT_ROOT="$(cd "$TOOL_ROOT/.." && pwd)"
@@ -14,7 +18,12 @@ FIXTURE="$TOOL_ROOT/tests/fixtures/README.TXT"
 [[ -f "$MSX_SRC" ]] || { echo "missing $MSX_SRC" >&2; exit 1; }
 [[ -f "$FIXTURE" ]] || { echo "missing $FIXTURE" >&2; exit 1; }
 
-WORK="${WORK:-/tmp/rdedisktool_boot_guard_msx}"
+# Work directory: a $WORK given by the caller is used and kept; otherwise a
+# fresh one is removed on exit (KEEP_WORK=1 keeps it)
+if [[ -z "${WORK:-}" ]]; then
+  WORK="$(mktemp -d "${TMPDIR:-/tmp}/rdedisktool_boot_guard_msx.XXXXXX")"
+  trap 'rm -f "$LOG"; [[ -n "${KEEP_WORK:-}" ]] || rm -rf "$WORK"' EXIT
+fi
 rm -rf "$WORK"
 mkdir -p "$WORK"
 cp "$MSX_SRC" "$WORK/msxdos23.dsk"
@@ -23,31 +32,31 @@ cp "$MSX_SRC" "$WORK/msxdos23.dsk"
 
 assert_fail() {
   set +e
-  "$@" >/tmp/rdedisktool_test.log 2>&1
+  "$@" >"$LOG" 2>&1
   local rc=$?
   set -e
   if [[ $rc -eq 0 ]]; then
     echo "expected failure but succeeded: $*" >&2
-    sed -n '1,120p' /tmp/rdedisktool_test.log >&2
+    sed -n '1,120p' "$LOG" >&2
     exit 1
   fi
 }
 
 assert_not_policy_blocked() {
   set +e
-  "$@" >/tmp/rdedisktool_test.log 2>&1
+  "$@" >"$LOG" 2>&1
   local rc=$?
   set -e
-  if rg -q "Boot disk protection" /tmp/rdedisktool_test.log; then
+  if rg -q "Boot disk protection" "$LOG"; then
     echo "force override was still blocked by policy: $*" >&2
-    sed -n '1,120p' /tmp/rdedisktool_test.log >&2
+    sed -n '1,120p' "$LOG" >&2
     exit 1
   fi
   return $rc
 }
 
-"$RDEDISKTOOL" --bootdisk-mode strict info "$WORK/msxdos23.dsk" -v >/tmp/rdedisktool_test.log 2>&1
-rg -q "BootDisk:\s+yes" /tmp/rdedisktool_test.log || { echo "bootdisk detection missing for msx" >&2; sed -n '1,120p' /tmp/rdedisktool_test.log; exit 1; }
+"$RDEDISKTOOL" --bootdisk-mode strict info "$WORK/msxdos23.dsk" -v >"$LOG" 2>&1
+rg -q "BootDisk:\s+yes" "$LOG" || { echo "bootdisk detection missing for msx" >&2; sed -n '1,120p' "$LOG"; exit 1; }
 
 # strict mode should allow safe add when protected regions and existing files remain intact
 "$RDEDISKTOOL" --bootdisk-mode strict add "$WORK/msxdos23.dsk" "$FIXTURE" README.TXT

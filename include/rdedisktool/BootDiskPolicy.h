@@ -21,7 +21,8 @@ enum class MutationOp {
     Delete,
     Mkdir,
     Rmdir,
-    Rename
+    Rename,
+    Repair      // repair command: corrects what older rdedisktool versions wrote
 };
 
 enum class BootDiskProfile {
