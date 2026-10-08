@@ -24,8 +24,27 @@
 #include <ctime>
 #include <functional>
 #include <optional>
+#include <unordered_set>
 
 namespace rde {
+
+namespace {
+
+// Directory files are followed through their next pointers. A corrupt pointer
+// that leads back to a block already read would loop forever, so a repeat is
+// an error (the chain is not cut short silently, which could let a write go on).
+class DirectoryChainGuard {
+public:
+    void visit(uint16_t block) {
+        if (!m_seen.insert(block).second) {
+            throw ReadException("ProDOS directory chain loops back to block " + std::to_string(block));
+        }
+    }
+private:
+    std::unordered_set<uint16_t> m_seen;
+};
+
+} // namespace
 
 AppleProDOSHandler::AppleProDOSHandler() {
     std::memset(&m_volumeHeader, 0, sizeof(m_volumeHeader));
@@ -277,7 +296,9 @@ std::vector<AppleProDOSHandler::DirectoryEntry> AppleProDOSHandler::readDirector
     uint16_t currentBlock = keyBlock;
     bool firstBlock = true;
 
+    DirectoryChainGuard chain;
     while (currentBlock != 0) {
+        chain.visit(currentBlock);
         auto block = readBlock(currentBlock);
         if (block.size() < BLOCK_SIZE) {
             break;
@@ -341,7 +362,9 @@ bool AppleProDOSHandler::locateDirectoryEntry(uint16_t dirKeyBlock, size_t entry
     uint16_t currentBlock = dirKeyBlock;
     size_t entriesSeen = 0;
     bool firstBlock = true;
+    DirectoryChainGuard chain;
     while (currentBlock != 0) {
+        chain.visit(currentBlock);
         auto data = readBlock(currentBlock);
         if (data.size() < BLOCK_SIZE) {
             return false;
@@ -417,7 +440,9 @@ int AppleProDOSHandler::findDirectoryEntry(uint16_t dirKeyBlock, const std::stri
     int physicalIndex = 0;
     bool firstBlock = true;
 
+    DirectoryChainGuard chain;
     while (currentBlock != 0) {
+        chain.visit(currentBlock);
         auto block = readBlock(currentBlock);
         if (block.size() < BLOCK_SIZE) {
             break;
@@ -471,7 +496,9 @@ std::optional<AppleProDOSHandler::DirectoryEntry> AppleProDOSHandler::readDirect
     size_t entriesSeen = 0;
     bool firstBlock = true;
 
+    DirectoryChainGuard chain;
     while (currentBlock != 0) {
+        chain.visit(currentBlock);
         auto block = readBlock(currentBlock);
         if (block.size() < BLOCK_SIZE) {
             return std::nullopt;
@@ -529,7 +556,9 @@ int AppleProDOSHandler::findFreeDirectoryEntry(uint16_t dirKeyBlock) const {
     int entryIndex = 0;
     bool firstBlock = true;
 
+    DirectoryChainGuard chain;
     while (currentBlock != 0) {
+        chain.visit(currentBlock);
         auto block = readBlock(currentBlock);
         if (block.size() < BLOCK_SIZE) {
             return -1;
@@ -1379,9 +1408,11 @@ size_t AppleProDOSHandler::getFreeSpace() const {
 }
 
 size_t AppleProDOSHandler::getTotalSpace() const {
-    // Exclude boot blocks, directory blocks, and bitmap blocks
-    // Approximate usable space
-    return (m_blockLimit - 10) * BLOCK_SIZE;
+    // Space files can use: the volume minus boot blocks 0-1, the four volume
+    // directory blocks and the bitmap blocks (like the FAT / HFS handlers'
+    // data area)
+    const size_t overhead = 2 + 4 + (m_blockLimit + 4095) / 4096;
+    return m_blockLimit > overhead ? (m_blockLimit - overhead) * BLOCK_SIZE : 0;
 }
 
 bool AppleProDOSHandler::fileExists(const std::string& filename) const {
@@ -1556,7 +1587,6 @@ bool AppleProDOSHandler::createDirectory(const std::string& path) {
             std::toupper(static_cast<unsigned char>(dirName[i])));
     }
 
-    // Reserved bytes at 0x14-0x1B
     // Set creation date/time at 0x1C
     uint32_t now = packDateTime(std::time(nullptr));
     dirBlock[0x1C] = now & 0xFF;
@@ -1564,10 +1594,18 @@ bool AppleProDOSHandler::createDirectory(const std::string& path) {
     dirBlock[0x1E] = (now >> 16) & 0xFF;
     dirBlock[0x1F] = (now >> 24) & 0xFF;
 
-    // Version, min version, access
-    dirBlock[0x20] = 0;
+    // Version, min version, access as ProDOS 2.4.3 CREATE writes a directory
+    // (measured in MAME: header version $24, min 0, access $C3; the entry in
+    // the parent gets version $24, min 0, access $E3 = backup bit set)
+    dirBlock[0x20] = CREATE_DIR_VERSION;
     dirBlock[0x21] = 0;
     dirBlock[0x22] = ACCESS_DEFAULT;
+
+    // Reserved bytes 0x14-0x1B as ProDOS 8 writes them (measured: ProDOS 2.4.3
+    // CREATE gives 75 <version> <min_version> C3 27 0D 00 00; the manual's
+    // B.2.2 "must be set ... to prevent I/O ERROR" list)
+    const uint8_t reserved[8] = {0x75, dirBlock[0x20], dirBlock[0x21], 0xC3, 0x27, 0x0D, 0x00, 0x00};
+    std::memcpy(&dirBlock[0x14], reserved, sizeof(reserved));
 
     // Entry length, entries per block
     dirBlock[0x23] = DIR_ENTRY_SIZE;
@@ -1603,7 +1641,9 @@ bool AppleProDOSHandler::createDirectory(const std::string& path) {
     newEntry.eof = BLOCK_SIZE;
     newEntry.creationDateTime = now;
     newEntry.lastModDateTime = now;
-    newEntry.access = ACCESS_DEFAULT;
+    newEntry.version = CREATE_DIR_VERSION;
+    newEntry.minVersion = 0;
+    newEntry.access = ACCESS_DEFAULT | ACCESS_BACKUP;
     newEntry.headerPointer = parentBlock;
 
     if (!writeDirectoryEntry(parentBlock, freeEntry, newEntry)) {
@@ -1758,31 +1798,82 @@ ValidationResult AppleProDOSHandler::validateExtended() const {
         result.addWarning("Unusual total blocks: " + std::to_string(m_volumeHeader.totalBlocks), "Block 2");
     }
 
-    // 4. Count used blocks and verify against bitmap
-    std::vector<bool> usedBlocks(m_blockLimit, false);
-    usedBlocks[0] = true;  // Boot block 0
-    usedBlocks[1] = true;  // Boot block 1
-    usedBlocks[2] = true;  // Volume directory key block
-
-    // Mark bitmap blocks as used
-    size_t bitmapBlocks = (m_blockLimit + 4095) / 4096;  // 4096 bits per block
-    for (size_t i = 0; i < bitmapBlocks; ++i) {
-        if (m_volumeHeader.bitmapPointer + i < m_blockLimit) {
-            usedBlocks[m_volumeHeader.bitmapPointer + i] = true;
+    // 4. Blocks in use: boot blocks 0-1, every block of every directory file,
+    // the bitmap, and every index / master / data block a file points to
+    // (B.2-B.3; the same rule as tests/tools/a2_prodos_ref.py check)
+    std::vector<uint8_t> refs(m_blockLimit, 0);   // references per block (capped)
+    auto use = [&](size_t block, const std::string& who) {
+        if (block >= m_blockLimit) {
+            result.addError("Block " + std::to_string(block) + " outside the volume", who);
+            return;
         }
+        if (refs[block] == 1) {
+            result.addWarning("Block " + std::to_string(block) + " referenced multiple times", who);
+        }
+        if (refs[block] < 2) {
+            ++refs[block];
+        }
+    };
+    use(0, "Boot blocks");
+    use(1, "Boot blocks");
+    const size_t bitmapBlocks = (m_blockLimit + 4095) / 4096;  // 4096 bits per block
+    for (size_t i = 0; i < bitmapBlocks; ++i) {
+        use(static_cast<size_t>(m_volumeHeader.bitmapPointer) + i, "Volume bitmap");
     }
 
+    // Every block of a directory file, following the next pointers
+    auto directoryBlocks = [&](uint16_t keyBlock) {
+        std::vector<uint16_t> blocks;
+        DirectoryChainGuard chain;
+        for (uint16_t b = keyBlock; b != 0;) {
+            chain.visit(b);
+            auto data = readBlock(b);
+            if (data.size() < BLOCK_SIZE) {
+                throw ReadException("Cannot read directory block " + std::to_string(b));
+            }
+            blocks.push_back(b);
+            b = static_cast<uint16_t>(data[2] | (data[3] << 8));
+        }
+        return blocks;
+    };
+
+    // Index pointer i: low byte at i, high byte at 256 + i
+    auto indexPointers = [&](uint16_t block, size_t count) {
+        auto data = readBlock(block);
+        if (data.size() < BLOCK_SIZE) {
+            throw ReadException("Cannot read index block " + std::to_string(block));
+        }
+        std::vector<uint16_t> out;
+        for (size_t i = 0; i < count; ++i) {
+            out.push_back(static_cast<uint16_t>(data[i] | (data[256 + i] << 8)));
+        }
+        return out;
+    };
+
     // 5. Validate directory structure and file blocks
+    std::unordered_set<uint16_t> directoriesSeen;
     std::function<void(uint16_t, const std::string&)> validateDirectory;
     validateDirectory = [&](uint16_t keyBlock, const std::string& path) {
+        const std::string where = path.empty() ? "Volume directory" : path;
         if (keyBlock >= m_blockLimit) {
-            result.addError("Directory key block out of range: " + std::to_string(keyBlock), path);
+            result.addError("Directory key block out of range: " + std::to_string(keyBlock), where);
+            return;
+        }
+        if (!directoriesSeen.insert(keyBlock).second) {
+            result.addError("Directory loops back to block " + std::to_string(keyBlock), where);
             return;
         }
 
-        usedBlocks[keyBlock] = true;
-
-        auto entries = readDirectory(keyBlock);
+        std::vector<DirectoryEntry> entries;
+        try {
+            for (uint16_t b : directoryBlocks(keyBlock)) {
+                use(b, where);
+            }
+            entries = readDirectory(keyBlock);
+        } catch (const std::exception& e) {
+            result.addError(e.what(), where);
+            return;
+        }
 
         // file_count of a directory = its own active entries (B.2.2 / B.2.3)
         size_t active = 0;
@@ -1815,24 +1906,31 @@ ValidationResult AppleProDOSHandler::validateExtended() const {
                 continue;
             }
 
-            // Mark file blocks as used
+            // Recurse into subdirectories (their blocks are counted there)
+            if (entry.isDirectory()) {
+                validateDirectory(entry.keyPointer, fullPath);
+                continue;
+            }
+
+            // Mark the file's blocks as used: key, index / master and data blocks
             try {
-                auto fileBlocks = getFileBlocks(entry);
-                for (uint16_t block : fileBlocks) {
-                    if (block > 0 && block < m_blockLimit) {
-                        if (usedBlocks[block]) {
-                            result.addWarning("Block " + std::to_string(block) + " referenced multiple times", fullPath);
+                use(entry.keyPointer, fullPath);
+                if (entry.storageType == STORAGE_SAPLING) {
+                    for (uint16_t b : indexPointers(entry.keyPointer, 256)) {
+                        if (b != 0) use(b, fullPath);
+                    }
+                } else if (entry.storageType == STORAGE_TREE) {
+                    for (uint16_t ib : indexPointers(entry.keyPointer, 128)) {
+                        if (ib == 0) continue;
+                        use(ib, fullPath);
+                        if (ib >= m_blockLimit) continue;
+                        for (uint16_t b : indexPointers(ib, 256)) {
+                            if (b != 0) use(b, fullPath);
                         }
-                        usedBlocks[block] = true;
                     }
                 }
             } catch (const std::exception& e) {
                 result.addError("Error reading file blocks: " + std::string(e.what()), fullPath);
-            }
-
-            // Recurse into subdirectories
-            if (entry.isDirectory()) {
-                validateDirectory(entry.keyPointer, fullPath);
             }
         }
     };
@@ -1842,14 +1940,23 @@ ValidationResult AppleProDOSHandler::validateExtended() const {
     // 6. File counts are compared per directory in validateDirectory
 
     // 7. Verify bitmap matches used blocks
+    std::vector<size_t> lost;
     for (size_t i = 0; i < m_blockLimit; ++i) {
-        bool bitmapSaysFree = isBlockFree(i);
-        bool shouldBeFree = !usedBlocks[i];
-
-        if (bitmapSaysFree && !shouldBeFree) {
+        const bool bitmapSaysFree = isBlockFree(i);
+        if (bitmapSaysFree && refs[i] != 0) {
             result.addError("Block " + std::to_string(i) + " is used but marked free in bitmap");
+        } else if (!bitmapSaysFree && refs[i] == 0) {
+            lost.push_back(i);
         }
-        // Note: We don't flag blocks marked used but not found - they may be orphaned but not corrupted
+    }
+    if (!lost.empty()) {
+        std::string list;
+        for (size_t k = 0; k < lost.size() && k < 10; ++k) {
+            list += (k ? ", " : "") + std::to_string(lost[k]);
+        }
+        result.addWarning(std::to_string(lost.size()) +
+                          " block(s) marked used in bitmap but not referenced: " + list +
+                          (lost.size() > 10 ? ", ..." : ""));
     }
 
     // 8. Validate boot blocks (Block 0 and 1)

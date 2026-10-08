@@ -17,8 +17,30 @@
 #include <algorithm>
 #include <cstring>
 #include <cctype>
+#include <unordered_set>
 
 namespace rde {
+
+namespace {
+
+// Catalog and track/sector lists are chains of sectors. A corrupt link that
+// leads back to a sector already read would loop forever, so a repeat is an
+// error (not a silent stop, which could let a write go on).
+class SectorChainGuard {
+public:
+    explicit SectorChainGuard(const char* what) : m_what(what) {}
+    void visit(uint8_t track, uint8_t sector) {
+        if (!m_seen.insert(static_cast<uint16_t>(track << 8 | sector)).second) {
+            throw ReadException(std::string("DOS 3.3 ") + m_what + " chain loops back to T" +
+                                std::to_string(track) + " S" + std::to_string(sector));
+        }
+    }
+private:
+    const char* m_what;
+    std::unordered_set<uint16_t> m_seen;
+};
+
+} // namespace
 
 AppleDOS33Handler::AppleDOS33Handler() = default;
 
@@ -152,7 +174,9 @@ std::vector<AppleDOS33Handler::CatalogEntry> AppleDOS33Handler::readCatalog() co
     uint8_t catTrack = m_vtoc.firstCatalogTrack;
     uint8_t catSector = m_vtoc.firstCatalogSector;
 
+    SectorChainGuard chain("catalog");
     while (catTrack != 0 || catSector != 0) {
+        chain.visit(catTrack, catSector);
         auto sectorData = readSector(catTrack, catSector);
         if (sectorData.size() < SECTOR_SIZE) {
             break;
@@ -246,7 +270,9 @@ std::vector<AppleDOS33Handler::TSPair> AppleDOS33Handler::readTSList(uint8_t tra
 
     // A disk has 560 sectors; a longer chain can only be a loop
     size_t listsRead = 0;
+    SectorChainGuard chain("track/sector list");
     while ((track != 0 || sector != 0) && listsRead++ < MAX_TRACKS * SECTORS_PER_TRACK) {
+        chain.visit(track, sector);
         auto sectorData = readSector(track, sector);
         if (sectorData.size() < SECTOR_SIZE) {
             break;
@@ -792,7 +818,9 @@ bool AppleDOS33Handler::writeFile(const std::string& filename,
     uint8_t catSector = m_vtoc.firstCatalogSector;
     bool entryWritten = false;
 
+    SectorChainGuard chain("catalog");
     while (!entryWritten && (catTrack != 0 || catSector != 0)) {
+        chain.visit(catTrack, catSector);
         auto sectorData = readSector(catTrack, catSector);
         if (sectorData.size() < SECTOR_SIZE) {
             break;
@@ -850,7 +878,9 @@ bool AppleDOS33Handler::deleteFile(const std::string& filename) {
     uint8_t tsTrack = entry.trackSectorListTrack;
     uint8_t tsSector = entry.trackSectorListSector;
 
+    SectorChainGuard chain("track/sector list");
     while (tsTrack != 0 || tsSector != 0) {
+        chain.visit(tsTrack, tsSector);
         auto sectorData = readSector(tsTrack, tsSector);
         if (sectorData.size() < SECTOR_SIZE) {
             break;
@@ -882,7 +912,9 @@ bool AppleDOS33Handler::deleteFile(const std::string& filename) {
     uint8_t catSector = m_vtoc.firstCatalogSector;
     int entryCount = 0;
 
+    SectorChainGuard catalogChain("catalog");
     while (catTrack != 0 || catSector != 0) {
+        catalogChain.visit(catTrack, catSector);
         auto sectorData = readSector(catTrack, catSector);
         if (sectorData.size() < SECTOR_SIZE) {
             break;
@@ -938,7 +970,9 @@ bool AppleDOS33Handler::renameFile(const std::string& oldName, const std::string
     uint8_t catSector = m_vtoc.firstCatalogSector;
     int entryCount = 0;
 
+    SectorChainGuard chain("catalog");
     while (catTrack != 0 || catSector != 0) {
+        chain.visit(catTrack, catSector);
         auto sectorData = readSector(catTrack, catSector);
         if (sectorData.size() < SECTOR_SIZE) {
             break;
@@ -1151,8 +1185,12 @@ ValidationResult AppleDOS33Handler::validateExtended() const {
             continue;
         }
 
-        // Read and validate T/S list
-        auto tsList = readTSList(entry.trackSectorListTrack, entry.trackSectorListSector);
+        // Read and validate T/S list (a list that loops back is reported below)
+        std::vector<TSPair> tsList;
+        try {
+            tsList = readTSList(entry.trackSectorListTrack, entry.trackSectorListSector);
+        } catch (const ReadException&) {
+        }
         size_t actualSectorCount = 0;
 
         // Mark T/S list sector as used
@@ -1160,6 +1198,7 @@ ValidationResult AppleDOS33Handler::validateExtended() const {
         uint8_t tsSector = entry.trackSectorListSector;
         size_t tsListCount = 0;
         const size_t maxTSLists = 128;  // Reasonable limit to detect loops
+        std::unordered_set<uint16_t> tsListsSeen;
 
         while (tsTrack != 0 || tsSector != 0) {
             if (tsListCount >= maxTSLists) {
@@ -1173,6 +1212,11 @@ ValidationResult AppleDOS33Handler::validateExtended() const {
                 break;
             }
 
+            if (!tsListsSeen.insert(static_cast<uint16_t>(tsTrack << 8 | tsSector)).second) {
+                result.addError("T/S list chain loops back to T" + std::to_string(tsTrack) +
+                                "/S" + std::to_string(tsSector), filename);
+                break;
+            }
             if (usedSectors[tsTrack][tsSector]) {
                 result.addWarning("Sector referenced multiple times: T" +
                                  std::to_string(tsTrack) + "/S" + std::to_string(tsSector), filename);

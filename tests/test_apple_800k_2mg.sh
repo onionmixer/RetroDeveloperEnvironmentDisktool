@@ -121,6 +121,18 @@ ref cat "$WORK/base.po" BIG "$WORK/big.exp"
 rde extract "$WORK/len0.2mg" BIG "$WORK/big.got" >/dev/null || fail "extract from length-0 2MG"
 cmp -s "$WORK/big.exp" "$WORK/big.got" || fail "length-0 2MG data"; pass
 
+# --- byte-reversed signature "GMI2" (written by Bernie ][ The Rescue; MAME reads it):
+# opened as 800mg, written back with the signature as found
+python3 -I -c 'import sys
+d = bytearray(open(sys.argv[1], "rb").read()); d[0:4] = b"GMI2"
+open(sys.argv[2], "wb").write(d)' "$WORK/conv.2mg" "$WORK/gmi2.2mg"
+cp "$WORK/gmi2.2mg" "$WORK/gmi2_0.2mg"
+rde info "$WORK/gmi2.2mg" | grep -q "^Format: Apple II ProDOS 800K (2MG)" || fail "GMI2 not opened as 800mg"
+rde extract "$WORK/gmi2.2mg" BIG "$WORK/g.got" >/dev/null && cmp -s "$WORK/big.exp" "$WORK/g.got" || fail "GMI2: extract"
+rde add "$WORK/gmi2.2mg" "$WORK/h.txt" HELLO >/dev/null || fail "GMI2: add"
+outside "$WORK/gmi2_0.2mg" "$WORK/gmi2.2mg" || fail "GMI2: bytes outside the data range (incl. signature) changed"
+pass
+
 # --- data offset 128 (64 padding bytes after the header): data read from there,
 # written back there, padding kept
 mk2mg "$WORK/base.po" "$WORK/off128.2mg" doff=128

@@ -261,8 +261,9 @@ rde::DiskFormat FormatDetector::detectByContent(const std::vector<uint8_t>& data
     // .2mg: the Apple II 800K container. Its header fields (format, block
     // count, ranges) are checked by the loader so the error names the problem.
     if (ext == ".2mg") {
-        const bool magic = data.size() >= 4 && data[0] == '2' && data[1] == 'I' &&
-                           data[2] == 'M' && data[3] == 'G';
+        const bool magic = data.size() >= 4 &&
+                           ((data[0] == '2' && data[1] == 'I' && data[2] == 'M' && data[3] == 'G') ||
+                            (data[0] == 'G' && data[1] == 'M' && data[2] == 'I' && data[3] == '2'));
         return magic ? rde::DiskFormat::Apple800MG : rde::DiskFormat::Unknown;
     }
 

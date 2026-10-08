@@ -118,6 +118,8 @@ private:
     static constexpr uint8_t ACCESS_RENAME = AppleConstants::ProDOS::ACCESS_RENAME;
     static constexpr uint8_t ACCESS_DESTROY = AppleConstants::ProDOS::ACCESS_DESTROY;
     static constexpr uint8_t ACCESS_DEFAULT = AppleConstants::ProDOS::ACCESS_DEFAULT;
+    // version byte ProDOS 2.4.x writes in a new directory's header and entry
+    static constexpr uint8_t CREATE_DIR_VERSION = 0x24;
 
     // Directory entry structure
     struct DirectoryEntry {

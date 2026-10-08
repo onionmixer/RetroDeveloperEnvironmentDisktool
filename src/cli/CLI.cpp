@@ -82,6 +82,47 @@ std::string apple800KNameProblem(rde::DiskFormat format, const std::string& path
            "'): only that name is opened as this format again";
 }
 
+// The extension of a new image must not belong to another format: images are
+// recognised by extension first, so e.g. ProDOS-order data named .do would be
+// read in DOS order. .dsk / .img (shared, decided by content), no extension and
+// extensions no format claims are left alone. Returns the reason, or "".
+std::string outputNameProblem(rde::DiskFormat format, const std::string& path) {
+    if (std::string why = apple800KNameProblem(format, path); !why.empty()) {
+        return why;
+    }
+    const std::string ext = toLower(std::filesystem::path(path).extension().string());
+    if (ext.empty() || ext == ".dsk" || ext == ".img") {
+        return "";
+    }
+    rde::DiskFormat owner = rde::DiskFormat::Unknown;
+    for (rde::DiskFormat f : rde::DiskImageFactory::getSupportedFormats()) {
+        for (const std::string& e : rde::DiskImageFactory::getExtensions(f)) {
+            if (e == ext) {
+                if (f == format) {
+                    return "";
+                }
+                owner = f;
+            }
+        }
+    }
+    if (owner == rde::DiskFormat::Unknown) {
+        return "";
+    }
+    // Name the format the extension opens by default (.po: the 140K image)
+    if (const rde::DiskFormat byExt = rde::DiskImageFactory::getFormatFromExtension(ext);
+        byExt != rde::DiskFormat::Unknown) {
+        owner = byExt;
+    }
+    return std::string(rde::formatToString(format)) + " output named *" + ext + " would be opened as " +
+           rde::formatToString(owner) + "; use a matching extension";
+}
+
+// An output file that is the input image itself would destroy the image.
+bool isSameFile(const std::string& a, const std::string& b) {
+    std::error_code ec;
+    return std::filesystem::exists(b, ec) && std::filesystem::equivalent(a, b, ec) && !ec;
+}
+
 rde::FileSystemType fileSystemFromString(const std::string& str) {
     std::string s = toLower(str);
     if (s == "dos33" || s == "dos3.3") return rde::FileSystemType::DOS33;
@@ -344,10 +385,20 @@ std::vector<std::pair<uint32_t, uint32_t>> protectedLinearRanges(const rde::Disk
     return ranges;
 }
 
+// A subdirectory that points back at one of its ancestors on a corrupt disk
+// would recurse without end; no real volume nests this deep.
+constexpr int kMaxDirectoryDepth = 128;
+
 bool collectFileDigestsRecursive(rde::FileSystemHandler& handler,
                                  const std::string& path,
                                  std::unordered_map<std::string, rde::CLI::FileDigest>& out,
-                                 std::string& error) {
+                                 std::string& error,
+                                 int depth = 0) {
+    if (depth > kMaxDirectoryDepth) {
+        error = "directories nest deeper than " + std::to_string(kMaxDirectoryDepth) +
+                " levels at '" + path.substr(0, 80) + "...' (a directory loop?)";
+        return false;
+    }
     std::vector<rde::FileEntry> entries;
     try {
         entries = handler.listFiles(path);
@@ -359,7 +410,7 @@ bool collectFileDigestsRecursive(rde::FileSystemHandler& handler,
     for (const auto& e : entries) {
         std::string child = path.empty() ? e.name : (path + "/" + e.name);
         if (e.isDirectory) {
-            if (!collectFileDigestsRecursive(handler, child, out, error)) {
+            if (!collectFileDigestsRecursive(handler, child, out, error, depth + 1)) {
                 return false;
             }
             continue;
@@ -1532,6 +1583,23 @@ int CLI::cmdExtract(const std::vector<std::string>& args) {
             return 1;
         }
 
+        std::vector<std::string> outputs{outputPath};
+        if (modeAppleDouble) {
+            const std::filesystem::path opath = outputPath;
+            outputs.push_back((opath.parent_path() / ("._" + opath.filename().string())).string());
+        }
+        for (const auto& out : outputs) {
+            if (isSameFile(imagePath, out)) {
+                printError("Output '" + out + "' is the input image itself");
+                return 1;
+            }
+        }
+        for (const auto& out : outputs) {
+            if (std::filesystem::exists(out)) {
+                printWarning("Overwriting existing file: " + out);
+            }
+        }
+
         if (modeAppleDouble || modeMacBinary) {
             return extractMacintoshSpecial(disk, filename, outputPath,
                                            modeAppleDouble, modeMacBinary);
@@ -2270,7 +2338,7 @@ int CLI::cmdCreate(const std::vector<std::string>& args) {
         printError("XSA format is read-only and cannot be created");
         return 1;
     }
-    if (const std::string why = apple800KNameProblem(format, outputPath); !why.empty()) {
+    if (const std::string why = outputNameProblem(format, outputPath); !why.empty()) {
         printError(why);
         return 1;
     }
@@ -2398,6 +2466,11 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
     const std::string& outputPath = opts.getPositional(1);
     std::string formatStr = opts.getValue("format");
 
+    if (isSameFile(inputPath, outputPath)) {
+        printError("Output '" + outputPath + "' is the input image itself");
+        return 1;
+    }
+
     try {
 
         // Open input image
@@ -2436,7 +2509,7 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
             outputFormat = DiskFormat::Apple800PO;
         }
 
-        if (const std::string why = apple800KNameProblem(outputFormat, outputPath); !why.empty()) {
+        if (const std::string why = outputNameProblem(outputFormat, outputPath); !why.empty()) {
             printError(why);
             return 1;
         }
@@ -2490,6 +2563,10 @@ int CLI::cmdConvert(const std::vector<std::string>& args) {
                            : ".d13 holds 13-sector (DOS 3.2) disks only; this disk has " +
                                  std::to_string(geom.sectorsPerTrack) + " sectors per track");
             return 1;
+        }
+
+        if (std::filesystem::exists(outputPath)) {
+            printWarning("Overwriting existing file: " + outputPath);
         }
 
         std::unique_ptr<DiskImage> outputImage;

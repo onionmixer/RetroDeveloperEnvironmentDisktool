@@ -12,7 +12,7 @@ Geometry:
 File System: ProDOS
 Volume: /TUTORIAL
 Free Space: 136192 bytes
-Total Space: 138240 bytes
+Total Space: 139776 bytes
 
 BootDisk Detection:
   BootDisk: no

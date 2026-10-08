@@ -10,6 +10,9 @@
 # first entry of the second block); ProDOS uses these fields to find the
 # entry it updates. Checked with tests/tools/a2_prodos_ref.py check, plus the
 # exact block / number of each edge case computed here.
+# Header bytes $14-$1B, the header version and the parent entry's version /
+# access are written as ProDOS 2.4.3 CREATE writes them (measured in MAME
+# apple2cp: reserved 75 24 00 C3 27 0D 00 00, version $24, entry access $E3).
 # Volume names (create -n) follow the file name rules (2.1): 1-15 of A-Z,
 # 0-9, '.', starting with a letter; before the fix they were cut to 15 and
 # any character was kept.
@@ -39,6 +42,30 @@ h = v.block(e['key'])
 print(h[0x27] | h[0x28] << 8, h[0x29])
 EOF
 }
+# reserved <image.po>: every subdirectory matches what ProDOS 2.4.3 CREATE wrote in
+# MAME: header $20-$22 = 24 00 C3, $14-$1B = 75 24 00 C3 27 0D 00 00; its entry in
+# the parent: version $24, min_version 0, access $E3
+reserved() {
+  python3 -I -B - "$REF" "$1" <<'EOF'
+import sys
+sys.path.insert(0, sys.argv[1].rsplit('/', 1)[0]); import a2_prodos_ref as A
+data, _ = A.load(sys.argv[2]); v = A.Volume(data)
+n = 0
+for e in v.entries(2):
+    if e['storage'] == 0xD:
+        h = v.block(e['key'])
+        b = v.block(e['dir_block'])
+        o = next(4 + i * 0x27 for i in range(13)
+                 if b[4 + i * 0x27] >> 4 == 0xD and (b[4 + i * 0x27 + 0x11] | b[4 + i * 0x27 + 0x12] << 8) == e['key'])
+        got = (h[0x20:0x23], h[0x14:0x1C], b[o + 0x1C:o + 0x1F])
+        want = (bytes.fromhex('2400c3'), bytes.fromhex('752400c3270d0000'), bytes.fromhex('2400e3'))
+        if got != want:
+            sys.exit('%s: header %s reserved %s entry %s, want %s %s %s' % (
+                (e['path'],) + tuple(x.hex() for x in got) + tuple(x.hex() for x in want)))
+        n += 1
+sys.exit(0 if n else 'no subdirectory')
+EOF
+}
 echo x >"$WORK/x"
 
 run_case() {   # run_case <label> <create args...>
@@ -62,6 +89,7 @@ run_case() {   # run_case <label> <create args...>
   done
   pass
   rde validate "$img" | grep -q "0 error(s)" || fail "$n: validate"; pass
+  reserved "$img" || fail "$n: subdirectory header / entry differ from ProDOS CREATE"; pass
 }
 run_case p140 -f po
 run_case p800 -f 800po
@@ -71,6 +99,7 @@ rde mkdir "$WORK/p140.do" DOSORD >/dev/null || fail "mkdir on .do"
 rde convert "$WORK/p140.do" "$WORK/p140b.po" -f po >/dev/null || fail "convert .do -> .po"
 python3 -I -B "$REF" check "$WORK/p140b.po" >/dev/null || fail ".do mkdir: reference check"
 [[ "$(parent "$WORK/p140b.po" /DOSORD)" == "3 3" ]] || fail ".do mkdir parent = $(parent "$WORK/p140b.po" /DOSORD)"; pass
+reserved "$WORK/p140b.po" || fail ".do mkdir: header / entry differ from ProDOS CREATE"; pass
 
 # --- volume names
 for n in "1ABC" "MY VOL" "A_B" "ABCDEFGHIJKLMNOP" "A/B"; do

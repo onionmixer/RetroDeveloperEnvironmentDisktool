@@ -62,8 +62,9 @@ cmp -s "$WORK/s.po" "$WORK/m.po" || fail "-f PRODOS data"; pass
 refused "Unknown disk format: bogus"  "$WORK/n.2mg" convert "$WORK/a.po" "$WORK/n.2mg" -f bogus
 refused "Unknown disk format: 800pox" "$WORK/o.po"  convert "$WORK/a.po" "$WORK/o.po" -f 800pox
 pass
-# a wrong case of a real name is that name, not the extension's format
-refused "convert only to 800po or 800mg" "$WORK/p.2mg" convert "$WORK/a.po" "$WORK/p.2mg" -f PO
+# a wrong case of a real name is that name (ProDOS order, 140K), not the
+# extension's format: refused because .2mg belongs to another format
+refused "Apple II ProDOS Order output named \*.2mg" "$WORK/p.2mg" convert "$WORK/a.po" "$WORK/p.2mg" -f PO
 pass
 
 echo "PASS test_apple_800k_convert_names ($CHECKS checks)"

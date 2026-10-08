@@ -48,7 +48,12 @@ void AppleProDOS800MGImage::load(const std::filesystem::path& path) {
         throw ReadException("Failed to read file: " + path.string());
     }
 
-    if (raw.size() < HEADER_SIZE || raw[0] != '2' || raw[1] != 'I' || raw[2] != 'M' || raw[3] != 'G') {
+    // "GMI2": the signature byte-reversed, as Bernie ][ The Rescue writes it
+    // (other fields valid; MAME ap_dsk35.cpp accepts it too). Kept as found.
+    const bool magic = raw.size() >= HEADER_SIZE &&
+                       ((raw[0] == '2' && raw[1] == 'I' && raw[2] == 'M' && raw[3] == 'G') ||
+                        (raw[0] == 'G' && raw[1] == 'M' && raw[2] == 'I' && raw[3] == '2'));
+    if (!magic) {
         bad("missing \"2IMG\" header");
     }
     if (u16(raw, 0x08) != HEADER_SIZE) {

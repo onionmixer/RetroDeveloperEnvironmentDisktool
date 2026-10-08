@@ -56,7 +56,8 @@ images and Macintosh 800K disks:
   64, version > 1 or ranges outside the file are refused with the reason. Data length 0
   means 1600 × 512. Changing files rewrites only the data range, so the header, comment,
   creator data and any trailing bytes stay byte-identical. Flags bit 31 (locked) makes the
-  image write-protected. New `.2mg` files get creator `RDET`.
+  image write-protected. New `.2mg` files get creator `RDET`. The byte-reversed signature
+  `GMI2` (written by Bernie ][ The Rescue; MAME reads it too) is accepted and kept.
 
 ### MSX
 | Format | Extension | Description |
@@ -592,6 +593,12 @@ miss a fixed 4-and-4 bit is still read (as DOS does) and reported as a warning.
 On every platform, a sector that cannot be copied is reported as a warning and the
 exit code is **2** (the output image is still written).
 
+Output files (`convert`, `create`, `extract`): an output that is the input image itself is
+refused; a new image whose extension belongs to another format (e.g. `-f po` written as
+`*.do`, which would be read in DOS order) is refused — `.dsk`, `.img`, no extension and
+extensions no format uses are allowed; an existing file is overwritten with a warning
+(`Overwriting existing file: …`).
+
 Examples:
 ```bash
 # Convert Apple II DOS to ProDOS order
@@ -648,7 +655,12 @@ rdedisktool validate corrupted.po
 - Disk image structure integrity
 - File system metadata consistency
 - Sector/block allocation verification (DOS 3.3: every sector used by the catalog or a
-  file must be marked used in the VTOC bitmap)
+  file must be marked used in the VTOC bitmap; ProDOS: every block of every directory
+  file and every index, master and data block must be marked used, a block marked used
+  that nothing references is a warning, a block referenced twice is a warning)
+- Chain loops: a ProDOS directory or DOS 3.3 catalog / track-sector list whose link leads
+  back to a block or sector already read is an error (every command stops with
+  "... chain loops back to ..." instead of running forever)
 - Boot block integrity (ProDOS)
 - Human68k: the BPB total sector count must fit the image
 
@@ -1129,7 +1141,12 @@ A/I: Offset 0 2 bytes  Program length (little-endian)
 - Block 6: Volume bitmap (one block per 4096 blocks; bit = 1 means free)
 - Subdirectory support with linked directory blocks. A subdirectory header's
   `parent_pointer` is the directory block that holds its entry and
-  `parent_entry_number` is that entry's slot in the block + 1 (the header is entry 1)
+  `parent_entry_number` is that entry's slot in the block + 1 (the header is entry 1);
+  `mkdir` writes the header and the entry as ProDOS 2.4.3 `CREATE` does: header version
+  `$24`, access `$C3`, bytes `$14-$1B` = `$75, $24, $00, $C3, $27, $0D, $00, $00`; entry
+  version `$24`, access `$E3` — measured in MAME, real ProDOS refuses (`I/O ERROR`) to add
+  entries to a subdirectory whose header lacks them, and with a wrong parent entry it
+  updates some other file's entry when the directory grows
 - Three storage types for files:
   - **Seedling**: Files ≤ 512 bytes (1 data block)
   - **Sapling**: Files ≤ 128KB (1 index block + up to 256 data blocks)
